@@ -8,7 +8,6 @@ import {
   isManualCompactionTurn,
   itemKeyForOpenItem,
   manualCompactionOutcomeDeltas,
-  manualCompactionRequest,
   manualCompactionStartDeltas,
   MAX_TIMELINE_DELTA_BYTES,
   nextMessageIdAfterCheckpoint,
@@ -301,11 +300,7 @@ test("recognizes only BB's standalone built-in compact command", () => {
   );
 });
 
-test("constructs a steered OpenCode compaction request and a complete BB compaction turn", () => {
-  assert.deepEqual(manualCompactionRequest("ses_123", "msg_456"), {
-    path: "/api/session/ses_123/compact",
-    body: { id: "msg_456", delivery: "steer" },
-  });
+test("constructs a complete BB compaction turn", () => {
   assert.deepEqual(
     manualCompactionStartDeltas("request_1", "turn_1", "msg_456").map(
       (delta) => delta.kind,

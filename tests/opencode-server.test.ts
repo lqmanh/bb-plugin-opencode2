@@ -6,22 +6,80 @@ import test from "node:test";
 import { OpenCodeServer } from "./support/host-api.js";
 
 test("follows checkpoint cursors even when a page is shorter than the requested limit", async () => {
-  const paths: string[] = [];
+  const inputs: { limit?: number; order?: string; cursor?: string }[] = [];
   const server = new OpenCodeServer();
-  server.request = async (path: string) => {
-    paths.push(path);
-    return paths.length === 1
-      ? { data: [{ id: "msg-1", type: "user" }], cursor: { next: "next" } }
-      : { data: [{ id: "msg-2", type: "assistant" }], cursor: {} };
-  };
+  Object.assign(server, {
+    api: async () => ({
+      message: {
+        list: async (input: {
+          limit?: number;
+          order?: string;
+          cursor?: string;
+        }) => {
+          inputs.push(input);
+          return inputs.length === 1
+            ? {
+                data: [{ id: "msg-1", type: "user" }],
+                cursor: { next: "next" },
+              }
+            : {
+                data: [{ id: "msg-2", type: "assistant" }],
+                cursor: {},
+              };
+        },
+      },
+    }),
+  });
 
   assert.deepEqual(await server.listSessionMessageIds("session"), [
     { id: "msg-1", type: "user" },
     { id: "msg-2", type: "assistant" },
   ]);
-  assert.match(paths[1], /limit=200/);
-  assert.match(paths[1], /cursor=next/);
-  assert.doesNotMatch(paths[1], /order=/);
+  assert.equal(inputs[1].limit, 200);
+  assert.equal(inputs[1].cursor, "next");
+  assert.equal("order" in inputs[1], false);
+});
+
+test("rewinds with the SDK session revert methods", async () => {
+  const calls: string[] = [];
+  const server = new OpenCodeServer();
+  Object.assign(server, {
+    api: async () => ({
+      message: {
+        list: async () => ({
+          data: [
+            { id: "msg_u1", type: "user" },
+            { id: "msg_a1", type: "assistant" },
+            { id: "msg_u2", type: "user" },
+          ],
+          cursor: {},
+        }),
+      },
+      session: {
+        interrupt: async () => {
+          calls.push("interrupt");
+        },
+        revert: {
+          clear: async () => {
+            calls.push("clear");
+          },
+          stage: async (input: { messageID: string; files?: boolean }) => {
+            calls.push(`stage:${input.messageID}:${input.files}`);
+          },
+          commit: async () => {
+            calls.push("commit");
+          },
+        },
+      },
+    }),
+  });
+
+  await server.rewindSessionRetainingThrough("session", "msg_u1");
+  assert.deepEqual(calls, ["interrupt", "stage:msg_u2:true", "commit"]);
+
+  calls.length = 0;
+  await server.rewindSessionRetainingThrough("session", "msg_u2");
+  assert.deepEqual(calls, ["clear"]);
 });
 
 test("persists the BB thread session mapping for stateless rewinds", async (t) => {

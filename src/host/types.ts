@@ -1,5 +1,8 @@
+import type { OpenCodeClient } from "@opencode/client";
 import type { DynamicTool } from "@get-bb/plugin-sdk/provider-bridge";
 import type { DynamicToolsMcpProxy } from "./dynamic-tools-mcp.ts";
+
+export type OpenCodeApi = () => Promise<OpenCodeClient>;
 
 /**
  * OpenCode's beta API does not publish a complete event schema. Keep its
@@ -93,7 +96,14 @@ export function isSubagentTool(name: string): boolean {
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message) return message;
+    const tag = (error as { _tag?: unknown })._tag;
+    if (typeof tag === "string" && tag) return tag;
+  }
+  return String(error);
 }
 
 export function stringValue(value: unknown): string | undefined {

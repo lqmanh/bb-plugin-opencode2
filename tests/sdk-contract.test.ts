@@ -9,6 +9,8 @@ test("uses only public SDK and package-local imports", () => {
     allow: [
       /^react$/,
       /^@testing-library\/react$/,
+      /^@opencode\/client$/,
+      /^@opencode\/client\/service$/,
       /^@radix-ui\/react-slot$/,
       /^class-variance-authority$/,
       /^clsx$/,

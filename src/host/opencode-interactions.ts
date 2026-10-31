@@ -14,20 +14,17 @@ import {
   inputRecord,
   stringValue,
   type ActiveTurn,
+  type OpenCodeApi,
   type OpenCodePermissionReply,
   type OpenCodeRecord,
   type SessionState,
 } from "./types.ts";
 
 type RecordValue = OpenCodeRecord;
-type RequestOpenCode = (
-  path: string,
-  init?: RequestInit,
-) => Promise<RecordValue>;
 
 export class OpenCodeInteractions {
   constructor(
-    private readonly request: RequestOpenCode,
+    private readonly api: OpenCodeApi,
     private readonly emitTimeline: typeof emit = emit,
   ) {}
 
@@ -115,13 +112,12 @@ export class OpenCodeInteractions {
     requestId: string,
     decision: OpenCodePermissionReply,
   ) {
-    await this.request(
-      `/api/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}/reply`,
-      {
-        method: "POST",
-        body: JSON.stringify(permissionReplyBody(decision)),
-      },
-    );
+    const api = await this.api();
+    await api.permission.reply({
+      sessionID: sessionId,
+      requestID: requestId,
+      ...permissionReplyBody(decision),
+    });
   }
 
   private async questionForm(
@@ -132,12 +128,12 @@ export class OpenCodeInteractions {
     for (let attempt = 0; attempt < 150; attempt++) {
       if (session.active !== active || !active.opened.has(callId))
         return undefined;
-      const result = await this.request(
-        `/api/session/${encodeURIComponent(session.providerThreadId)}/form`,
-      ).catch(() => undefined);
-      const forms = (Array.isArray(result?.data) ? result.data : []).map(
-        inputRecord,
-      );
+      const result = await this.api()
+        .then((api) =>
+          api.session.form.list({ sessionID: session.providerThreadId }),
+        )
+        .catch(() => []);
+      const forms = result.map(inputRecord);
       const match = forms.find((form) => {
         const metadata = inputRecord(form.metadata);
         const tool = inputRecord(metadata.tool);
@@ -150,10 +146,14 @@ export class OpenCodeInteractions {
   }
 
   async cancelQuestionForm(session: SessionState, formId: string) {
-    await this.request(
-      `/api/session/${encodeURIComponent(session.providerThreadId)}/form/${encodeURIComponent(formId)}`,
-      { method: "DELETE" },
-    ).catch(() => {});
+    await this.api()
+      .then((api) =>
+        api.session.form.cancel({
+          sessionID: session.providerThreadId,
+          formID: formId,
+        }),
+      )
+      .catch(() => {});
   }
 
   private closeQuestion(
@@ -373,10 +373,12 @@ export class OpenCodeInteractions {
       summary.push(value);
     }
     try {
-      await this.request(
-        `/api/session/${encodeURIComponent(session.providerThreadId)}/form/${encodeURIComponent(formId)}/reply`,
-        { method: "POST", body: JSON.stringify({ answer }) },
-      );
+      const api = await this.api();
+      await api.session.form.reply({
+        sessionID: session.providerThreadId,
+        formID: formId,
+        answer,
+      });
     } catch (error) {
       this.closeQuestion(
         session,

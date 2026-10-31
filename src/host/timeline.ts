@@ -193,13 +193,6 @@ export function isManualCompactionTurn(input: RecordValue[]) {
   return isStandaloneBuiltinCompactCommand(input as never);
 }
 
-export function manualCompactionRequest(sessionId: string, messageId: string) {
-  return {
-    path: `/api/session/${encodeURIComponent(sessionId)}/compact`,
-    body: { id: messageId, delivery: "steer" as const },
-  };
-}
-
 export function manualCompactionStartDeltas(
   clientRequestId: string,
   providerTurnId: string,

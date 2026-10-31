@@ -3,9 +3,10 @@
 ## How the bridge works
 
 The plugin connects to OpenCode's single shared background service only when
-a thread needs it, and never stops it. Sharing the service matters because
-OpenCode stores session state there, and BB may resume a thread from another
-host worker.
+a thread needs it, and never stops it. Discovery, startup, and authentication
+use `@opencode/client/service`. Sharing the service matters because OpenCode
+stores session state there, and BB may resume a thread from another host
+worker.
 
 For BB dynamic tools, the plugin starts a local, session-specific MCP
 process. OpenCode sees the configured tools, while the plugin checks the
@@ -25,7 +26,7 @@ directory first.
 ```text
 src/
   server.ts            BB server entry: provider metadata, settings storage, sync to hosts
-  host.ts              Host entry: host RPC and the provider bridge (public test helpers too)
+  host.ts              Host entry: host RPC, provider bridge, and public test helpers
   app.tsx              Frontend entry: registers the settings slot
   app/                 Settings page
   components/, lib/    UI primitives used by the settings page
@@ -40,50 +41,50 @@ docs/                  Developer documentation
 Inside `src/host/`:
 
 - `provider-bridge.ts` validates and dispatches provider protocol requests.
-- `opencode-server.ts` owns the service connection, HTTP client, model
-  catalog, persistence, event stream, and turn reconciliation.
+- `opencode-server.ts` owns the service connection and version check, the
+  official `@opencode/client` instance, model catalog, persistence, event
+  stream, and turn reconciliation.
 - `opencode-event-router.ts` translates OpenCode events into BB deltas,
   including live shell output and subagent nesting.
 - `session-manager.ts` owns session setup, per-turn preparation (settings,
   permissions, agent, model), MCP registration, and shutdown.
 - `maintenance.ts` implements health, install, and update.
+- `opencode-version.ts` defines the minimum supported OpenCode version.
 - `dynamic-tools-mcp.ts` and `bridge-runtime.ts` expose BB dynamic tools to
   OpenCode and route their calls back.
 - `opencode-config.ts` maintains the global deny rule that keeps BB's tools out
   of OpenCode's own sessions.
-- `opencode-requests.ts`, `timeline.ts`, `tool-mapping.ts`, `prompt.ts`, and
-  `models.ts` contain the testable protocol mappings.
+- `opencode-requests.ts` holds permission rules, checkpoint math, environment
+  filtering, and skill roots.
+- `timeline.ts`, `tool-mapping.ts`, `prompt.ts`, and `models.ts` contain the
+  testable protocol mappings.
 
 ## Design decisions
 
 - **Native subagents are off by default** and enforced with a session `deny`
   rule. When the user enables them, they render as BB delegation rows.
-- **Permission modes are session rulesets.** OpenCode's `build` agent allows
-  everything, so BB encodes its modes as session rules (the last matching rule
-  wins). `auto` keeps OpenCode's agent rules and answers remaining asks with
-  `once`; `full` adds `*` → allow so nothing prompts. A denial is sent as a
-  reject with a message, so the agent continues instead of the turn aborting.
-- **BB tools are allowed by exact `<server>_<tool>` action name.** OpenCode
-  shares MCP servers per directory, not per session, so each session allows only
-  its own tools and hides the others.
-- **The OpenCode service is shared** and must never be stopped by the plugin.
-- **Events do not replay.** OpenCode's event stream is volatile, so the bridge
-  reconciles active turns against `GET /api/session/:id` after a reconnect and
-  every 30 seconds.
-- **Terminal execution events wait for this turn's `session.inbox.delivered`.**
-  Earlier work finishing must not end a new turn (this broke the turn after
-  `/compact`).
-- **Turn diffs are built from the turn's own patches**, because
-  `/api/session/:id/diff` stays empty without snapshots.
+- **Permission modes are session rulesets.** `auto` keeps OpenCode's agent
+  rules and answers remaining asks with `once`; `full` adds `*` → allow;
+  `accept-edits` allows reads, searches, edits, and selected non-mutating
+  tools, while other actions follow the catch-all ask rule.
+- **BB MCP servers are scoped per directory.** OpenCode shares MCP servers
+  across sessions in a directory, so session rules hide other threads' BB
+  tools and allow only this thread's `<server>_<tool>` actions.
+- **The OpenCode version is checked after connecting.** Passing a version
+  predicate to `Service.ensure` would stop and replace the shared service, so
+  the bridge verifies `server.info()` instead.
+- **Active turns are reconciled after reconnects and every 30 seconds.** The
+  bridge compares OpenCode's session state with the turn it started, so a
+  dropped event stream does not leave a turn running forever.
+- **Turn diffs come from the turn's own tool patches and file changes.**
 
 ## Known gaps
 
 - Child-session questions: a subagent's question closes without its
   `parentRef`. Cosmetic and rare.
-- Retry visibility and turn reconciliation are covered by unit tests only; a
-  scheduled retry and a dropped event stream were never reproduced against a
-  live service.
+- Turn reconciliation is covered by unit tests only; a dropped event stream
+  was never reproduced against a live service.
 - Unknown OpenCode events are dropped rather than forwarded as diagnostics.
 
-See [opencode-v2-api.md](opencode-v2-api.md) for the OpenCode routes and event
-shapes the bridge depends on.
+See [opencode-v2.md](opencode-v2.md) for the OpenCode behavior and
+event details the bridge depends on.

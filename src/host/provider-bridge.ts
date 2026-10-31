@@ -42,11 +42,7 @@ import {
   modelRefFromOptions,
   sameModelRef,
 } from "./models.ts";
-import {
-  dynamicMcpRemovalRequest,
-  sessionRenameRequest,
-  steerAcceptedDelta,
-} from "./opencode-requests.ts";
+import { steerAcceptedDelta } from "./opencode-requests.ts";
 import {
   installationRun,
   installationStatus,
@@ -66,7 +62,6 @@ import {
 } from "./session-manager.ts";
 import {
   isManualCompactionTurn,
-  manualCompactionRequest,
   manualCompactionStartDeltas,
 } from "./timeline.ts";
 import {
@@ -102,8 +97,8 @@ const PARAM_SCHEMAS = {
   "skills/configure": skillsConfigureParamsSchema,
 } as const;
 
-function providerSessionId(response: RecordValue): string {
-  const id = stringValue(response.data?.id);
+function providerSessionId(session: { id?: unknown }): string {
+  const id = stringValue(session.id);
   if (!id) throw new Error("OpenCode did not return a session ID");
   return id;
 }
@@ -237,20 +232,17 @@ async function handle(request: RecordValue) {
           ? null
           : new Set(modelSettings.enabledModels),
       );
-      const body: RecordValue = { location: { directory: params.cwd } };
-      if (selected) body.model = selected;
-      const result = await openCodeServer.request("/api/session", {
-        method: "POST",
-        body: JSON.stringify(body),
+      const api = await openCodeServer.api();
+      const result = await api.session.create({
+        location: { directory: String(params.cwd) },
+        ...(selected ? { model: selected } : {}),
       });
       const providerThreadId = providerSessionId(result);
       try {
         await configureSession(params, providerThreadId, modelSettings, false);
       } catch (error) {
-        await openCodeServer
-          .request(`/api/session/${encodeURIComponent(providerThreadId)}`, {
-            method: "DELETE",
-          })
+        await api.session
+          .remove({ sessionID: providerThreadId })
           .catch(() => {});
         throw error;
       }
@@ -291,6 +283,7 @@ async function handle(request: RecordValue) {
       return;
     }
     case "thread/fork": {
+      const api = await openCodeServer.api();
       const existing = sessions.get(params.threadId);
       const checkpointId = stringValue(params.sourceProviderCheckpointId);
       // BB reuses the same BB thread ID when rewinding (or editing a past
@@ -327,11 +320,8 @@ async function handle(request: RecordValue) {
       }
       if ((sameThreadRewind || statelessRewind) && checkpointId) {
         if (existing?.active) {
-          await openCodeServer
-            .request(
-              `/api/session/${encodeURIComponent(existing.providerThreadId)}/interrupt`,
-              { method: "POST" },
-            )
+          await api.session
+            .interrupt({ sessionID: existing.providerThreadId })
             .catch(() => {});
           openCodeServer.finish(existing, "interrupted");
         }
@@ -384,10 +374,10 @@ async function handle(request: RecordValue) {
         params.sourceProviderThreadId,
         checkpointId,
       );
-      const result = await openCodeServer.request(
-        `/api/session/${encodeURIComponent(params.sourceProviderThreadId)}/fork`,
-        { method: "POST", body: JSON.stringify(boundary) },
-      );
+      const result = await api.session.fork({
+        sessionID: params.sourceProviderThreadId,
+        ...boundary,
+      });
       const providerThreadId = providerSessionId(result);
       const modelSettings = await openCodeServer.readModelSettings(
         params.options?.providerOptions,
@@ -395,10 +385,8 @@ async function handle(request: RecordValue) {
       try {
         await configureSession(params, providerThreadId, modelSettings, true);
       } catch (error) {
-        await openCodeServer
-          .request(`/api/session/${encodeURIComponent(providerThreadId)}`, {
-            method: "DELETE",
-          })
+        await api.session
+          .remove({ sessionID: providerThreadId })
           .catch(() => {});
         throw error;
       }
@@ -411,16 +399,15 @@ async function handle(request: RecordValue) {
       sendResult(request.id, { providerThreadId, sessionRestorable: true });
       return;
     }
-    case "thread/name/set":
-      {
-        const rename = sessionRenameRequest(
-          params.providerThreadId,
-          params.title,
-        );
-        await openCodeServer.request(rename.path, rename.init);
-      }
+    case "thread/name/set": {
+      const api = await openCodeServer.api();
+      await api.session.update({
+        sessionID: params.providerThreadId,
+        title: params.title,
+      });
       sendResult(request.id, { ok: true });
       return;
+    }
     case "turn/start": {
       const session = sessions.get(params.threadId);
       if (!session) throw new Error("No active OpenCode session");
@@ -450,19 +437,19 @@ async function handle(request: RecordValue) {
           ),
         );
         sendResult(request.id, { threadId: params.threadId });
-        const compact = manualCompactionRequest(
-          session.providerThreadId,
-          messageId,
-        );
-        void openCodeServer
-          .request(compact.path, {
-            method: "POST",
-            body: JSON.stringify(compact.body),
-          })
-          .catch((error) => {
+        void (async () => {
+          try {
+            const api = await openCodeServer.api();
+            await api.session.compact({
+              sessionID: session.providerThreadId,
+              id: messageId,
+              delivery: "steer",
+            });
+          } catch (error) {
             if (session.active === active)
               openCodeServer.finish(session, "failed", errorMessage(error));
-          });
+          }
+        })();
         return;
       }
       emit(session.bbThreadId, [
@@ -501,16 +488,17 @@ async function handle(request: RecordValue) {
           nativeSkillNames: session.nativeSkillNames,
           skillFiles: configuredSkillFiles,
         }),
-        delivery: "steer",
+        delivery: "steer" as const,
       };
       void (async () => {
         try {
           await prepareTurn(session, params.options);
-          const result = await openCodeServer.request(
-            `/api/session/${encodeURIComponent(session.providerThreadId)}/prompt`,
-            { method: "POST", body: JSON.stringify(promptPayload) },
-          );
-          const id = stringValue(result?.data?.id);
+          const api = await openCodeServer.api();
+          const result = await api.session.prompt({
+            sessionID: session.providerThreadId,
+            ...promptPayload,
+          });
+          const id = stringValue(result.id);
           if (id && session.active === active) {
             active.checkpointId = id;
             active.promptIds?.add(id);
@@ -562,28 +550,24 @@ async function handle(request: RecordValue) {
         const promptId = `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
         // Register before sending: OpenCode may report delivery first.
         (active.promptIds ??= new Set()).add(promptId);
-        const result = await openCodeServer.request(
-          `/api/session/${encodeURIComponent(session.providerThreadId)}/prompt`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              id: promptId,
-              ...promptBody(params.input, {
-                configuredSkillNames,
-                disableSubagents: session.disableSubagents,
-                nativeSkillNames: session.nativeSkillNames,
-                skillFiles: configuredSkillFiles,
-              }),
-              delivery: "steer",
-            }),
-          },
-        );
+        const api = await openCodeServer.api();
+        const result = await api.session.prompt({
+          sessionID: session.providerThreadId,
+          id: promptId,
+          ...promptBody(params.input, {
+            configuredSkillNames,
+            disableSubagents: session.disableSubagents,
+            nativeSkillNames: session.nativeSkillNames,
+            skillFiles: configuredSkillFiles,
+          }),
+          delivery: "steer",
+        });
         if (session.active !== active) {
           throw new Error(
             "OpenCode turn ended before steered input was accepted",
           );
         }
-        const id = stringValue(result?.data?.id) ?? promptId;
+        const id = stringValue(result.id) ?? promptId;
         active.checkpointId = id;
         active.promptIds.add(id);
         active.promptDelivered = true;
@@ -602,12 +586,11 @@ async function handle(request: RecordValue) {
     case "thread/stop": {
       const session = sessions.get(params.threadId);
       if (session) {
-        await openCodeServer
-          .request(
-            `/api/session/${encodeURIComponent(session.providerThreadId)}/interrupt`,
-            { method: "POST" },
-          )
-          .catch(() => {});
+        const api = await openCodeServer.api().catch(() => undefined);
+        if (api)
+          await api.session
+            .interrupt({ sessionID: session.providerThreadId })
+            .catch(() => {});
         openCodeServer.finish(session, "interrupted");
       }
       sendResult(request.id, { ok: true });
@@ -616,12 +599,11 @@ async function handle(request: RecordValue) {
     case "thread/discard": {
       const session = sessions.get(params.threadId);
       if (session) {
-        await openCodeServer
-          .request(
-            `/api/session/${encodeURIComponent(session.providerThreadId)}`,
-            { method: "DELETE" },
-          )
-          .catch(() => {});
+        const api = await openCodeServer.api().catch(() => undefined);
+        if (api)
+          await api.session
+            .remove({ sessionID: session.providerThreadId })
+            .catch(() => {});
         await releaseDynamicTools(session, "The BB thread was discarded");
       } else if (
         typeof params.providerThreadId === "string" &&
@@ -633,24 +615,22 @@ async function handle(request: RecordValue) {
         const orphan = await openCodeServer.lookupMcpRegistration(
           params.providerThreadId,
         );
-        if (orphan) {
-          const removal = dynamicMcpRemovalRequest(
-            orphan.serverName,
-            orphan.cwd,
-          );
+        const api = await openCodeServer.api().catch(() => undefined);
+        if (orphan && api) {
           try {
-            await openCodeServer.request(removal.path, removal.init);
+            await api.experimental.mcp.remove({
+              server: orphan.serverName,
+              location: { directory: orphan.cwd },
+            });
             await openCodeServer.forgetMcpRegistration(params.providerThreadId);
           } catch {
             // Keep the registry entry so a later discard can retry.
           }
         }
-        await openCodeServer
-          .request(
-            `/api/session/${encodeURIComponent(params.providerThreadId)}`,
-            { method: "DELETE" },
-          )
-          .catch(() => {});
+        if (api)
+          await api.session
+            .remove({ sessionID: params.providerThreadId })
+            .catch(() => {});
       }
       sessions.delete(params.threadId);
       if (session) sessionsByProviderId.delete(session.providerThreadId);

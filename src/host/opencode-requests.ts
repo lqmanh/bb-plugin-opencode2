@@ -10,59 +10,13 @@ import type { OpenCodeRecord } from "./types.ts";
 
 type RecordValue = OpenCodeRecord;
 
-const BB_INSTRUCTIONS_ENTRY = "bb.provider.instructions";
-
-/**
- * Location-scoped OpenCode resources take a deep-object `location` query
- * parameter. A legacy `directory` query is silently ignored and resolves the
- * service's default location instead.
- */
-export function locationQuery(cwd: string) {
-  return `location[directory]=${encodeURIComponent(cwd)}`;
-}
+export const BB_INSTRUCTIONS_ENTRY = "bb.provider.instructions";
 
 export const DYNAMIC_MCP_SERVER_PREFIX = "bb_opencode2_";
 
 /** Per-session name of the MCP server that exposes BB dynamic tools. */
 export function dynamicMcpServerName(providerThreadId: string) {
   return `${DYNAMIC_MCP_SERVER_PREFIX}${createHash("sha256").update(providerThreadId).digest("hex").slice(0, 20)}`;
-}
-
-/** OpenCode v2 adds and removes runtime MCP servers under `experimental`. */
-export function dynamicMcpRegistrationRequest(
-  serverName: string,
-  cwd: string,
-  config: RecordValue,
-) {
-  return {
-    path: `/api/experimental/mcp/${encodeURIComponent(serverName)}?${locationQuery(cwd)}`,
-    init: { method: "PUT", body: JSON.stringify({ config }) },
-  };
-}
-
-export function dynamicMcpRemovalRequest(serverName: string, cwd: string) {
-  return {
-    path: `/api/experimental/mcp/${encodeURIComponent(serverName)}?${locationQuery(cwd)}`,
-    init: { method: "DELETE" },
-  };
-}
-
-/**
- * Session instruction entries are the documented beta mechanism for BB
- * instructions. The endpoint has no append/replace selector, so a BB
- * `replace` mode cannot be represented exactly. Empty instructions remove
- * the entry so a resumed session does not keep stale BB guidance.
- */
-export function sessionInstructionsRequest(
-  sessionId: string,
-  instructions: string,
-) {
-  const path = `/api/experimental/session/${encodeURIComponent(sessionId)}/instructions/entries/${BB_INSTRUCTIONS_ENTRY}`;
-  if (!instructions) return { path, init: { method: "DELETE" } };
-  return {
-    path,
-    init: { method: "PUT", body: JSON.stringify({ value: instructions }) },
-  };
 }
 
 export type PermissionRule = {
@@ -143,23 +97,6 @@ export function sessionPermissionRules(input: {
   return rules;
 }
 
-export function sessionPermissionsRequest(
-  sessionId: string,
-  permissions: PermissionRule[],
-) {
-  return {
-    path: `/api/session/${encodeURIComponent(sessionId)}`,
-    init: { method: "PATCH", body: JSON.stringify({ permissions }) },
-  };
-}
-
-export function sessionRenameRequest(sessionId: string, title: string) {
-  return {
-    path: `/api/session/${encodeURIComponent(sessionId)}`,
-    init: { method: "PATCH", body: JSON.stringify({ title }) },
-  };
-}
-
 /**
  * BB-spawned agents (e.g. Codex via its bridge child process) inherit the
  * host PATH, which BB augments with its own binary directory, so `bb` works
@@ -207,16 +144,6 @@ export function sessionEnvironmentVariables(input: {
     variables.PATH = entries.join(delimiter);
   }
   return variables;
-}
-
-export function sessionEnvironmentRequest(
-  sessionId: string,
-  variables: Record<string, string>,
-) {
-  return {
-    path: `/api/session/${encodeURIComponent(sessionId)}/environment`,
-    init: { method: "PUT", body: JSON.stringify({ variables }) },
-  };
 }
 
 export async function resolveBbBinDir(): Promise<string | undefined> {

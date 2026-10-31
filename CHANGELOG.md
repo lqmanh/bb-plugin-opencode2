@@ -3,6 +3,15 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- OpenCode API calls, event streaming, and service discovery and startup now
+  use the official OpenCode v2 SDK instead of hand-written HTTP and SSE code.
+- The minimum supported versions are now BB 0.48.1, BB Plugin SDK 0.6.104, and
+  OpenCode 2.2.5.
+
 ## [1.2.0] - 2026-10-26
 
 ### Changed

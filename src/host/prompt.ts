@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import type { SessionPromptInput } from "@opencode/client";
 import {
   dynamicToolSchema,
   type DynamicTool,
@@ -79,6 +80,9 @@ export function toolFailureError(
   return fallback;
 }
 
+type PromptFile = NonNullable<SessionPromptInput["files"]>[number];
+type PromptSkill = NonNullable<SessionPromptInput["skills"]>[number];
+
 export function promptBody(
   input: RecordValue[],
   opts?: {
@@ -87,9 +91,9 @@ export function promptBody(
     nativeSkillNames?: ReadonlySet<string>;
     skillFiles?: ReadonlyMap<string, string>;
   },
-) {
+): Pick<SessionPromptInput, "text" | "files" | "skills"> {
   const text: string[] = [];
-  const files: RecordValue[] = [];
+  const files: PromptFile[] = [];
   for (const part of input) {
     if (part.type === "text") text.push(part.text);
     if (part.type === "localFile" || part.type === "localImage") {
@@ -106,7 +110,7 @@ export function promptBody(
   // warning on that failure result instead.
   void opts?.disableSubagents;
   const body = text.join("\n");
-  const skills: RecordValue[] = [];
+  const skills: PromptSkill[] = [];
   let textOffset = 0;
   let sawText = false;
   for (const part of input) {

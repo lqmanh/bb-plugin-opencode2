@@ -5,12 +5,10 @@ A [BB](https://getbb.app) plugin that runs BB threads through an installed
 connection, model credentials, and its own tool execution. The plugin translates
 between OpenCode's v2 API and events and BB's provider bridge protocol.
 
-Verified against OpenCode 2.0.26–2.0.27 and BB 0.46 (Plugin SDK 0.6.37).
-
 ## Requirements
 
-- BB 0.41 or newer (developed and verified on 0.46)
-- OpenCode v2 2.0.26 or newer (`opencode2` on the host's `PATH`). BB can
+- BB 0.48.1 or newer
+- OpenCode v2 2.2.5 or newer (`opencode2` on the host's `PATH`). BB can
   install it (`npm install -g @opencode/cli`) or update it
   (`opencode2 upgrade`) from the provider settings.
 - At least one model provider connected in OpenCode: `opencode2 auth login`
@@ -108,8 +106,8 @@ mounts the settings UI in jsdom. To try a local checkout in BB, run
 `bb plugin install .` from the repository root.
 
 See [docs/architecture.md](docs/architecture.md) for the code layout and design
-decisions, and [docs/opencode-v2-api.md](docs/opencode-v2-api.md) for the
-OpenCode routes and events the bridge depends on.
+decisions, and [docs/opencode-v2.md](docs/opencode-v2.md) for the
+OpenCode behavior and event details the bridge depends on.
 
 ## License
 

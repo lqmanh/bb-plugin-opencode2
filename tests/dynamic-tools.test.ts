@@ -6,16 +6,13 @@ import { fileURLToPath } from "node:url";
 import {
   createDynamicToolCallRouter,
   DYNAMIC_TOOLS_MCP_ARG,
-  dynamicMcpRegistrationRequest,
   enabledDynamicTools,
   handleDynamicToolsMcpRequest,
   isSensitiveEnvironmentKey,
   parseOpenCodeServiceUrl,
   sameDynamicTools,
-  sessionEnvironmentRequest,
   sessionEnvironmentVariables,
   sessionFromParams,
-  sessionInstructionsRequest,
   startDynamicToolsMcpProxy,
 } from "./support/host-api.js";
 
@@ -55,25 +52,6 @@ test("filters disallowed BB dynamic tools", () => {
   );
 });
 
-test("registers the local MCP bridge on OpenCode v2's experimental route", () => {
-  const config = {
-    type: "local",
-    command: ["node", "bridge.mjs"],
-    codemode: false,
-  };
-  assert.deepEqual(
-    dynamicMcpRegistrationRequest(
-      "bb opencode2/test",
-      "/repo with spaces",
-      config,
-    ),
-    {
-      path: "/api/experimental/mcp/bb%20opencode2%2Ftest?location[directory]=%2Frepo%20with%20spaces",
-      init: { method: "PUT", body: JSON.stringify({ config }) },
-    },
-  );
-});
-
 test("reads session instructions from bridge execution options", () => {
   const session = sessionFromParams(
     {
@@ -94,24 +72,6 @@ test("reads session instructions from bridge execution options", () => {
   );
 
   assert.equal(session.instructions, "Use the repository conventions.");
-});
-
-test("uses the documented session-instructions entry instead of unsupported prompt fields", () => {
-  assert.deepEqual(
-    sessionInstructionsRequest("ses_123", "Use the repository conventions."),
-    {
-      path: "/api/experimental/session/ses_123/instructions/entries/bb.provider.instructions",
-      init: {
-        method: "PUT",
-        body: JSON.stringify({ value: "Use the repository conventions." }),
-      },
-    },
-  );
-  // Empty instructions remove a stale entry instead of leaving it behind.
-  assert.deepEqual(sessionInstructionsRequest("ses_123", ""), {
-    path: "/api/experimental/session/ses_123/instructions/entries/bb.provider.instructions",
-    init: { method: "DELETE" },
-  });
 });
 
 test("builds a codex-style session environment with bb on PATH", () => {
@@ -164,24 +124,6 @@ test("does not duplicate the bb directory already on PATH", () => {
     bbBinDir: "/bb/dist",
   });
   assert.equal(variables.PATH, "/bb/dist:/usr/bin");
-});
-
-test("uses the session environment endpoint with the full variable map", () => {
-  assert.deepEqual(
-    sessionEnvironmentRequest("ses_123", {
-      PATH: "/bb:/usr/bin",
-      HOME: "/Users/e",
-    }),
-    {
-      path: "/api/session/ses_123/environment",
-      init: {
-        method: "PUT",
-        body: JSON.stringify({
-          variables: { PATH: "/bb:/usr/bin", HOME: "/Users/e" },
-        }),
-      },
-    },
-  );
 });
 
 test("detects unchanged dynamic tool catalogs regardless of order", () => {

@@ -43,9 +43,9 @@ export function modelRefFromOptions(options: unknown): ModelRef | undefined {
 }
 
 /**
- * `POST /api/session/{id}/model` switches the model used by subsequent turns.
- * The prompt endpoint itself accepts no model, so per-turn model or reasoning
- * changes must go through this endpoint before prompting.
+ * OpenCode switches the model for subsequent turns through the session model
+ * API. The prompt endpoint itself accepts no model, so per-turn model or
+ * reasoning changes must be applied before prompting.
  */
 export function modelId(model: ModelRef): string {
   return `${model.providerID}/${model.id}`;
@@ -58,13 +58,6 @@ export function assertModelEnabled(
   if (model && enabledModels !== null && !enabledModels.has(modelId(model))) {
     throw new Error(`OpenCode model is disabled: ${modelId(model)}`);
   }
-}
-
-export function modelSwitchRequest(sessionId: string, model: ModelRef) {
-  return {
-    path: `/api/session/${encodeURIComponent(sessionId)}/model`,
-    init: { method: "POST", body: JSON.stringify({ model }) },
-  };
 }
 
 export function sameModelRef(

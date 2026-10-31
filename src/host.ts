@@ -10,15 +10,15 @@ import {
 } from "./settings-contract.ts";
 import {
   installationStatus,
-  MIN_OPENCODE_VERSION,
   OPENCODE_LOGIN_COMMAND,
   providerHealth,
 } from "./host/maintenance.ts";
 import { syncBbToolsRule } from "./host/opencode-config.ts";
 import { openCodeServer } from "./host/opencode-server.ts";
+import { MIN_OPENCODE_VERSION } from "./host/opencode-version.ts";
 import { shutdownBridge } from "./host/provider-bridge.ts";
 import { nativeSkillRoots } from "./host/opencode-requests.ts";
-import { sessions } from "./host/types.ts";
+import { errorMessage, sessions } from "./host/types.ts";
 
 export { createDynamicToolCallRouter } from "./host/bridge-runtime.ts";
 export {
@@ -33,7 +33,6 @@ export {
   modelCatalogEntry,
   resolveModelVariant,
   modelRefFromOptions,
-  modelSwitchRequest,
   sameModelRef,
   turnModelRef,
 } from "./host/models.ts";
@@ -47,19 +46,13 @@ export {
   usageDeltas,
 } from "./host/opencode-event-router.ts";
 export {
-  dynamicMcpRegistrationRequest,
-  dynamicMcpRemovalRequest,
   forkBoundaryRetainingThrough,
   isSensitiveEnvironmentKey,
   nativeSkillRoots,
   nextMessageIdAfterCheckpoint,
   revertTargetRetainingThrough,
-  sessionEnvironmentRequest,
   sessionEnvironmentVariables,
-  sessionInstructionsRequest,
   sessionPermissionRules,
-  sessionPermissionsRequest,
-  sessionRenameRequest,
   steerAcceptedDelta,
 } from "./host/opencode-requests.ts";
 export {
@@ -87,7 +80,6 @@ export {
   isManualCompactionTurn,
   itemKeyForOpenItem,
   manualCompactionOutcomeDeltas,
-  manualCompactionRequest,
   manualCompactionStartDeltas,
   MAX_TIMELINE_DELTA_BYTES,
   providerFailureDeltas,
@@ -183,7 +175,7 @@ export default experimental_defineHostEntry({
         })
         .catch((error) =>
           process.stderr.write(
-            `[opencode2] Could not update OpenCode's global config: ${error instanceof Error ? error.message : String(error)}\n`,
+            `[opencode2] Could not update OpenCode's global config: ${errorMessage(error)}\n`,
           ),
         );
       for (const session of sessions.values()) {

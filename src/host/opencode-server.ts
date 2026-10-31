@@ -1,9 +1,12 @@
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
-import { withoutBridgeRuntimeEnv } from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  OpenCode,
+  isConflictError,
+  isSessionBusyError,
+  type OpenCodeClient,
+} from "@opencode/client";
+import { Service } from "@opencode/client/service";
 import {
   DEFAULT_MODEL_SETTINGS,
   normalizeModelSettings,
@@ -12,11 +15,14 @@ import type { ModelSettings } from "../settings-contract.ts";
 import { modelCatalogEntry, type ModelCatalogEntry } from "./models.ts";
 import {
   forkBoundaryRetainingThrough,
-  locationQuery,
   revertTargetRetainingThrough,
   type CheckpointMessage,
 } from "./opencode-requests.ts";
 import { OpenCodeEventRouter } from "./opencode-event-router.ts";
+import {
+  MIN_OPENCODE_VERSION,
+  isSupportedVersion,
+} from "./opencode-version.ts";
 import { writeJsonFileAtomic } from "./persistence.ts";
 import {
   errorMessage,
@@ -46,6 +52,31 @@ const RECONCILE_SETTLE_MS = 5_000;
 const MODEL_CATALOG_COLD_RETRIES = 10;
 const MODEL_CATALOG_COLD_RETRY_MS = 300;
 
+function isBusyError(error: unknown) {
+  return (
+    isConflictError(error) ||
+    isSessionBusyError(error) ||
+    /409|busy/i.test(errorMessage(error))
+  );
+}
+
+const BUSY_RETRY_ATTEMPTS = 5;
+const BUSY_RETRY_BASE_DELAY_MS = 400;
+
+async function retryWhileBusy<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!isBusyError(error) || attempt === BUSY_RETRY_ATTEMPTS - 1)
+        throw error;
+      await new Promise((resolve) =>
+        setTimeout(resolve, BUSY_RETRY_BASE_DELAY_MS * (attempt + 1)),
+      );
+    }
+  }
+}
+
 export type OpenCodeModelCatalog = {
   models: RecordValue[];
   defaultId?: string;
@@ -74,14 +105,14 @@ export type SessionBridgeRegistration = {
 export function parseOpenCodeServiceUrl(output: string): string {
   const token = output.trim().split(/\s+/)[0];
   if (!token) {
-    throw new Error("`opencode2 service start` did not report a server URL");
+    throw new Error("OpenCode service did not report a server URL");
   }
 
   let url: URL;
   try {
     url = new URL(token);
   } catch {
-    throw new Error("`opencode2 service start` reported an invalid server URL");
+    throw new Error("OpenCode service reported an invalid server URL");
   }
 
   const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -95,16 +126,13 @@ export function parseOpenCodeServiceUrl(output: string): string {
 }
 
 export class OpenCodeServer {
-  private baseUrl?: string;
-  private password?: string;
+  private client?: OpenCodeClient;
   private starting?: Promise<void>;
   private dataDir?: string;
   private eventAbortController?: AbortController;
   private watchdog?: ReturnType<typeof setInterval>;
   private connectionGeneration = 0;
-  private readonly eventRouter = new OpenCodeEventRouter((path, init) =>
-    this.request(path, init),
-  );
+  private readonly eventRouter = new OpenCodeEventRouter(() => this.api());
 
   setDataDir(dataDir: string) {
     this.dataDir = dataDir;
@@ -358,7 +386,7 @@ export class OpenCodeServer {
   }
 
   async start() {
-    if (this.baseUrl) return;
+    if (this.client) return;
     if (this.starting) {
       await this.starting;
       return;
@@ -377,13 +405,36 @@ export class OpenCodeServer {
     // it instead of spawning a private server: per-worker servers would hold
     // disjoint session state, so sessions created on one worker could not be
     // resumed from another.
-    const status = await this.cli(["service", "start"]);
-    const url = parseOpenCodeServiceUrl(status);
-    await this.servicePassword();
+    const endpoint = await Service.ensure({
+      command: ["opencode2", "serve", "--service"],
+    });
+    const url = parseOpenCodeServiceUrl(endpoint.url);
     if (generation !== this.connectionGeneration) {
       throw new Error("OpenCode connection was stopped during startup");
     }
-    this.baseUrl = url;
+    const client = OpenCode.make({
+      baseUrl: url,
+      headers: Service.headers(endpoint) ?? {},
+      // Keep the API's previous request budget; streaming calls pass their
+      // own abort signal and are left alone.
+      fetch: (input, init) =>
+        fetch(input, {
+          ...init,
+          signal: init?.signal ?? AbortSignal.timeout(30_000),
+        }),
+    });
+    // Service.ensure's version predicate would stop and replace the shared
+    // service. Check after connecting instead, so an outdated installed CLI
+    // cannot make the plugin stop a service it cannot replace.
+    const info = await client.server.info();
+    if (!isSupportedVersion(info.version))
+      throw new Error(
+        `OpenCode ${info.version} is older than ${MIN_OPENCODE_VERSION}. Run \`opencode2 upgrade\`.`,
+      );
+    if (generation !== this.connectionGeneration) {
+      throw new Error("OpenCode connection was stopped during startup");
+    }
+    this.client = client;
     this.eventAbortController?.abort();
     this.eventAbortController = new AbortController();
     void this.consumeEvents(this.eventAbortController.signal);
@@ -396,66 +447,10 @@ export class OpenCodeServer {
     }
   }
 
-  private async cli(args: string[]): Promise<string> {
-    const { stdout } = await promisify(execFile)("opencode2", args, {
-      env: withoutBridgeRuntimeEnv(process.env),
-      timeout: 15_000,
-    });
-    return stdout;
-  }
-
-  private async servicePassword(): Promise<string> {
-    if (process.env.OPENCODE_SERVER_PASSWORD)
-      return process.env.OPENCODE_SERVER_PASSWORD;
-    if (this.password) return this.password;
-    const configHome =
-      process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
-    try {
-      const parsed: unknown = JSON.parse(
-        await readFile(join(configHome, "opencode", "service.json"), "utf8"),
-      );
-      const password = (parsed as Record<string, unknown> | null)?.password;
-      if (typeof password === "string" && password) {
-        this.password = password;
-        return password;
-      }
-    } catch {
-      // Fall through to `opencode2 pair`.
-    }
-    const pair = await this.cli(["pair"]);
-    const match = pair.match(/^Password\s+(.+?)\s*$/m);
-    if (!match) throw new Error("Could not read OpenCode service credentials");
-    this.password = match[1].trim();
-    return this.password;
-  }
-
-  private headers() {
-    const password = process.env.OPENCODE_SERVER_PASSWORD ?? this.password;
-    if (!password)
-      throw new Error("OpenCode service credentials are unavailable");
-    const username = process.env.OPENCODE_SERVER_USERNAME ?? "opencode";
-    return {
-      Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
-    };
-  }
-
-  async request(path: string, init: RequestInit = {}): Promise<RecordValue> {
+  async api(): Promise<OpenCodeClient> {
     await this.start();
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        ...this.headers(),
-        "content-type": "application/json",
-        ...(init.headers ?? {}),
-      },
-      signal: init.signal ?? AbortSignal.timeout(30_000),
-    });
-    if (!response.ok)
-      throw new Error(
-        `OpenCode API ${response.status}: ${await response.text()}`,
-      );
-    if (response.status === 204) return {};
-    return inputRecord(await response.json());
+    if (!this.client) throw new Error("OpenCode service is not connected");
+    return this.client;
   }
 
   private modelCatalogs = new Map<
@@ -476,7 +471,8 @@ export class OpenCodeServer {
     if (!fresh && cached && Date.now() - cached.at < MODEL_CATALOG_TTL_MS)
       return cached.result;
     const result = (async () => {
-      const query = locationQuery(cwd);
+      const api = await this.api();
+      const location = { directory: cwd };
       // A location OpenCode has not loaded yet answers with an empty list
       // for a few hundred milliseconds, so retry briefly before trusting it.
       let models: RecordValue[] = [];
@@ -485,7 +481,7 @@ export class OpenCodeServer {
           await new Promise((resolve) =>
             setTimeout(resolve, MODEL_CATALOG_COLD_RETRY_MS),
           );
-        const list = await this.request(`/api/model?${query}`);
+        const list = await api.model.list({ location });
         models = (Array.isArray(list.data) ? list.data : [])
           .map(inputRecord)
           .filter(
@@ -496,10 +492,10 @@ export class OpenCodeServer {
           );
         if (models.length > 0) break;
       }
-      const fallback = await this.request(`/api/model/default?${query}`).catch(
-        () => ({}),
-      );
-      const defaultModel = inputRecord(inputRecord(fallback).data);
+      const fallback = await api.model
+        .default({ location })
+        .catch(() => undefined);
+      const defaultModel = inputRecord(fallback?.data);
       const defaultId =
         stringValue(defaultModel.providerID) && stringValue(defaultModel.id)
           ? `${defaultModel.providerID}/${defaultModel.id}`
@@ -545,7 +541,8 @@ export class OpenCodeServer {
   async primaryAgents(
     cwd: string,
   ): Promise<{ id: string; description?: string }[]> {
-    const result = await this.request(`/api/agent?${locationQuery(cwd)}`);
+    const api = await this.api();
+    const result = await api.agent.list({ location: { directory: cwd } });
     return (Array.isArray(result.data) ? result.data : []).flatMap(
       (value: unknown) => {
         const agent = inputRecord(value);
@@ -560,7 +557,8 @@ export class OpenCodeServer {
 
   /** Skills OpenCode discovered for a workspace: ID and SKILL.md path. */
   async nativeSkills(cwd: string): Promise<{ id: string; path?: string }[]> {
-    const result = await this.request(`/api/skill?${locationQuery(cwd)}`);
+    const api = await this.api();
+    const result = await api.skill.list({ location: { directory: cwd } });
     return (Array.isArray(result.data) ? result.data : []).flatMap(
       (value: unknown) => {
         const skill = inputRecord(value);
@@ -582,12 +580,19 @@ export class OpenCodeServer {
     cwd: string,
     timeoutMs = MCP_CONNECT_TIMEOUT_MS,
   ): Promise<boolean> {
+    const api = await this.api().catch(() => undefined);
+    if (!api) {
+      process.stderr.write(
+        `[opencode2] BB tool server ${serverName} could not be checked: OpenCode service is unavailable\n`,
+      );
+      return false;
+    }
     const deadline = Date.now() + timeoutMs;
     let last = "unknown";
     while (Date.now() < deadline) {
-      const result = await this.request(`/api/mcp?${locationQuery(cwd)}`).catch(
-        (): OpenCodeRecord => ({}),
-      );
+      const result = await api.mcp
+        .list({ location: { directory: cwd } })
+        .catch((): OpenCodeRecord => ({}));
       const server = (Array.isArray(result.data) ? result.data : [])
         .map(inputRecord)
         .find((entry) => entry.name === serverName);
@@ -628,21 +633,20 @@ export class OpenCodeServer {
     this.reloadTimer = undefined;
     void (async () => {
       try {
+        const api = await this.api();
         const [permissions, forms, active] = await Promise.all([
-          this.request("/api/permission/request"),
-          this.request("/api/form"),
-          this.request("/api/session/active"),
+          api.permission.request.list(),
+          api.form.list(),
+          api.session.active(),
         ]);
         const busy =
           (Array.isArray(permissions.data) && permissions.data.length > 0) ||
           (Array.isArray(forms.data) && forms.data.length > 0) ||
-          Object.keys(inputRecord(active.data)).length > 0;
+          Object.keys(inputRecord(active)).length > 0;
         if (!busy) {
           // A location whose directory was deleted makes the reload report
           // 503, but every other location still reloads.
-          await this.request("/api/location/reload", { method: "POST" }).catch(
-            () => {},
-          );
+          await api.location.reload().catch(() => {});
           return;
         }
       } catch {
@@ -659,17 +663,7 @@ export class OpenCodeServer {
 
   async nativeSkillNames(cwd: string) {
     try {
-      const result = await this.request(`/api/skill?${locationQuery(cwd)}`);
-      return new Set<string>(
-        (Array.isArray(result.data) ? result.data : [])
-          .map((value: unknown) => {
-            const skill = inputRecord(value);
-            return stringValue(skill.id ?? skill.name);
-          })
-          .filter(
-            (name: string | undefined): name is string => name !== undefined,
-          ),
-      );
+      return new Set((await this.nativeSkills(cwd)).map((skill) => skill.id));
     } catch {
       return undefined;
     }
@@ -679,15 +673,15 @@ export class OpenCodeServer {
     const messages: CheckpointMessage[] = [];
     let cursor: string | undefined;
     const maxPages = 100;
+    const api = await this.api();
     for (let page = 0; page < maxPages; page++) {
       // OpenCode rejects combining a pagination cursor with order, so only
       // the first page carries order=asc; follow-ups send cursor alone.
-      const query = new URLSearchParams({ limit: "200" });
-      if (cursor) query.set("cursor", cursor);
-      else query.set("order", "asc");
-      const result = await this.request(
-        `/api/session/${encodeURIComponent(sessionId)}/message?${query}`,
-      );
+      const result = await api.message.list({
+        sessionID: sessionId,
+        limit: 200,
+        ...(cursor ? { cursor } : { order: "asc" as const }),
+      });
       const pageMessages = Array.isArray(result.data) ? result.data : [];
       // OpenCode always returns a `next` cursor; an empty page is the end.
       if (pageMessages.length === 0) break;
@@ -726,101 +720,45 @@ export class OpenCodeServer {
         `Could not list OpenCode messages for rewind: ${errorMessage(error)}`,
       );
     }
+    const api = await this.api();
     const target = revertTargetRetainingThrough(messages, checkpointId);
     if (target === undefined) {
-      await this.request(
-        `/api/session/${encodeURIComponent(sessionId)}/revert`,
-        {
-          method: "DELETE",
-        },
-      ).catch(() => {});
+      await api.session.revert.clear({ sessionID: sessionId }).catch(() => {});
       return;
     }
-    await this.request(
-      `/api/session/${encodeURIComponent(sessionId)}/interrupt`,
-      { method: "POST" },
-    ).catch(() => {});
+    await api.session.interrupt({ sessionID: sessionId }).catch(() => {});
     // The previous turn may still be draining after interrupt; retry staged
     // reverts that hit a busy session instead of failing edit/rewind outright.
-    let staged = false;
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        await this.request(
-          `/api/session/${encodeURIComponent(sessionId)}/revert/stage`,
-          {
-            method: "POST",
-            body: JSON.stringify({ messageID: target, files: true }),
-          },
-        );
-        staged = true;
-        break;
-      } catch (error) {
-        lastError = error;
-        if (!/409|busy/i.test(errorMessage(error)) || attempt === 4)
-          throw error;
-        await new Promise((resolve) =>
-          setTimeout(resolve, 400 * (attempt + 1)),
-        );
-      }
-    }
-    if (!staged) throw lastError;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        await this.request(
-          `/api/session/${encodeURIComponent(sessionId)}/revert/commit`,
-          { method: "POST" },
-        );
-        return;
-      } catch (error) {
-        if (!/409|busy/i.test(errorMessage(error)) || attempt === 4)
-          throw error;
-        await new Promise((resolve) =>
-          setTimeout(resolve, 400 * (attempt + 1)),
-        );
-      }
-    }
+    await retryWhileBusy(() =>
+      api.session.revert.stage({
+        sessionID: sessionId,
+        messageID: target,
+        files: true,
+      }),
+    );
+    await retryWhileBusy(() =>
+      api.session.revert.commit({ sessionID: sessionId }),
+    );
   }
 
   private async consumeEvents(signal: AbortSignal) {
     let connectedBefore = false;
-    while (this.baseUrl && !signal.aborted) {
+    while (this.client && !signal.aborted) {
       try {
-        const response = await fetch(`${this.baseUrl}/api/event`, {
-          headers: this.headers(),
-          signal,
-        });
-        if (!response.ok || !response.body)
-          throw new Error(
-            `OpenCode event stream returned HTTP ${response.status}`,
-          );
+        const api = await this.api();
         // The stream does not replay: anything that happened while it was
         // down is gone, including the end of a turn.
         if (connectedBefore) void this.reconcileActiveTurns();
         connectedBefore = true;
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const next = await reader.read();
-          if (next.done) break;
-          buffer += decoder.decode(next.value, { stream: true });
-          const frames = buffer.split("\n\n");
-          buffer = frames.pop() ?? "";
-          for (const frame of frames) {
-            const line = frame
-              .split("\n")
-              .find((value) => value.startsWith("data: "));
-            if (!line) continue;
-            try {
-              await this.handleEvent(JSON.parse(line.slice(6)));
-            } catch {
-              // Ignore malformed or unsupported provider events.
-            }
+        for await (const event of api.event.subscribe({ signal })) {
+          try {
+            await this.handleEvent(inputRecord(event));
+          } catch {
+            // Ignore malformed or unsupported provider events.
           }
         }
       } catch {
-        if (this.baseUrl && !signal.aborted) {
+        if (this.client && !signal.aborted) {
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
       }
@@ -847,18 +785,15 @@ export class OpenCodeServer {
     if (candidates.length === 0) return;
     this.reconciling = true;
     try {
-      const running = inputRecord(
-        (await this.request("/api/session/active")).data,
-      );
+      const api = await this.api();
+      const running = inputRecord(await api.session.active());
       for (const session of candidates) {
         const active = session.active;
         if (!active || session.providerThreadId in running) continue;
         const info = inputRecord(
-          (
-            await this.request(
-              `/api/session/${encodeURIComponent(session.providerThreadId)}`,
-            ).catch((): OpenCodeRecord => ({}))
-          ).data,
+          await api.session
+            .get({ sessionID: session.providerThreadId })
+            .catch((): OpenCodeRecord => ({})),
         );
         const idle = inputRecord(info.time).idle;
         if (
@@ -903,7 +838,7 @@ export class OpenCodeServer {
     // The background service is shared with the OpenCode app/CLI; never stop
     // it here. Just drop our reference so the event loop exits.
     this.connectionGeneration += 1;
-    this.baseUrl = undefined;
+    this.client = undefined;
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = undefined;
     this.eventAbortController?.abort();

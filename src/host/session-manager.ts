@@ -14,21 +14,16 @@ import {
   assertModelEnabled,
   modelId,
   modelRefFromOptions,
-  modelSwitchRequest,
   resolveModelVariant,
   sameModelRef,
   turnModelRef,
 } from "./models.ts";
 import {
-  dynamicMcpRegistrationRequest,
+  BB_INSTRUCTIONS_ENTRY,
   dynamicMcpServerName,
-  dynamicMcpRemovalRequest,
   resolveBbBinDir,
-  sessionEnvironmentRequest,
   sessionEnvironmentVariables,
-  sessionInstructionsRequest,
   sessionPermissionRules,
-  sessionPermissionsRequest,
 } from "./opencode-requests.ts";
 import { openCodeServer } from "./opencode-server.ts";
 import { enabledDynamicTools, sameDynamicTools } from "./prompt.ts";
@@ -153,12 +148,12 @@ async function installDynamicTools(session: SessionState) {
   session.dynamicToolProxy = proxy;
   try {
     // `codemode: false` in the proxy config exposes each BB tool directly.
-    const request = dynamicMcpRegistrationRequest(
-      proxy.serverName,
-      session.cwd,
-      proxy.config,
-    );
-    await openCodeServer.request(request.path, request.init);
+    const api = await openCodeServer.api();
+    await api.experimental.mcp.add({
+      server: proxy.serverName,
+      location: { directory: session.cwd },
+      config: proxy.config,
+    });
     // OpenCode starts the MCP child asynchronously, so a turn sent right
     // after setup would not see BB's tools. Wait until it can. This runs only
     // when the server is (re)registered, not on every turn.
@@ -183,9 +178,12 @@ export async function releaseDynamicTools(
   if (!proxy) return;
   session.dynamicToolProxy = undefined;
   proxy.close();
-  const request = dynamicMcpRemovalRequest(proxy.serverName, session.cwd);
   try {
-    await openCodeServer.request(request.path, request.init);
+    const api = await openCodeServer.api();
+    await api.experimental.mcp.remove({
+      server: proxy.serverName,
+      location: { directory: session.cwd },
+    });
     await openCodeServer.forgetMcpRegistration(session.providerThreadId);
   } catch {
     // Keep the registry entry so a later discard can retry the removal.
@@ -193,16 +191,23 @@ export async function releaseDynamicTools(
 }
 
 async function installSessionInstructions(session: SessionState) {
-  const request = sessionInstructionsRequest(
-    session.providerThreadId,
-    session.instructions,
-  );
-  try {
-    await openCodeServer.request(request.path, request.init);
-  } catch (error) {
-    // Removing an entry a new session never had reports a 404.
-    if (request.init.method !== "DELETE") throw error;
+  const api = await openCodeServer.api();
+  if (session.instructions) {
+    await api.experimental.session.instructions.entry.put({
+      sessionID: session.providerThreadId,
+      key: BB_INSTRUCTIONS_ENTRY,
+      value: session.instructions,
+    });
+    return;
   }
+  // Empty instructions remove any entry left on a resumed session. Removing
+  // an entry a new session never had reports a 404.
+  await api.experimental.session.instructions.entry
+    .remove({
+      sessionID: session.providerThreadId,
+      key: BB_INSTRUCTIONS_ENTRY,
+    })
+    .catch(() => {});
 }
 
 /**
@@ -225,8 +230,11 @@ export async function ensureSessionPermissions(
     session.permissionMode = permissionMode;
     return;
   }
-  const request = sessionPermissionsRequest(session.providerThreadId, rules);
-  await openCodeServer.request(request.path, request.init);
+  const api = await openCodeServer.api();
+  await api.session.update({
+    sessionID: session.providerThreadId,
+    permissions: rules,
+  });
   session.permissionMode = permissionMode;
   session.appliedPermissions = key;
 }
@@ -240,11 +248,11 @@ async function installSessionEnvironment(session: SessionState) {
       bridgeEnvVars: session.bridgeEnvVars,
       bbBinDir: await resolveBbBinDir(),
     });
-    const request = sessionEnvironmentRequest(
-      session.providerThreadId,
+    const api = await openCodeServer.api();
+    await api.session.environment({
+      sessionID: session.providerThreadId,
       variables,
-    );
-    await openCodeServer.request(request.path, request.init);
+    });
   } catch (error) {
     process.stderr.write(
       `[opencode2] Could not set OpenCode session environment: ${errorMessage(error)}\n`,
@@ -336,8 +344,11 @@ export async function ensureSessionModel(
   // BB levels the model lacks are not sent; compare what OpenCode receives.
   const resolved = resolveModelVariant(desired, entry);
   if (!force && sameModelRef(session.model, resolved)) return;
-  const request = modelSwitchRequest(session.providerThreadId, resolved);
-  await openCodeServer.request(request.path, request.init);
+  const api = await openCodeServer.api();
+  await api.session.switchModel({
+    sessionID: session.providerThreadId,
+    model: resolved,
+  });
   session.model = resolved;
 }
 
@@ -353,24 +364,30 @@ export async function shutdownSessions(reason: string): Promise<void> {
     if (!proxy) return [];
     session.dynamicToolProxy = undefined;
     proxy.close();
-    const request = dynamicMcpRemovalRequest(proxy.serverName, session.cwd);
     return [
       {
         providerThreadId: session.providerThreadId,
-        request,
+        serverName: proxy.serverName,
+        cwd: session.cwd,
       },
     ];
   });
 
-  const results = await Promise.allSettled(
-    removals.map(async ({ providerThreadId, request }) => {
-      await openCodeServer.request(request.path, {
-        ...request.init,
-        signal: AbortSignal.timeout(2_000),
-      });
-      return providerThreadId;
-    }),
-  );
+  const api =
+    removals.length > 0
+      ? await openCodeServer.api().catch(() => undefined)
+      : undefined;
+  const results = api
+    ? await Promise.allSettled(
+        removals.map(async ({ providerThreadId, serverName, cwd }) => {
+          await api.experimental.mcp.remove(
+            { server: serverName, location: { directory: cwd } },
+            { signal: AbortSignal.timeout(2_000) },
+          );
+          return providerThreadId;
+        }),
+      )
+    : [];
   const removedIds = results.flatMap((result) =>
     result.status === "fulfilled" ? [result.value] : [],
   );
@@ -390,15 +407,16 @@ export async function ensureSessionAgent(
 ) {
   if (!desired || session.agent === desired) return;
   try {
-    await openCodeServer.request(
-      `/api/session/${encodeURIComponent(session.providerThreadId)}/agent`,
-      { method: "POST", body: JSON.stringify({ agent: desired }) },
-    );
+    const api = await openCodeServer.api();
+    await api.session.switchAgent({
+      sessionID: session.providerThreadId,
+      agent: desired,
+    });
   } catch (error) {
     // A picked agent that no longer exists must not fail every turn.
     if (desired === DEFAULT_AGENT || desired === "plan") throw error;
     process.stderr.write(
-      `[opencode2] Could not switch to agent ${desired}: ${error instanceof Error ? error.message : String(error)}\n`,
+      `[opencode2] Could not switch to agent ${desired}: ${errorMessage(error)}\n`,
     );
     return;
   }

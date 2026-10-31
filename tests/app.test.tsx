@@ -46,9 +46,9 @@ describe("OpenCode settings", () => {
                 status: {
                   status: "ready" as const,
                   statusMessage: null,
-                  installedVersion: "2.0.27",
-                  latestVersion: "2.0.28",
-                  minimumSupportedVersion: "2.0.26",
+                  installedVersion: "2.2.5",
+                  latestVersion: "2.2.6",
+                  minimumSupportedVersion: "2.2.5",
                   loginCommand: "opencode2 auth login",
                   modelCount: 1,
                 },
@@ -60,8 +60,8 @@ describe("OpenCode settings", () => {
     );
     mountedSlots.push(slot);
 
-    expect(await slot.findByText(/Ready · OpenCode 2\.0\.27/)).toBeTruthy();
-    expect(slot.getByText(/OpenCode 2\.0\.28 is available/)).toBeTruthy();
+    expect(await slot.findByText(/Ready · OpenCode 2\.2\.5/)).toBeTruthy();
+    expect(slot.getByText(/OpenCode 2\.2\.6 is available/)).toBeTruthy();
 
     // Provider groups start collapsed; expanding shows the models.
     const group = await slot.findByRole("button", { name: /openai/ });

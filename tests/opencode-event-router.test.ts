@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { OpenCodeClient } from "@opencode/client";
 import { OpenCodeEventRouter } from "./support/host-api.js";
 import type { OpenCodeRecord, SessionState } from "../src/host/types.ts";
+
+const emptyApi = async () => ({}) as unknown as OpenCodeClient;
 
 test("translates current OpenCode v2 text, reasoning, tool, and terminal events", async () => {
   const emitted: OpenCodeRecord[] = [];
@@ -33,7 +36,7 @@ test("translates current OpenCode v2 text, reasoning, tool, and terminal events"
   };
   const sessionLookup = new Map([[session.providerThreadId, session]]);
   const router = new OpenCodeEventRouter(
-    async () => ({}),
+    emptyApi,
     (_threadId, deltas) => emitted.push(...deltas),
     sessionLookup,
   );
@@ -201,7 +204,7 @@ test("nests a native subagent's work under its delegation row", async () => {
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const router = new OpenCodeEventRouter(
-    async () => ({}),
+    emptyApi,
     (_threadId, deltas) => emitted.push(...deltas),
     new Map([[session.providerThreadId, session]]),
   );
@@ -301,7 +304,7 @@ test("emits the turn's file patches as turn.diff before the boundary", async () 
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const router = new OpenCodeEventRouter(
-    async () => ({}),
+    emptyApi,
     (_threadId, deltas) => emitted.push(...deltas),
     new Map([[session.providerThreadId, session]]),
   );
@@ -354,7 +357,7 @@ test("ignores terminal events from earlier work until the turn's prompt is deliv
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const router = new OpenCodeEventRouter(
-    async () => ({}),
+    emptyApi,
     (_threadId, deltas) => emitted.push(...deltas),
     new Map([[session.providerThreadId, session]]),
   );
@@ -400,7 +403,7 @@ test("shows a Code Mode execute as one code row without nested rows", async () =
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const router = new OpenCodeEventRouter(
-    async () => ({}),
+    emptyApi,
     (_threadId, deltas) => emitted.push(...deltas),
     new Map([[session.providerThreadId, session]]),
   );
@@ -463,11 +466,21 @@ test("a failed permission reply never escapes as an unhandled rejection", async 
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
   };
   let replied = false;
+  const api = async () => {
+    return {
+      permission: {
+        reply: async () => {
+          replied = true;
+          throw {
+            _tag: "PermissionNotFoundError",
+            message: "Permission request not found",
+          };
+        },
+      },
+    } as unknown as OpenCodeClient;
+  };
   const router = new OpenCodeEventRouter(
-    async () => {
-      replied = true;
-      throw new Error('OpenCode API 404: {"_tag":"PermissionNotFoundError"}');
-    },
+    api,
     () => {},
     new Map([[session.providerThreadId, session]]),
   );

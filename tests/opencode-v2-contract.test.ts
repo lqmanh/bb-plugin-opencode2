@@ -13,8 +13,6 @@ import {
   promptBody,
   resolveModelVariant,
   sessionPermissionRules,
-  sessionPermissionsRequest,
-  sessionRenameRequest,
   shellExitCode,
   workspacePath,
 } from "./support/host-api.js";
@@ -76,17 +74,6 @@ test("each session sees only its own BB tool server, and subagents are denied", 
       { action: "bb_opencode2_*", resource: "*", effect: "deny" },
     ],
   );
-});
-
-test("session updates use PATCH /api/session/:id", () => {
-  assert.deepEqual(sessionRenameRequest("ses_1", "New title"), {
-    path: "/api/session/ses_1",
-    init: { method: "PATCH", body: JSON.stringify({ title: "New title" }) },
-  });
-  assert.deepEqual(sessionPermissionsRequest("ses_1", []), {
-    path: "/api/session/ses_1",
-    init: { method: "PATCH", body: JSON.stringify({ permissions: [] }) },
-  });
 });
 
 test("permission replies send `decision`, with a message when rejecting", () => {

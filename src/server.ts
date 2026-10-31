@@ -10,6 +10,7 @@ import {
   type ModelSummary,
 } from "./settings-contract.ts";
 import { normalizeModelSettings } from "./model-settings.ts";
+import { errorMessage } from "./host/types.ts";
 
 const PROVIDER_ID = "opencode2";
 const SETTINGS_KEY = "model-settings";
@@ -104,7 +105,7 @@ export default async function plugin(bb: BbPluginApi) {
           return {
             hostId: item.id,
             hostName: item.name,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           };
         }
       }),

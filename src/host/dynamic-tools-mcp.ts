@@ -1,11 +1,13 @@
 import { createServer, createConnection, type Socket } from "node:net";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
+import type { ExperimentalMcpAddInput } from "@opencode/client";
 import {
   dynamicToolSchema,
   experimental_buildBridgeToolCallContent as buildBridgeToolCallContent,
   type DynamicTool,
 } from "@get-bb/plugin-sdk/provider-bridge";
+import { errorMessage } from "./types.ts";
 
 export const DYNAMIC_TOOLS_MCP_ARG = "--opencode2-bb-tools-mcp";
 
@@ -46,9 +48,14 @@ type ProxyRequest = {
 type ProxyResponse =
   { ok: true; result: DynamicToolCallResult } | { ok: false; error: string };
 
+type LocalMcpConfig = Extract<
+  ExperimentalMcpAddInput["config"],
+  { type: "local" }
+>;
+
 export type DynamicToolsMcpProxy = {
   readonly serverName: string;
-  readonly config: RecordValue;
+  readonly config: LocalMcpConfig;
   close(): void;
 };
 
@@ -416,8 +423,4 @@ function record(value: unknown): RecordValue {
 
 function isRecord(value: unknown): value is RecordValue {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

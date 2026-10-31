@@ -2,7 +2,7 @@ import { experimental_COMPACTION_PRESENTATION as compactionPresentation } from "
 import { dynamicToolCallRouter, emit } from "./bridge-runtime.ts";
 import { OpenCodeInteractions } from "./opencode-interactions.ts";
 import { toolFailureError } from "./prompt.ts";
-import { dynamicMcpServerName, locationQuery } from "./opencode-requests.ts";
+import { dynamicMcpServerName } from "./opencode-requests.ts";
 import {
   boundedTimelineText,
   itemKey,
@@ -26,6 +26,7 @@ import {
   sessionsByProviderId,
   stringValue,
   type ActiveTurn,
+  type OpenCodeApi,
   type OpenCodeRecord,
   type SessionState,
 } from "./types.ts";
@@ -34,11 +35,6 @@ type RecordValue = OpenCodeRecord;
 
 const SHELL_OUTPUT_POLL_MS = 400;
 const SHELL_OUTPUT_CHUNK_BYTES = 32 * 1024;
-
-type RequestOpenCode = (
-  path: string,
-  init?: RequestInit,
-) => Promise<RecordValue>;
 
 /**
  * OpenCode v2 reports a shell tool's exit status as `metadata.exit` on
@@ -165,7 +161,7 @@ export class OpenCodeEventRouter {
   private readonly interactions: OpenCodeInteractions;
   private readonly emitTimeline: typeof emit;
   private readonly sessionLookup: ReadonlyMap<string, SessionState>;
-  private readonly request: RequestOpenCode;
+  private readonly api: OpenCodeApi;
   /** Native subagent sessions, routed into their parent BB turn. */
   private readonly childSessions = new Map<
     string,
@@ -177,13 +173,13 @@ export class OpenCodeEventRouter {
   private childParentRef?: string;
 
   constructor(
-    request: RequestOpenCode,
+    api: OpenCodeApi,
     emitTimeline: typeof emit = emit,
     sessionLookup: ReadonlyMap<string, SessionState> = sessionsByProviderId,
   ) {
-    this.request = request;
+    this.api = api;
     this.emitTimeline = emitTimeline;
-    this.interactions = new OpenCodeInteractions(request, this.emit);
+    this.interactions = new OpenCodeInteractions(api, this.emit);
     this.sessionLookup = sessionLookup;
   }
 
@@ -720,8 +716,13 @@ export class OpenCodeEventRouter {
       let cursor = 0;
       while (!poll.stopped && session.active === active) {
         try {
-          const result = await this.request(
-            `/api/shell/${encodeURIComponent(shellId)}/output?${locationQuery(session.cwd)}&cursor=${cursor}`,
+          const api = await this.api();
+          const result = await api.shell.output(
+            {
+              id: shellId,
+              location: { directory: session.cwd },
+              cursor,
+            },
             { signal: active.abortController.signal },
           );
           const output = inputRecord(result.data);

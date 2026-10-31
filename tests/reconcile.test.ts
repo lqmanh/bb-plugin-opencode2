@@ -25,10 +25,12 @@ test("settles turns OpenCode finished while the event stream was down", async ()
     ses_recent: { outcome: "succeeded", time: { idle: now - 1_000 } },
   };
   Object.assign(server, {
-    request: async (path: string) => {
-      if (path === "/api/session/active") return { data: { ses_running: {} } };
-      return { data: info[decodeURIComponent(path.split("/").pop()!)] };
-    },
+    api: async () => ({
+      session: {
+        active: async () => ({ ses_running: {} }),
+        get: async ({ sessionID }: { sessionID: string }) => info[sessionID],
+      },
+    }),
     finish: (
       session: { providerThreadId: string; active?: unknown },
       status: string,
@@ -65,9 +67,9 @@ test("leaves young turns alone", async () => {
   const server = new OpenCodeServer();
   let requested = false;
   Object.assign(server, {
-    request: async () => {
+    api: async () => {
       requested = true;
-      return { data: {} };
+      return {};
     },
   });
   sessions.clear();

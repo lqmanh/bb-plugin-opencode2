@@ -13,12 +13,14 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import type { ModelSettings } from "../settings-contract.ts";
 import { openCodeServer } from "./opencode-server.ts";
+import {
+  MIN_OPENCODE_VERSION,
+  isSupportedVersion,
+} from "./opencode-version.ts";
 import { errorMessage } from "./types.ts";
 
 export const OPENCODE_EXECUTABLE = "opencode2";
 export const OPENCODE_NPM_PACKAGE = "@opencode/cli";
-/** The oldest OpenCode whose API this bridge was verified against. */
-export const MIN_OPENCODE_VERSION = "2.0.26";
 export const OPENCODE_LOGIN_COMMAND = "opencode2 auth login";
 
 const LATEST_VERSION_TTL_MS = 60 * 60 * 1000;
@@ -35,10 +37,6 @@ async function latestVersion(checkUpdates: boolean) {
   const value = await npmLatestVersion(OPENCODE_NPM_PACKAGE).catch(() => null);
   latestVersionCache = { at: Date.now(), value };
   return value;
-}
-
-export function isSupportedVersion(version: string) {
-  return compareVersions(version, MIN_OPENCODE_VERSION) >= 0;
 }
 
 export async function installationStatus(
