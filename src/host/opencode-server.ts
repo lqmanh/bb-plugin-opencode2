@@ -41,7 +41,6 @@ const SESSION_REGISTRY_FILE = "opencode2-session-registry.json";
 
 const MODEL_CATALOG_TTL_MS = 60_000;
 const MCP_CONNECT_TIMEOUT_MS = 10_000;
-const MCP_CONNECT_POLL_MS = 150;
 const MCP_SETTLE_MS = 1_000;
 const CONFIG_RELOAD_RETRY_MS = 30_000;
 // Give up after a day of continuous activity; a service restart applies it.
@@ -178,6 +177,10 @@ export class OpenCodeServer {
   // worker owns the thread, or this worker restarted since setup). Entries
   // persist to the host data dir; a failed DELETE keeps its entry for retry.
   private mcpRegistry = new Map<string, McpBridgeRegistration>();
+  private readonly mcpWaiters = new Map<
+    string,
+    Set<{ check(): Promise<void> }>
+  >();
   private mcpRegistryLoaded = false;
   private mcpRegistryOperation: Promise<void> = Promise.resolve();
 
@@ -587,37 +590,64 @@ export class OpenCodeServer {
       );
       return false;
     }
-    const deadline = Date.now() + timeoutMs;
-    let last = "unknown";
-    while (Date.now() < deadline) {
-      const result = await api.mcp
-        .list({ location: { directory: cwd } })
-        .catch((): OpenCodeRecord => ({}));
-      const server = (Array.isArray(result.data) ? result.data : [])
-        .map(inputRecord)
-        .find((entry) => entry.name === serverName);
-      const status = inputRecord(server?.status);
-      last = stringValue(status.status) ?? "missing";
-      if (last === "connected") {
-        // OpenCode lists the server's tools before it reports "connected",
-        // but refreshes the tool set a session step sees a few hundred
-        // milliseconds later, with no event to wait on. Measured under
-        // 500 ms on OpenCode 2.0.27.
-        await new Promise((resolve) => setTimeout(resolve, MCP_SETTLE_MS));
-        return true;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let last = "unknown";
+      let waiters = this.mcpWaiters.get(serverName);
+      if (!waiters) {
+        waiters = new Set();
+        this.mcpWaiters.set(serverName, waiters);
       }
-      if (last === "failed") {
+      const cleanup = () => {
+        waiters.delete(waiter);
+        if (waiters.size === 0) this.mcpWaiters.delete(serverName);
+      };
+      const finish = async (status: "connected" | "failed", error?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        if (status === "connected") {
+          // OpenCode lists the server's tools before it reports "connected",
+          // but refreshes the tool set a session step sees a few hundred
+          // milliseconds later, with no event to wait on. Measured under
+          // 500 ms on OpenCode 2.0.27.
+          await new Promise((settle) => setTimeout(settle, MCP_SETTLE_MS));
+          resolve(true);
+          return;
+        }
         process.stderr.write(
-          `[opencode2] BB tool server ${serverName} failed to start: ${stringValue(status.error) ?? "unknown error"}\n`,
+          `[opencode2] BB tool server ${serverName} failed to start: ${error ?? "unknown error"}\n`,
         );
-        return false;
-      }
-      await new Promise((resolve) => setTimeout(resolve, MCP_CONNECT_POLL_MS));
-    }
-    process.stderr.write(
-      `[opencode2] BB tool server ${serverName} did not connect within ${timeoutMs} ms (last status: ${last})\n`,
-    );
-    return false;
+        resolve(false);
+      };
+      const check = async () => {
+        if (settled) return;
+        const result = await api.mcp
+          .list({ location: { directory: cwd } })
+          .catch((): OpenCodeRecord => ({}));
+        const server = (Array.isArray(result.data) ? result.data : [])
+          .map(inputRecord)
+          .find((entry) => entry.name === serverName);
+        const status = inputRecord(server?.status);
+        last = stringValue(status.status) ?? "missing";
+        if (last === "connected") void finish("connected");
+        else if (last === "failed")
+          void finish("failed", stringValue(status.error));
+      };
+      const waiter = { check };
+      waiters.add(waiter);
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        process.stderr.write(
+          `[opencode2] BB tool server ${serverName} did not connect within ${timeoutMs} ms (last status: ${last})\n`,
+        );
+        resolve(false);
+      }, timeoutMs);
+      void check();
+    });
   }
 
   private reloadTimer?: ReturnType<typeof setTimeout>;
@@ -804,13 +834,13 @@ export class OpenCodeServer {
         )
           continue;
         if (info.outcome === "failed")
-          this.finish(
+          await this.finish(
             session,
             "failed",
             "OpenCode reported this turn failed while BB was disconnected from its event stream",
           );
         else
-          this.finish(
+          await this.finish(
             session,
             info.outcome === "interrupted" ? "interrupted" : "completed",
           );
@@ -823,6 +853,12 @@ export class OpenCodeServer {
   }
 
   async handleEvent(event: RecordValue): Promise<void> {
+    if (event.type === "mcp.status.changed") {
+      const server = stringValue(inputRecord(event.data).server) ?? "";
+      const waiters = this.mcpWaiters.get(server);
+      if (waiters)
+        await Promise.all([...waiters].map((waiter) => waiter.check()));
+    }
     await this.eventRouter.handleEvent(event);
   }
 
@@ -830,8 +866,8 @@ export class OpenCodeServer {
     session: SessionState,
     status: "completed" | "interrupted" | "failed",
     error?: string,
-  ): void {
-    this.eventRouter.finish(session, status, error);
+  ): Promise<void> {
+    return this.eventRouter.finish(session, status, error);
   }
 
   async stop() {

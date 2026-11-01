@@ -11,23 +11,18 @@ afterEach(() => {
 });
 
 describe("OpenCode settings", () => {
-  it("loads models and persists provider changes", async () => {
+  it("loads models and persists model selection changes", async () => {
     const app = await loadPluginApp(() => import("../src/app.tsx"));
     const registration = app.settingsSections[0];
     expect(registration?.id).toBe("models");
 
-    const saveSettings = vi.fn(async (settings) => settings);
+    const saveModelSelection = vi.fn(async (settings) => settings);
     const slot = renderSlot<{}, typeof opencodeSettingsRpcContract>(
       registration!,
       {},
       {
         rpc: {
-          getSettings: async () => ({
-            providerEnabled: true,
-            enabledModels: null,
-            disableSubagents: true,
-            hideBbToolsOutsideBb: true,
-          }),
+          getModelSelection: async () => ({ enabledModels: null }),
           listModels: async () => ({
             models: [
               {
@@ -37,7 +32,7 @@ describe("OpenCode settings", () => {
               },
             ],
           }),
-          saveSettings,
+          saveModelSelection,
           getStatus: async () => ({
             hosts: [
               {
@@ -69,29 +64,17 @@ describe("OpenCode settings", () => {
     fireEvent.click(group);
     expect(await slot.findByText("GPT-5")).toBeTruthy();
 
-    fireEvent.click(
-      slot.getByRole("switch", { name: "Allow OpenCode subagents" }),
-    );
+    const modelSwitch = await slot.findByRole("switch", {
+      name: "Enable GPT-5 from openai",
+    });
+    fireEvent.click(modelSwitch);
     await waitFor(() => {
-      expect(saveSettings).toHaveBeenCalledWith({
-        providerEnabled: true,
-        enabledModels: null,
-        disableSubagents: false,
-        hideBbToolsOutsideBb: true,
-      });
+      expect(saveModelSelection).toHaveBeenCalledWith({ enabledModels: [] });
     });
 
-    fireEvent.click(
-      slot.getByRole("switch", { name: "Enable OpenCode v2 provider" }),
-    );
-
+    fireEvent.click(modelSwitch);
     await waitFor(() => {
-      expect(saveSettings).toHaveBeenCalledWith({
-        providerEnabled: false,
-        enabledModels: null,
-        disableSubagents: false,
-        hideBbToolsOutsideBb: true,
-      });
+      expect(saveModelSelection).toHaveBeenCalledWith({ enabledModels: null });
     });
   });
 });

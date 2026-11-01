@@ -22,11 +22,32 @@ import {
 
 type RecordValue = OpenCodeRecord;
 
+const QUESTION_WAIT_TIMEOUT_MS = 60_000;
+
 export class OpenCodeInteractions {
+  private readonly questionWaiters = new Map<
+    string,
+    {
+      session: SessionState;
+      active: ActiveTurn;
+      resolve(form: RecordValue | undefined): void;
+    }
+  >();
+  private readonly earlyQuestionForms = new Map<string, RecordValue>();
+
   constructor(
     private readonly api: OpenCodeApi,
     private readonly emitTimeline: typeof emit = emit,
   ) {}
+
+  private questionKey(sessionId: string, callId: string) {
+    return `${sessionId}:${callId}`;
+  }
+
+  private questionCallId(form: RecordValue) {
+    const metadata = inputRecord(form.metadata);
+    return stringValue(inputRecord(metadata.tool).id);
+  }
 
   /**
    * Never rejects: a reply can 404 when the request was already answered
@@ -120,29 +141,60 @@ export class OpenCodeInteractions {
     });
   }
 
-  private async questionForm(
+  /** Route a `form.created` event to the question tool that raised it. */
+  handleCreatedForm(session: SessionState, form: RecordValue) {
+    const callId = this.questionCallId(form);
+    if (!callId) return;
+    const key = this.questionKey(session.providerThreadId, callId);
+    const waiter = this.questionWaiters.get(key);
+    if (!waiter) {
+      this.earlyQuestionForms.set(key, form);
+      return;
+    }
+    this.questionWaiters.delete(key);
+    waiter.resolve(form);
+  }
+
+  cancelQuestionWaiters(session: SessionState, active: ActiveTurn) {
+    for (const [key, waiter] of this.questionWaiters) {
+      if (
+        waiter.session.providerThreadId !== session.providerThreadId ||
+        waiter.active !== active
+      )
+        continue;
+      this.questionWaiters.delete(key);
+      waiter.resolve(undefined);
+    }
+    const prefix = `${session.providerThreadId}:`;
+    for (const key of this.earlyQuestionForms.keys())
+      if (key.startsWith(prefix)) this.earlyQuestionForms.delete(key);
+  }
+
+  private waitForQuestionForm(
     session: SessionState,
     active: ActiveTurn,
     callId: string,
   ): Promise<RecordValue | undefined> {
-    for (let attempt = 0; attempt < 150; attempt++) {
-      if (session.active !== active || !active.opened.has(callId))
-        return undefined;
-      const result = await this.api()
-        .then((api) =>
-          api.session.form.list({ sessionID: session.providerThreadId }),
-        )
-        .catch(() => []);
-      const forms = result.map(inputRecord);
-      const match = forms.find((form) => {
-        const metadata = inputRecord(form.metadata);
-        const tool = inputRecord(metadata.tool);
-        return tool.id === callId;
-      });
-      if (match) return match;
-      await new Promise((resolve) => setTimeout(resolve, 400));
+    const key = this.questionKey(session.providerThreadId, callId);
+    const early = this.earlyQuestionForms.get(key);
+    if (early) {
+      this.earlyQuestionForms.delete(key);
+      return Promise.resolve(early);
     }
-    return undefined;
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.questionWaiters.delete(key);
+        resolve(undefined);
+      }, QUESTION_WAIT_TIMEOUT_MS);
+      this.questionWaiters.set(key, {
+        session,
+        active,
+        resolve(form) {
+          clearTimeout(timeout);
+          resolve(form);
+        },
+      });
+    });
   }
 
   async cancelQuestionForm(session: SessionState, formId: string) {
@@ -190,7 +242,7 @@ export class OpenCodeInteractions {
     active: ActiveTurn,
     callId: string,
   ) {
-    const form = await this.questionForm(session, active, callId);
+    const form = await this.waitForQuestionForm(session, active, callId);
     if (session.active !== active || !active.opened.has(callId)) return;
     if (!form) {
       this.closeQuestion(
@@ -202,6 +254,15 @@ export class OpenCodeInteractions {
       );
       return;
     }
+    await this.answerQuestionForm(session, active, callId, form);
+  }
+
+  private async answerQuestionForm(
+    session: SessionState,
+    active: ActiveTurn,
+    callId: string,
+    form: RecordValue,
+  ) {
     const formId = stringValue(form.id);
     if (!formId) {
       this.closeQuestion(

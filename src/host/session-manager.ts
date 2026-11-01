@@ -46,9 +46,6 @@ export function sessionFromParams(
   providerThreadId: string,
   modelSettings: ModelSettings,
 ): SessionState {
-  if (!modelSettings.providerEnabled) {
-    throw new Error("OpenCode provider is disabled");
-  }
   const disallowedTools = new Set(
     Array.isArray(params.disallowedTools)
       ? params.disallowedTools.filter(
@@ -454,8 +451,6 @@ export async function publishAgentOption(session: SessionState) {
 export async function prepareTurn(session: SessionState, options: unknown) {
   const opts = inputRecord(options);
   const settings = await openCodeServer.readModelSettings(opts.providerOptions);
-  if (!settings.providerEnabled)
-    throw new Error("OpenCode provider is disabled");
   session.disableSubagents =
     settings.disableSubagents !== false ||
     session.disallowedTools.has("task") ||

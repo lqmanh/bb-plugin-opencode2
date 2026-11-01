@@ -198,8 +198,8 @@ export function nextMessageIdAfterCheckpoint(
 }
 
 /**
- * Body for `POST /api/session/{id}/fork`. OpenCode copies every message
- * before `before`, or the whole session when it is omitted. (Unknown keys are
+ * Boundary for `session.fork`. OpenCode copies every message before
+ * `before`, or the whole session when it is omitted. (Unknown keys are
  * stripped, so a wrong field silently forks the tip.)
  */
 export function forkBoundaryRetainingThrough(

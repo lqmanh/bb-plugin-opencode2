@@ -160,10 +160,9 @@ async function handle(request: RecordValue) {
       });
       return;
     case "provider/health": {
-      const settings = await openCodeServer.readModelSettings();
       sendResult(request.id, {
         supported: true,
-        health: await providerHealth(settings, params.cwd ?? process.cwd()),
+        health: await providerHealth(params.cwd ?? process.cwd()),
       });
       return;
     }
@@ -179,7 +178,7 @@ async function handle(request: RecordValue) {
     case "model/list": {
       const cwd = params.cwd ?? process.cwd();
       const settings = await openCodeServer.readModelSettings();
-      if (!settings.providerEnabled || settings.enabledModels?.length === 0) {
+      if (settings.enabledModels?.length === 0) {
         sendResult(request.id, { models: [], selectedOnlyModels: [] });
         return;
       }
@@ -222,9 +221,6 @@ async function handle(request: RecordValue) {
       const modelSettings = await openCodeServer.readModelSettings(
         params.options?.providerOptions,
       );
-      if (!modelSettings.providerEnabled) {
-        throw new Error("OpenCode provider is disabled");
-      }
       const selected = modelRefFromOptions(params.options);
       assertModelEnabled(
         selected,
@@ -323,7 +319,7 @@ async function handle(request: RecordValue) {
           await api.session
             .interrupt({ sessionID: existing.providerThreadId })
             .catch(() => {});
-          openCodeServer.finish(existing, "interrupted");
+          await openCodeServer.finish(existing, "interrupted");
         }
         await openCodeServer.rewindSessionRetainingThrough(
           params.sourceProviderThreadId,
@@ -447,7 +443,11 @@ async function handle(request: RecordValue) {
             });
           } catch (error) {
             if (session.active === active)
-              openCodeServer.finish(session, "failed", errorMessage(error));
+              await openCodeServer.finish(
+                session,
+                "failed",
+                errorMessage(error),
+              );
           }
         })();
         return;
@@ -511,7 +511,7 @@ async function handle(request: RecordValue) {
             // Otherwise a later edit/rewind would fail with "checkpoint not
             // found" for an ID OpenCode never stored.
             active.checkpointId = undefined;
-            openCodeServer.finish(session, "failed", errorMessage(error));
+            await openCodeServer.finish(session, "failed", errorMessage(error));
           }
         }
       })();
@@ -578,7 +578,7 @@ async function handle(request: RecordValue) {
         return;
       } catch (error) {
         if (openedTurn && session.active === active) {
-          openCodeServer.finish(session, "failed", errorMessage(error));
+          await openCodeServer.finish(session, "failed", errorMessage(error));
         }
         throw error;
       }
@@ -591,7 +591,7 @@ async function handle(request: RecordValue) {
           await api.session
             .interrupt({ sessionID: session.providerThreadId })
             .catch(() => {});
-        openCodeServer.finish(session, "interrupted");
+        await openCodeServer.finish(session, "interrupted");
       }
       sendResult(request.id, { ok: true });
       return;

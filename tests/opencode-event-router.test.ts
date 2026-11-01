@@ -4,7 +4,8 @@ import type { OpenCodeClient } from "@opencode/client";
 import { OpenCodeEventRouter } from "./support/host-api.js";
 import type { OpenCodeRecord, SessionState } from "../src/host/types.ts";
 
-const emptyApi = async () => ({}) as unknown as OpenCodeClient;
+const emptyApi = async () =>
+  ({ session: { diff: async () => [] } }) as unknown as OpenCodeClient;
 
 test("translates current OpenCode v2 text, reasoning, tool, and terminal events", async () => {
   const emitted: OpenCodeRecord[] = [];
@@ -267,7 +268,7 @@ test("nests a native subagent's work under its delegation row", async () => {
   assert.equal(delegationClose?.item.summary, "One file.");
 
   // Child events after the delegation's turn ended are dropped.
-  router.finish(session, "completed");
+  await router.finish(session, "completed");
   const count = emitted.length;
   await event("ses_child", "session.text.started", {
     assistantMessageID: "m",
@@ -276,12 +277,14 @@ test("nests a native subagent's work under its delegation row", async () => {
   assert.equal(emitted.length, count);
 });
 
-test("emits the turn's file patches as turn.diff before the boundary", async () => {
+function sessionFixture(api: () => Promise<OpenCodeClient>) {
   const emitted: OpenCodeRecord[] = [];
   const active = {
     providerTurnId: "turn-1",
     startedAt: Date.now(),
     abortController: new AbortController(),
+    promptIds: new Set(["msg_user"]),
+    inputDelivered: true,
     opened: new Map<string, OpenCodeRecord>(),
     pendingTools: new Map<string, string>(),
     pendingInput: new Map<string, string>(),
@@ -304,28 +307,165 @@ test("emits the turn's file patches as turn.diff before the boundary", async () 
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const router = new OpenCodeEventRouter(
-    emptyApi,
+    api,
     (_threadId, deltas) => emitted.push(...deltas),
     new Map([[session.providerThreadId, session]]),
   );
   const event = (type: string, data: OpenCodeRecord) =>
     router.handleEvent({ type, data: { sessionID: "ses_1", ...data } });
+  return { emitted, event, session, router };
+}
+
+function sessionWithTurnDiff(
+  files: OpenCodeRecord[],
+  onDiff?: (input: OpenCodeRecord) => void,
+) {
+  return sessionFixture(
+    async () =>
+      ({
+        session: {
+          diff: async (input: OpenCodeRecord) => {
+            onDiff?.(input);
+            return files;
+          },
+        },
+      }) as unknown as OpenCodeClient,
+  );
+}
+
+test("emits the session diff as turn.diff before the boundary", async () => {
   const patch = "--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-two\n+TWO\n";
-  await event("session.tool.input.started", { id: "call_edit", name: "edit" });
-  await event("session.tool.called", {
-    id: "call_edit",
-    input: { path: "a.txt", oldString: "two", newString: "TWO" },
-  });
-  await event("session.tool.success", {
-    id: "call_edit",
-    content: [{ type: "text", text: "Edited a.txt" }],
-    metadata: { files: [{ file: "a.txt", patch, status: "modified" }] },
-  });
+  let input: OpenCodeRecord | undefined;
+  const { emitted, event } = sessionWithTurnDiff(
+    [
+      {
+        file: "a.txt",
+        patch,
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+      },
+    ],
+    (value) => {
+      input = value;
+    },
+  );
   await event("session.execution.succeeded", {});
+  assert.deepEqual(input, {
+    sessionID: "ses_1",
+    from: "msg_user",
+    context: 3,
+  });
   const kinds = emitted.map((delta) => delta.kind);
   const diffIndex = kinds.indexOf("turn.diff");
   assert.ok(diffIndex >= 0 && diffIndex < kinds.indexOf("turn.boundary"));
   assert.equal(emitted[diffIndex].diff, patch);
+});
+
+test("emits write rows without patches and reads the turn diff once", async () => {
+  const patch = "--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-two\n+TWO\n";
+  let diffCalls = 0;
+  const { emitted, event } = sessionWithTurnDiff(
+    [
+      {
+        file: "a.txt",
+        patch,
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+      },
+    ],
+    () => {
+      diffCalls += 1;
+    },
+  );
+  for (const [id, filePath] of [
+    ["call_a", "a.txt"],
+    ["call_b", "notes.txt"],
+  ] as const) {
+    await event("session.tool.input.started", { id, name: "write" });
+    await event("session.tool.called", { id, input: { filePath } });
+    await event("session.tool.success", {
+      id,
+      content: [{ type: "text", text: "Wrote file" }],
+      metadata: {},
+    });
+  }
+  assert.equal(diffCalls, 0);
+
+  await event("session.execution.succeeded", {});
+  assert.equal(diffCalls, 1);
+  const changes = emitted
+    .filter(
+      (delta) =>
+        delta.kind === "item.open" && delta.key?.channel === "fileChange",
+    )
+    .map((delta) => delta.item.changes[0]);
+  assert.deepEqual(
+    changes.map((change) => [change.path, change.diff]),
+    [
+      ["a.txt", undefined],
+      ["notes.txt", undefined],
+    ],
+  );
+  const turnDiff = emitted.find((delta) => delta.kind === "turn.diff");
+  assert.equal(turnDiff?.diff, patch);
+});
+
+test("keeps the boundary when the session diff is empty", async () => {
+  const { emitted, event } = sessionWithTurnDiff([]);
+  await event("session.execution.succeeded", {});
+  const kinds = emitted.map((delta) => delta.kind);
+  assert.equal(kinds.includes("turn.diff"), false);
+  assert.equal(kinds.includes("turn.boundary"), true);
+});
+
+test("routes form.created to the question tool without polling", async () => {
+  const cancelled: OpenCodeRecord[] = [];
+  let listCalls = 0;
+  const api = async () =>
+    ({
+      session: {
+        diff: async () => [],
+        form: {
+          list: async () => {
+            listCalls += 1;
+            return [];
+          },
+          cancel: async (input: OpenCodeRecord) => {
+            cancelled.push(input);
+          },
+        },
+      },
+    }) as unknown as OpenCodeClient;
+  const { emitted, event, session, router } = sessionFixture(api);
+
+  await event("session.tool.input.started", { id: "call_q", name: "question" });
+  await event("session.tool.called", {
+    id: "call_q",
+    input: { questions: [{ question: "Pick", options: [] }] },
+  });
+  await event("form.created", {
+    form: {
+      id: "form_1",
+      sessionID: "ses_1",
+      title: "Pick",
+      metadata: { tool: { id: "call_q" } },
+      fields: [{ key: "q", title: "Pick", type: "text" }],
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await router.finish(session, "completed");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(listCalls, 0);
+  assert.deepEqual(cancelled, [{ sessionID: "ses_1", formID: "form_1" }]);
+  assert.ok(
+    emitted.some(
+      (delta) =>
+        delta.kind === "item.close" && delta.key?.providerItemId === "call_q",
+    ),
+  );
 });
 
 test("ignores terminal events from earlier work until the turn's prompt is delivered", async () => {

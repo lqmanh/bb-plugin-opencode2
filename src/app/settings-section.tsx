@@ -1,9 +1,9 @@
 import { useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import {
-  modelSettingsSchema,
+  modelSelectionSchema,
   opencodeSettingsRpcContract,
   type HostStatus,
-  type ModelSettings,
+  type ModelSelection,
   type ModelSummary,
   type OpenCodeStatus,
 } from "../settings-contract.ts";
@@ -29,37 +29,6 @@ function groupByProvider(models: ModelSummary[]) {
 
 function errorText(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
-}
-
-function SettingRow({
-  title,
-  description,
-  checked,
-  disabled,
-  label,
-  onCheckedChange,
-}: {
-  title: string;
-  description: string;
-  checked: boolean;
-  disabled?: boolean;
-  label: string;
-  onCheckedChange: (next: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="min-w-0">
-        <div className="text-sm">{title}</div>
-        <div className="text-sm text-muted-foreground">{description}</div>
-      </div>
-      <Switch
-        aria-label={label}
-        checked={checked}
-        disabled={disabled}
-        onCheckedChange={onCheckedChange}
-      />
-    </div>
-  );
 }
 
 const STATUS_LABELS: Record<OpenCodeStatus["status"], string> = {
@@ -120,7 +89,7 @@ function HostStatusRow({
 
 export function SettingsSection() {
   const rpc = useRpc<typeof opencodeSettingsRpcContract>();
-  const [settings, setSettings] = useState<ModelSettings | null>(null);
+  const [selection, setSelection] = useState<ModelSelection | null>(null);
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [hosts, setHosts] = useState<HostStatus[] | null>(null);
   const [query, setQuery] = useState("");
@@ -133,8 +102,8 @@ export function SettingsSection() {
   rpcRef.current = rpc;
 
   useRealtime("settings-changed", (payload) => {
-    const parsed = modelSettingsSchema.safeParse(payload);
-    if (parsed.success) setSettings(parsed.data);
+    const parsed = modelSelectionSchema.safeParse(payload);
+    if (parsed.success) setSelection(parsed.data);
   });
 
   const load = useCallback(async () => {
@@ -151,12 +120,12 @@ export function SettingsSection() {
         if (id === operationId.current) setHosts([]);
       });
     try {
-      const [nextSettings, nextModels] = await Promise.all([
-        rpcRef.current.call("getSettings", null),
+      const [nextSelection, nextModels] = await Promise.all([
+        rpcRef.current.call("getModelSelection", null),
         rpcRef.current.call("listModels", {}),
       ]);
       if (id !== operationId.current) return;
-      setSettings(nextSettings);
+      setSelection(nextSelection);
       setModels(nextModels.models);
     } catch (cause) {
       if (id === operationId.current) setError(errorText(cause));
@@ -172,19 +141,19 @@ export function SettingsSection() {
     };
   }, [load]);
 
-  async function save(next: ModelSettings) {
-    if (!settings || isSaving) return;
-    const previous = settings;
+  async function save(next: ModelSelection) {
+    if (!selection || isSaving) return;
+    const previous = selection;
     const id = ++operationId.current;
-    setSettings(next);
+    setSelection(next);
     setIsSaving(true);
     setError(null);
     try {
-      const saved = await rpcRef.current.call("saveSettings", next);
-      if (id === operationId.current) setSettings(saved);
+      const saved = await rpcRef.current.call("saveModelSelection", next);
+      if (id === operationId.current) setSelection(saved);
     } catch (cause) {
       if (id === operationId.current) {
-        setSettings(previous);
+        setSelection(previous);
         setError(errorText(cause));
       }
     } finally {
@@ -193,9 +162,9 @@ export function SettingsSection() {
   }
 
   const isEnabled = (model: ModelSummary): boolean =>
-    settings !== null &&
-    (settings.enabledModels === null ||
-      settings.enabledModels.includes(model.id));
+    selection !== null &&
+    (selection.enabledModels === null ||
+      selection.enabledModels.includes(model.id));
 
   const providers = useMemo(() => groupByProvider(models), [models]);
   const searching = query.trim().length > 0;
@@ -218,13 +187,13 @@ export function SettingsSection() {
   const enabledCount = models.filter(isEnabled).length;
 
   function enabledSet() {
-    return settings?.enabledModels === null || !settings
+    return selection?.enabledModels === null || !selection
       ? new Set(models.map((item) => item.id))
-      : new Set(settings.enabledModels);
+      : new Set(selection.enabledModels);
   }
 
   function setModelsEnabled(ids: string[], nextEnabled: boolean) {
-    if (!settings) return;
+    if (!selection) return;
     const current = enabledSet();
     for (const id of ids) {
       if (nextEnabled) current.add(id);
@@ -233,7 +202,7 @@ export function SettingsSection() {
     // Every model on: store null so newly connected models appear too.
     const allOn = models.every((model) => current.has(model.id));
     void save({
-      ...settings,
+      ...selection,
       enabledModels: allOn ? null : [...current].sort(),
     });
   }
@@ -247,7 +216,7 @@ export function SettingsSection() {
     });
   }
 
-  const busy = settings === null || isSaving;
+  const busy = selection === null || isSaving;
 
   return (
     <div className="opencode-settings">
@@ -285,43 +254,6 @@ export function SettingsSection() {
         </div>
       </div>
 
-      <div className="text-sm font-medium">Behavior</div>
-      <div className="rounded-lg border border-border p-4">
-        <div className="flex flex-col gap-4">
-          <SettingRow
-            title="Show in the provider picker"
-            description="Offer OpenCode v2 for new threads. Existing threads keep their provider."
-            checked={settings?.providerEnabled ?? false}
-            disabled={busy}
-            label="Enable OpenCode v2 provider"
-            onCheckedChange={(next) => {
-              if (settings) void save({ ...settings, providerEnabled: next });
-            }}
-          />
-          <SettingRow
-            title="Allow OpenCode subagents"
-            description="Let OpenCode delegate to its own subagents (shown as delegation rows). When off, OpenCode hides its subagent tool and agents delegate through BB instead."
-            checked={settings?.disableSubagents === false}
-            disabled={busy}
-            label="Allow OpenCode subagents"
-            onCheckedChange={(next) => {
-              if (settings) void save({ ...settings, disableSubagents: !next });
-            }}
-          />
-          <SettingRow
-            title="Keep BB tools inside BB"
-            description="OpenCode shares MCP servers across a directory, so its own sessions (TUI, web) would list BB threads' tools. Adds one deny rule for bb_opencode2_* to your global OpenCode config; turning this off removes it."
-            checked={settings?.hideBbToolsOutsideBb !== false}
-            disabled={busy}
-            label="Keep BB tools inside BB"
-            onCheckedChange={(next) => {
-              if (settings)
-                void save({ ...settings, hideBbToolsOutsideBb: next });
-            }}
-          />
-        </div>
-      </div>
-
       <div className="flex items-end justify-between gap-4">
         <div>
           <div className="text-sm font-medium">Models</div>
@@ -336,7 +268,7 @@ export function SettingsSection() {
             variant="outline"
             size="sm"
             disabled={busy || models.length === 0}
-            onClick={() => void save({ ...settings!, enabledModels: null })}
+            onClick={() => void save({ ...selection!, enabledModels: null })}
           >
             Enable all
           </Button>
@@ -344,7 +276,7 @@ export function SettingsSection() {
             variant="outline"
             size="sm"
             disabled={busy || models.length === 0}
-            onClick={() => void save({ ...settings!, enabledModels: [] })}
+            onClick={() => void save({ ...selection!, enabledModels: [] })}
           >
             Disable all
           </Button>

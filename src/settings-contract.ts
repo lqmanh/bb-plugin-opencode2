@@ -42,19 +42,23 @@ export const hostStatusSchema = z
   })
   .strict();
 
+const enabledModelsSchema = z.array(z.string().min(1)).max(10_000).nullable();
+
 export const modelSettingsSchema = z
   .object({
-    providerEnabled: z.boolean(),
     // null means every discovered model is enabled. An array is the exact
     // allowlist, including an empty array for "disable all".
-    enabledModels: z.array(z.string().min(1)).max(10_000).nullable(),
+    enabledModels: enabledModelsSchema,
     // Prevent OpenCode from starting native subagents (task tool) so agents
     // use BB for delegation instead. Missing key defaults to true so older
     // stored settings migrate to the safer default.
     disableSubagents: z.boolean().default(true),
-    // Add one deny rule to OpenCode's global config so OpenCode's own
-    // sessions (TUI, web) don't list BB threads' tools. On by default.
-    hideBbToolsOutsideBb: z.boolean().default(true),
+  })
+  .strict();
+
+export const modelSelectionSchema = z
+  .object({
+    enabledModels: enabledModelsSchema,
   })
   .strict();
 
@@ -76,9 +80,9 @@ export const opencodeHostContract = defineRpcContract({
 });
 
 export const opencodeSettingsRpcContract = defineRpcContract({
-  getSettings: {
+  getModelSelection: {
     input: z.null(),
-    output: modelSettingsSchema,
+    output: modelSelectionSchema,
   },
   listModels: {
     input: z.object({}).strict(),
@@ -86,9 +90,9 @@ export const opencodeSettingsRpcContract = defineRpcContract({
       .object({ models: z.array(modelSummarySchema).max(10_000) })
       .strict(),
   },
-  saveSettings: {
-    input: modelSettingsSchema,
-    output: modelSettingsSchema,
+  saveModelSelection: {
+    input: modelSelectionSchema,
+    output: modelSelectionSchema,
   },
   getStatus: {
     input: z.object({}).strict(),
@@ -97,6 +101,7 @@ export const opencodeSettingsRpcContract = defineRpcContract({
 });
 
 export type ModelSettings = z.infer<typeof modelSettingsSchema>;
+export type ModelSelection = z.infer<typeof modelSelectionSchema>;
 export type ModelSummary = z.infer<typeof modelSummarySchema>;
 export type OpenCodeStatus = z.infer<typeof openCodeStatusSchema>;
 export type HostStatus = z.infer<typeof hostStatusSchema>;

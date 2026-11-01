@@ -1,14 +1,49 @@
 import {
   modelSettingsSchema,
+  type ModelSelection,
   type ModelSettings,
 } from "./settings-contract.ts";
 
-export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
-  providerEnabled: true,
-  enabledModels: null,
-  disableSubagents: true,
-  hideBbToolsOutsideBb: true,
+export type ProviderSettingsValues = {
+  allowSubagents: boolean;
 };
+
+export const DEFAULT_PROVIDER_SETTINGS: ProviderSettingsValues = {
+  allowSubagents: false,
+};
+
+export const DEFAULT_MODEL_SETTINGS: ModelSettings = resolveModelSettings(
+  DEFAULT_PROVIDER_SETTINGS,
+  null,
+);
+
+export function resolveModelSettings(
+  values: Readonly<Record<string, unknown>>,
+  enabledModels: string[] | null,
+): ModelSettings {
+  const allowSubagents =
+    typeof values.allowSubagents === "boolean"
+      ? values.allowSubagents
+      : DEFAULT_PROVIDER_SETTINGS.allowSubagents;
+  return {
+    enabledModels,
+    disableSubagents: !allowSubagents,
+  };
+}
+
+export function normalizeModelSelection(value: unknown): ModelSelection {
+  return { enabledModels: normalizeModelSettings(value).enabledModels };
+}
+
+export function legacyProviderSettings(
+  value: unknown,
+): ProviderSettingsValues | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (!("disableSubagents" in candidate)) return undefined;
+  return { allowSubagents: candidate.disableSubagents === false };
+}
 
 export function normalizeModelSettings(value: unknown): ModelSettings {
   const parsed = modelSettingsSchema.safeParse(value);
@@ -34,9 +69,7 @@ export function normalizeModelSettings(value: unknown): ModelSettings {
     : null;
 
   return {
-    providerEnabled: candidate.providerEnabled !== false,
     enabledModels: enabledModels === null ? null : [...new Set(enabledModels)],
     disableSubagents: candidate.disableSubagents !== false,
-    hideBbToolsOutsideBb: candidate.hideBbToolsOutsideBb !== false,
   };
 }

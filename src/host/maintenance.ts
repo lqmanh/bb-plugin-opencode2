@@ -11,7 +11,6 @@ import {
   type ProviderInstallationRunResult,
   type ProviderInstallationStatus,
 } from "@get-bb/plugin-sdk/provider-bridge";
-import type { ModelSettings } from "../settings-contract.ts";
 import { openCodeServer } from "./opencode-server.ts";
 import {
   MIN_OPENCODE_VERSION,
@@ -122,10 +121,7 @@ export async function installationRun(
   };
 }
 
-export async function providerHealth(
-  settings: ModelSettings,
-  cwd: string,
-): Promise<ProviderHealth> {
+export async function providerHealth(cwd: string): Promise<ProviderHealth> {
   const base = {
     accountEmail: null,
     planLabel: null,
@@ -135,14 +131,11 @@ export async function providerHealth(
     loginCommand: OPENCODE_LOGIN_COMMAND,
   };
   const installedVersion = await readCliVersion(OPENCODE_EXECUTABLE);
-  // A disabled provider reports not_installed so BB hides it everywhere.
-  if (!settings.providerEnabled || installedVersion === null)
+  if (installedVersion === null)
     return {
       ...base,
       status: "not_installed",
-      statusMessage: settings.providerEnabled
-        ? null
-        : "OpenCode v2 is disabled in the plugin settings.",
+      statusMessage: null,
       installedVersion: null,
     };
   const latest = await latestVersion(false);

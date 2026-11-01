@@ -8,9 +8,9 @@ between OpenCode's v2 API and events and BB's provider bridge protocol.
 ## Requirements
 
 - BB 0.48.1 or newer
-- OpenCode v2 2.2.5 or newer (`opencode2` on the host's `PATH`). BB can
-  install it (`npm install -g @opencode/cli`) or update it
-  (`opencode2 upgrade`) from the provider settings.
+- OpenCode v2 2.2.5 or newer (`opencode2` on the host's `PATH`). BB can install
+  it (`npm install -g @opencode/cli`) or update it (`opencode2 upgrade`) from
+  the provider settings.
 - At least one model provider connected in OpenCode: `opencode2 auth login`
 
 ## Install
@@ -22,13 +22,13 @@ bb plugin install git:https://github.com/iamEvanYT/bb-plugin-opencode2.git
 ```
 
 BB shows OpenCode v2 in the provider picker when `opencode2` is installed and
-the provider is enabled in the plugin settings.
+the provider is enabled in BB's provider controls.
 
 ## Supported BB features
 
 | BB feature             | Details                                                                                                                                                                                                                                                             |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Provider picker        | Visible when `opencode2` is installed and the provider is enabled.                                                                                                                                                                                                  |
+| Provider picker        | Visible when `opencode2` is installed and the provider is enabled in BB's provider controls.                                                                                                                                                                        |
 | Health                 | Reports not installed, unsupported version, no model provider connected, or service unreachable, with the command to fix it.                                                                                                                                        |
 | Install and update     | Install through npm; update through `opencode2 upgrade`, which handles npm, bun, brew, and curl installs.                                                                                                                                                           |
 | Model discovery        | Models come from OpenCode for the thread's workspace. OpenCode's default model is BB's default. The settings page can allow or block individual models.                                                                                                             |
@@ -48,7 +48,7 @@ the provider is enabled in the plugin settings.
 | BB CLI in shells       | OpenCode shells get BB's per-session environment and `bb` on `PATH`.                                                                                                                                                                                                |
 | Native subagents       | Off by default: OpenCode's `subagent` tool is denied and hidden, so agents delegate through BB. When allowed, each subagent is a BB delegation row with its work nested inside.                                                                                     |
 | Skills                 | BB's `/` menu lists every skill OpenCode discovers for the workspace (`~/.agents/skills`, `~/.claude/skills`, project and config roots), and picking one activates it in OpenCode. BB's own skills that OpenCode does not know are attached as `SKILL.md` files.    |
-| Timeline rows          | Reads, searches, directory listings, web search and fetch, commands with live output and exit codes, and file changes built from OpenCode's own patches.                                                                                                            |
+| Timeline rows          | Reads, searches, directory listings, web search and fetch, commands with live output and exit codes, and edit/patch file changes built from OpenCode's own patches.                                                                                                 |
 | Turn diff              | Each turn's file patches are reported as the turn diff.                                                                                                                                                                                                             |
 | Usage and context      | OpenCode's cumulative session tokens, the last request's tokens, and the model's context limit drive BB's usage and context meter.                                                                                                                                  |
 | Errors and retries     | Failures settle the turn with a visible error; scheduled model retries show as retrying errors.                                                                                                                                                                     |
@@ -74,23 +74,20 @@ Open the plugin settings page in BB (Settings → OpenCode v2).
 
 - **Status** shows each connected host's OpenCode version, available updates,
   and model count, with the command to run when something is missing.
-- **Show in the provider picker** enables or hides the provider.
 - **Allow OpenCode subagents** lets OpenCode use its native subagents (off by
   default).
-- **Keep BB tools inside BB** (on by default). OpenCode shares MCP servers
-  across a directory, so your own OpenCode sessions (TUI, web) would
-  otherwise list BB threads' tools. This adds one rule,
-  `{ "action": "bb_opencode2_*", "resource": "*", "effect": "deny" }`, at the
-  end of `permissions` in your global `~/.config/opencode/opencode.json`,
-  and changes nothing else. OpenCode applies it at its next idle moment.
-  Turning the setting off restores the file byte-for-byte if you haven't
-  edited it since, or removes just that rule if you have. BB threads are
-  unaffected: each allows its own tools in its session rules.
 - **Models** controls the allowlist, grouped by OpenCode provider.
+
+Use BB's provider controls to hide or disable the provider. The plugin always
+keeps BB thread tools out of OpenCode's own sessions: it adds one
+`{ "action": "bb_opencode2_*", "resource": "*", "effect": "deny" }` rule at the
+end of `permissions` in your global `~/.config/opencode/opencode.json`, and
+changes nothing else. OpenCode applies it at its next idle moment. BB threads
+are unaffected: each allows its own tools in its session rules.
 
 Settings apply from the next turn. See
 [`skills/opencode2-provider/SKILL.md`](skills/opencode2-provider/SKILL.md) for
-the CLI equivalents and troubleshooting.
+the settings keys, model allowlist RPC, and troubleshooting.
 
 ## Development
 
@@ -106,8 +103,8 @@ mounts the settings UI in jsdom. To try a local checkout in BB, run
 `bb plugin install .` from the repository root.
 
 See [docs/architecture.md](docs/architecture.md) for the code layout and design
-decisions, and [docs/opencode-v2.md](docs/opencode-v2.md) for the
-OpenCode behavior and event details the bridge depends on.
+decisions, and [docs/opencode-v2.md](docs/opencode-v2.md) for the OpenCode
+behavior and event details the bridge depends on.
 
 ## License
 

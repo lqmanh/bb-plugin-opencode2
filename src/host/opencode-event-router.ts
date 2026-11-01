@@ -12,15 +12,15 @@ import {
 } from "./timeline.ts";
 import {
   contentText,
+  diffFileChanges,
   dynamicToolRow,
-  gitDiff,
-  gitDiffNewFile,
   metadataFileChanges,
   toolRow,
   touchedPaths,
   workspacePath,
 } from "./tool-mapping.ts";
 import {
+  errorMessage,
   inputRecord,
   parseInputText,
   sessionsByProviderId,
@@ -35,6 +35,8 @@ type RecordValue = OpenCodeRecord;
 
 const SHELL_OUTPUT_POLL_MS = 400;
 const SHELL_OUTPUT_CHUNK_BYTES = 32 * 1024;
+const TURN_DIFF_CONTEXT_LINES = 3;
+const TURN_DIFF_TIMEOUT_MS = 2_000;
 
 /**
  * OpenCode v2 reports a shell tool's exit status as `metadata.exit` on
@@ -210,9 +212,18 @@ export class OpenCodeEventRouter {
 
   async handleEvent(event: RecordValue): Promise<void> {
     const data = inputRecord(event.data);
-    const sessionId = stringValue(data.sessionID);
+    const form =
+      event.type === "form.created" ? inputRecord(data.form) : undefined;
+    const sessionId =
+      stringValue(data.sessionID) ??
+      (form ? stringValue(form.sessionID) : undefined);
     if (!sessionId) return;
     const session = this.sessionLookup.get(sessionId);
+    if (event.type === "form.created") {
+      if (session?.active)
+        this.interactions.handleCreatedForm(session, form ?? {});
+      return;
+    }
     if (session) return this.handleSessionEvent(session, event, data);
     const child = this.childSessions.get(sessionId);
     const type = stringValue(event.type) ?? "";
@@ -526,11 +537,14 @@ export class OpenCodeEventRouter {
         if (patched.length) {
           this.emitFileChangeRow(session, active, `files:${eventId}`, patched);
         } else if (touched.length) {
-          await this.emitFileChanges(
+          this.emitFileChangeRow(
             session,
             active,
             `files:${eventId}`,
-            touched,
+            touched.map((path) => ({
+              path: workspacePath(session.cwd, path),
+              kind: "update",
+            })),
           );
         }
       } else {
@@ -575,12 +589,12 @@ export class OpenCodeEventRouter {
     )
       return;
     if (event.type === "session.execution.succeeded")
-      this.finish(session, "completed");
+      await this.finish(session, "completed");
     if (event.type === "session.execution.interrupted")
-      this.finish(session, "interrupted");
+      await this.finish(session, "interrupted");
     if (event.type === "session.execution.failed") {
       const error = inputRecord(data.error);
-      this.finish(
+      await this.finish(
         session,
         "failed",
         stringValue(error.message) ?? "OpenCode execution failed",
@@ -764,28 +778,38 @@ export class OpenCodeEventRouter {
     active.shellPolls?.delete(callId);
   }
 
-  private async emitFileChanges(
-    session: SessionState,
-    active: ActiveTurn,
-    key: string,
-    paths: string[],
-  ): Promise<void> {
-    // OpenCode's step.ended carries no file list, and write/edit rows are
-    // suppressed, so render the change from the tool input recorded at call
-    // time. The event reader awaits this method to preserve delta ordering.
-    const changes = await Promise.all(
-      paths.map(async (touched) => {
-        const file = workspacePath(session.cwd, touched);
-        const diff = await gitDiff(session.cwd, file);
-        if (diff) return { path: file, kind: "update", diff };
-        // An untracked new file has no `git diff`; show its whole content.
-        const added = await gitDiffNewFile(session.cwd, file);
-        return added
-          ? { path: file, kind: "add", diff: added }
-          : { path: file, kind: "update" };
-      }),
+  private async readTurnFileChanges(session: SessionState, active: ActiveTurn) {
+    const from = active.promptIds?.values().next().value;
+    if (!from) return [];
+    const api = await this.api();
+    const entries = await api.session.diff(
+      {
+        sessionID: session.providerThreadId,
+        from,
+        context: TURN_DIFF_CONTEXT_LINES,
+      },
+      { signal: AbortSignal.timeout(TURN_DIFF_TIMEOUT_MS) },
     );
-    this.emitFileChangeRow(session, active, key, changes);
+    return diffFileChanges(entries, session.cwd);
+  }
+
+  private async turnDiff(session: SessionState, active: ActiveTurn) {
+    let changes: RecordValue[];
+    try {
+      changes = await this.readTurnFileChanges(session, active);
+    } catch (error) {
+      process.stderr.write(
+        `[opencode2] Could not read the turn diff: ${errorMessage(error)}\n`,
+      );
+      return undefined;
+    }
+    const patches = changes
+      .map((change) => stringValue(change.diff))
+      .filter((patch): patch is string => Boolean(patch));
+    if (!patches.length) return undefined;
+    return patches
+      .map((patch) => (patch.endsWith("\n") ? patch : `${patch}\n`))
+      .join("");
   }
 
   private emitFileChangeRow(
@@ -794,9 +818,6 @@ export class OpenCodeEventRouter {
     key: string,
     changes: RecordValue[],
   ) {
-    for (const change of changes)
-      if (typeof change.diff === "string" && change.diff)
-        (active.turnPatches ??= []).push(change.diff);
     const item = { type: "fileChange", changes };
     this.emit(session.bbThreadId, [
       {
@@ -815,13 +836,14 @@ export class OpenCodeEventRouter {
     ]);
   }
 
-  finish(
+  async finish(
     session: SessionState,
     status: "completed" | "interrupted" | "failed",
     error?: string,
-  ) {
+  ): Promise<void> {
     const active = session.active;
-    if (!active) return;
+    if (!active || active.finishing) return;
+    active.finishing = true;
     active.abortController.abort();
     if (active.manualCompaction) {
       this.emit(
@@ -846,6 +868,7 @@ export class OpenCodeEventRouter {
     );
     for (const [, formId] of active.openQuestions)
       void this.interactions.cancelQuestionForm(session, formId);
+    this.interactions.cancelQuestionWaiters(session, active);
     for (const [id, item] of active.opened) {
       this.emit(session.bbThreadId, [
         {
@@ -864,15 +887,12 @@ export class OpenCodeEventRouter {
     active.pendingTools.clear();
     active.pendingInput.clear();
     active.touchedFiles.clear();
-    // OpenCode's session diff endpoint needs snapshots that are often off,
-    // so the turn diff is the sequence of patches its edit tools reported.
-    if (active.turnPatches?.length)
+    const diff = await this.turnDiff(session, active);
+    if (diff)
       this.emit(session.bbThreadId, [
         {
           kind: "turn.diff",
-          diff: active.turnPatches
-            .map((patch) => (patch.endsWith("\n") ? patch : `${patch}\n`))
-            .join(""),
+          diff,
           providerTurnId: active.providerTurnId,
         },
       ]);

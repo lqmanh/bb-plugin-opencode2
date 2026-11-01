@@ -3,12 +3,22 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Turn diffs now use OpenCode's `session.diff`; file-change rows use OpenCode
+  tool metadata, and write rows no longer carry a per-file patch. Question forms
+  and MCP startup wait for OpenCode events instead of polling.
+- Provider enablement now uses BB's provider controls, and the BB-tools deny
+  rule is always applied.
+
 ## [1.3.0] - 2026-11-01
 
 ### Changed
 
-- OpenCode API calls, event streaming, and service discovery and startup now
-  use the official OpenCode v2 SDK instead of hand-written HTTP and SSE code.
+- OpenCode API calls, event streaming, and service discovery and startup now use
+  the official OpenCode v2 SDK instead of hand-written HTTP and SSE code.
 - The minimum supported versions are now BB 0.48.1, BB Plugin SDK 0.6.104, and
   OpenCode 2.2.5.
 
@@ -63,8 +73,8 @@ First release: BB threads that run on an installed OpenCode v2 server.
 - Usage and context meter driven by OpenCode's session tokens and model context
   limit.
 - Reasoning levels mapped to each model's OpenCode variants.
-- Settings page with OpenCode status per host, grouped models, a model allowlist,
-  and provider and subagent toggles.
+- Settings page with OpenCode status per host, grouped models, a model
+  allowlist, and provider and subagent toggles.
 - OpenCode install, update, and auth-aware health checks.
 - Recovery that settles turns OpenCode finished while its event stream was down.
 
@@ -74,7 +84,10 @@ First release: BB threads that run on an installed OpenCode v2 server.
 - Compatibility with OpenCode v2.0.27 API changes.
 - BB tools not reaching OpenCode under the desktop app, and cold model lists.
 
-[1.3.0]: https://github.com/iamEvanYT/bb-plugin-opencode2/compare/v1.2.0...v1.3.0
-[1.2.0]: https://github.com/iamEvanYT/bb-plugin-opencode2/compare/v1.1.0...v1.2.0
-[1.1.0]: https://github.com/iamEvanYT/bb-plugin-opencode2/compare/v1.0.0...v1.1.0
+[1.3.0]:
+  https://github.com/iamEvanYT/bb-plugin-opencode2/compare/v1.2.0...v1.3.0
+[1.2.0]:
+  https://github.com/iamEvanYT/bb-plugin-opencode2/compare/v1.1.0...v1.2.0
+[1.1.0]:
+  https://github.com/iamEvanYT/bb-plugin-opencode2/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/iamEvanYT/bb-plugin-opencode2/releases/tag/v1.0.0

@@ -114,6 +114,35 @@ test("persists the BB thread session mapping for stateless rewinds", async (t) =
   );
 });
 
+test("resolves an MCP startup wait from mcp.status.changed", async () => {
+  let status = "starting";
+  let listCalls = 0;
+  const server = new OpenCodeServer();
+  Object.assign(server, {
+    api: async () => ({
+      mcp: {
+        list: async () => {
+          listCalls += 1;
+          return { data: [{ name: "bb_tools", status: { status } }] };
+        },
+      },
+    }),
+  });
+
+  const waiting = server.waitForMcpServer("bb_tools", "/repo", 5_000);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(listCalls, 1);
+
+  status = "connected";
+  await server.handleEvent({
+    type: "mcp.status.changed",
+    data: { server: "bb_tools" },
+  });
+
+  assert.equal(await waiting, true);
+  assert.equal(listCalls, 2);
+});
+
 test("serializes MCP registry mutations without dropping persisted entries", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "opencode2-registry-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

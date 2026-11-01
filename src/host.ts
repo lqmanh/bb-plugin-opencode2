@@ -135,15 +135,8 @@ export default experimental_defineHostEntry({
     async getStatus(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
       const cwd = process.cwd();
-      // Report OpenCode itself even while the BB provider is switched off.
       const [health, installation] = await Promise.all([
-        providerHealth(
-          {
-            ...(await openCodeServer.readModelSettings()),
-            providerEnabled: true,
-          },
-          cwd,
-        ),
+        providerHealth(cwd),
         installationStatus(true),
       ]);
       const modelCount = await openCodeServer
@@ -166,7 +159,7 @@ export default experimental_defineHostEntry({
       // Best-effort: a config we cannot edit only leaves BB tools visible
       // to OpenCode's own sessions, where calling them is refused anyway.
       await syncBbToolsRule(
-        input.hideBbToolsOutsideBb !== false,
+        true,
         undefined,
         join(context.experimental_paths.dataDir, "opencode2-config-edit.json"),
       )
