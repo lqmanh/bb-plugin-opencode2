@@ -356,8 +356,7 @@ export async function ensureSessionModel(
   const resolved = resolveModelVariant(desired, entry);
   if (!force && sameModelRef(session.model, resolved)) return;
   const api = await openCodeServer.api();
-  // Set the model before the call: OpenCode emits `session.model.selected`
-  // while switching, and the router must recognize that event as our own.
+  // Keep local state in step with the switch; restore it if the call fails.
   const previous = session.model;
   session.model = resolved;
   try {

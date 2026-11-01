@@ -11,7 +11,6 @@ import {
 } from "./settings-contract.ts";
 import {
   DEFAULT_PROVIDER_SETTINGS,
-  legacyProviderSettings,
   normalizeModelSelection,
   resolveModelSettings,
 } from "./model-settings.ts";
@@ -32,10 +31,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   const storedSettings = await bb.storage.kv.get(SETTINGS_KEY);
-  const legacy = legacyProviderSettings(storedSettings);
-  if (legacy) await providerSettings.experimental_set(legacy);
   let selection = normalizeModelSelection(storedSettings);
-  if (legacy) await bb.storage.kv.set(SETTINGS_KEY, selection);
 
   let settingValues = await providerSettings.get();
   function currentModelSettings() {

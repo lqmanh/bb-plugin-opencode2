@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DYNAMIC_MCP_SERVER_PREFIX } from "./opencode-requests.ts";
@@ -156,116 +156,24 @@ export function addBbToolsRule(text: string): string | undefined {
   );
 }
 
-/** Remove the rule (and a `permissions` key it alone occupies). */
-export function removeBbToolsRule(text: string): string | undefined {
-  const match = RULE_PATTERN.exec(text);
-  if (!match) return undefined;
-  const start = match.index;
-  const end = start + match[0].length;
-  // Drop the rule with its own line, and the comma joining it to its list.
-  const lineStart = text.lastIndexOf("\n", start - 1);
-  const prev = previousSignificant(text, start);
-  let next = end;
-  while (next < text.length && /[ \t]/.test(text[next])) next++;
-  let result: string;
-  if (text[next] === ",") {
-    result =
-      text.slice(0, lineStart >= 0 && lineStart > prev ? lineStart : start) +
-      text.slice(next + 1);
-  } else if (text[prev] === ",") {
-    result = text.slice(0, prev) + text.slice(end);
-  } else {
-    result =
-      text.slice(0, lineStart > prev ? lineStart : start) + text.slice(end);
-  }
-  // If that emptied a permissions key we created, remove the key too.
-  const parsed = scan(result);
-  if (parsed?.permissions) {
-    const { open, close, keyStart } = parsed.permissions;
-    if (previousSignificant(result, close) === open) {
-      const keyLine = result.lastIndexOf("\n", keyStart - 1);
-      const before = previousSignificant(result, keyStart);
-      let after = close + 1;
-      while (after < result.length && /[ \t]/.test(result[after])) after++;
-      if (result[after] === ",")
-        return result.slice(0, keyLine) + result.slice(after + 1);
-      if (result[before] === ",")
-        return result.slice(0, before) + result.slice(close + 1);
-      return (
-        result.slice(0, keyLine > before ? keyLine : keyStart) +
-        result.slice(close + 1)
-      );
-    }
-  }
-  return result;
-}
-
-type EditRecord = { path: string; before: string; after: string };
-
 /**
- * Apply the setting to this host's OpenCode global config. Writes only when
- * the file actually changes, atomically and with the file's mode kept.
- *
- * `statePath` remembers the file exactly as it was before the rule was
- * added. Removing the rule restores that text byte-for-byte when the file
- * is untouched since; if the user edited it meanwhile, only the rule is cut.
+ * Add the BB-tools deny rule to this host's OpenCode global config when it is
+ * missing. Writes only when the file changes, atomically and with the file's
+ * mode kept.
  */
-export async function syncBbToolsRule(
-  enabled: boolean,
+export async function ensureBbToolsRule(
   path = globalConfigPath(),
-  statePath?: string,
-): Promise<"added" | "removed" | "unchanged"> {
+): Promise<"added" | "unchanged"> {
   let text: string | undefined;
   let mode = 0o644;
   try {
     text = await readFile(path, "utf8");
     mode = (await stat(path)).mode & 0o777;
-  } catch {
-    if (!enabled) return "unchanged";
-  }
-  const record = statePath ? await readRecord(statePath) : undefined;
-  let next: string | undefined;
-  if (enabled) {
-    next = addBbToolsRule(text ?? "{}\n");
-    if (next === undefined) return "unchanged";
-  } else {
-    if (text === undefined) return "unchanged";
-    next =
-      record && record.path === path && record.after === text
-        ? record.before
-        : removeBbToolsRule(text);
-    if (next === undefined || next === text) return "unchanged";
-  }
-  if (enabled && statePath)
-    await writeFile(
-      statePath,
-      JSON.stringify({
-        path,
-        before: text ?? "",
-        after: next,
-      } satisfies EditRecord),
-    );
-  if (!enabled && next === "" && record?.before === "") {
-    // The file did not exist before BB created it.
-    await rm(path, { force: true });
-  } else {
-    const temp = `${path}.bb-${process.pid}.tmp`;
-    await writeFile(temp, next, { mode });
-    await rename(temp, path);
-  }
-  if (!enabled && statePath) await rm(statePath, { force: true });
-  return enabled ? "added" : "removed";
-}
-
-async function readRecord(statePath: string): Promise<EditRecord | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(statePath, "utf8"));
-    return typeof parsed?.path === "string" &&
-      typeof parsed.before === "string" &&
-      typeof parsed.after === "string"
-      ? parsed
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  } catch {}
+  const next = addBbToolsRule(text ?? "{}\n");
+  if (next === undefined) return "unchanged";
+  const temp = `${path}.bb-${process.pid}.tmp`;
+  await writeFile(temp, next, { mode });
+  await rename(temp, path);
+  return "added";
 }

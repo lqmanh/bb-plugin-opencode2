@@ -5,7 +5,7 @@ import {
   SESSION_OPTION_SELECTIONS_STATE_KIND,
 } from "../settings-contract.ts";
 import { dynamicToolCallRouter, emit, notify } from "./bridge-runtime.ts";
-import { sameModelRef, withSelectedAgent } from "./models.ts";
+import { withSelectedAgent } from "./models.ts";
 import { OpenCodeInteractions } from "./opencode-interactions.ts";
 import { toolFailureError } from "./prompt.ts";
 import { dynamicMcpServerName } from "./opencode-requests.ts";
@@ -296,10 +296,6 @@ export class OpenCodeEventRouter {
     }
     if (event.type === "session.agent.selected") {
       this.handleAgentSelected(session, data);
-      return;
-    }
-    if (event.type === "session.model.selected") {
-      this.handleModelSelected(session, data);
       return;
     }
     if (event.type === "session.renamed") {
@@ -796,30 +792,6 @@ export class OpenCodeEventRouter {
         kind: "extension.state",
         extensionKind: SESSION_OPTIONS_STATE_KIND,
         payload: { options },
-      },
-    ]);
-  }
-
-  /**
-   * OpenCode can change the model from its own UI. BB owns the sticky model,
-   * so keep local state accurate and surface the change; the next turn returns
-   * to BB's selection.
-   */
-  private handleModelSelected(session: SessionState, data: RecordValue) {
-    const raw = inputRecord(data.model);
-    const providerID = stringValue(raw.providerID);
-    const id = stringValue(raw.id);
-    if (!providerID || !id) return;
-    const variant = stringValue(raw.variant);
-    const next = { providerID, id, ...(variant ? { variant } : {}) };
-    if (sameModelRef(session.model, next)) return;
-    session.model = next;
-    session.contextWindow = undefined;
-    this.emit(session.bbThreadId, [
-      {
-        kind: "provider.warning",
-        summary: "OpenCode model changed",
-        details: `OpenCode selected ${providerID}/${id}${variant ? `#${variant}` : ""}. BB will use its selected model on the next turn.`,
       },
     ]);
   }

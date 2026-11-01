@@ -92,8 +92,7 @@ Inside `src/host/`:
 - **Catalog refresh is best-effort.** Plugin caches invalidate on OpenCode
   events; BB's own model and command caches refresh on their own schedule.
 - **OpenCode-side state changes are mirrored where BB has a surface.** Agent
-  selections update BB's option, titles fill only untitled threads, and model
-  changes produce a warning because BB owns the sticky model. Provider
+  selections update BB's option, and titles fill only untitled threads. Provider
   interactions cannot be cancelled by the bridge, so an externally answered form
   closes its row but not the BB card.
 

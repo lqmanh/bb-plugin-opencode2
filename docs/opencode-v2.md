@@ -127,10 +127,6 @@ location. `thread/start` and `thread/resume` clear a broken-thread reason.
 `bb/session-options` and `bb/session-option-selections`. Plan mode ignores the
 event for its turn so its own switch does not overwrite the user's choice.
 
-`session.model.selected` updates the bridge's local model and clears the cached
-context window. BB owns the sticky model, so the next turn switches back; the
-bridge emits a `provider.warning` when the change is external.
-
 `session.renamed` emits a `thread.name` delta with `source: "agent"`. BB applies
 it only to an untitled thread, so a BB title is never overwritten. A title this
 bridge set is ignored as its own echo.

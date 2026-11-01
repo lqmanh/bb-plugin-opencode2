@@ -19,8 +19,6 @@ All notable changes to this plugin are documented here. The format follows
   sent.
 - Agent changes made in OpenCode update BB's Agent option, and OpenCode titles
   fill an untitled BB thread.
-- External model changes in OpenCode show a warning; BB restores its selected
-  model on the next turn.
 - Live refresh of models, commands, and skills when OpenCode reports a change.
 - Session cost in BB's context and usage card.
 

@@ -1,21 +1,10 @@
-// The OpenCode global-config edit must be minimal and fully reversible.
+// The OpenCode global-config edit must be minimal and idempotent.
 import assert from "node:assert/strict";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-  statSync,
-  chmodSync,
-} from "node:fs";
+import { mkdtempSync, writeFileSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  addBbToolsRule,
-  removeBbToolsRule,
-  syncBbToolsRule,
-} from "./support/host-api.js";
+import { addBbToolsRule, ensureBbToolsRule } from "./support/host-api.js";
 
 const RULE =
   '{ "action": "bb_opencode2_*", "resource": "*", "effect": "deny" }';
@@ -56,7 +45,7 @@ const cases: Record<string, string> = {
 };
 
 for (const [name, original] of Object.entries(cases)) {
-  test(`adds one rule last and removes it exactly: ${name}`, () => {
+  test(`adds one rule last: ${name}`, () => {
     const added = addBbToolsRule(original);
     assert.ok(added);
     // Only additions: every original character survives in order.
@@ -79,72 +68,16 @@ for (const [name, original] of Object.entries(cases)) {
       assert.deepEqual(rest, before);
     }
     assert.equal(addBbToolsRule(added), undefined, "idempotent");
-    // Without a record (file edited since), only the rule is cut.
-    const cut = removeBbToolsRule(added);
-    assert.ok(cut && !cut.includes("bb_opencode2_"));
-    if (!name.startsWith("jsonc")) {
-      const { permissions = [], ...rest } = JSON.parse(cut);
-      const { permissions: before = [], ...beforeRest } = JSON.parse(original);
-      assert.deepEqual(rest, beforeRest);
-      assert.deepEqual(permissions, before);
-    }
-    assert.equal(removeBbToolsRule(original), undefined);
-  });
-
-  test(`restores the file byte-for-byte when untouched: ${name}`, async () => {
-    const dir = mkdtempSync(join(tmpdir(), "oc-config-"));
-    const path = join(dir, "opencode.json");
-    const state = join(dir, "edit.json");
-    writeFileSync(path, original);
-    assert.equal(await syncBbToolsRule(true, path, state), "added");
-    assert.equal(await syncBbToolsRule(false, path, state), "removed");
-    assert.equal(readFileSync(path, "utf8"), original);
   });
 }
 
-test("cuts only the rule when the user edited the file in between", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "oc-config-"));
-  const path = join(dir, "opencode.json");
-  const state = join(dir, "edit.json");
-  writeFileSync(path, cases["existing rules"]);
-  await syncBbToolsRule(true, path, state);
-  writeFileSync(
-    path,
-    readFileSync(path, "utf8").replace(
-      '"autoupdate": true',
-      '"autoupdate": false',
-    ),
-  );
-  assert.equal(await syncBbToolsRule(false, path, state), "removed");
-  assert.equal(
-    readFileSync(path, "utf8"),
-    cases["existing rules"].replace(
-      '"autoupdate": true',
-      '"autoupdate": false',
-    ),
-  );
-});
-
-test("removes a config file it created", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "oc-config-"));
-  const path = join(dir, "opencode.json");
-  const state = join(dir, "edit.json");
-  assert.equal(await syncBbToolsRule(true, path, state), "added");
-  assert.ok(JSON.parse(readFileSync(path, "utf8")).permissions);
-  assert.equal(await syncBbToolsRule(false, path, state), "removed");
-  assert.equal(existsSync(path), false);
-});
-
-test("writes only on change, keeps the file mode, and reverses", async () => {
+test("writes only on change and keeps the file mode", async () => {
   const dir = mkdtempSync(join(tmpdir(), "oc-config-"));
   const path = join(dir, "opencode.json");
   const original = cases["no permissions key"];
   writeFileSync(path, original);
   chmodSync(path, 0o600);
-  assert.equal(await syncBbToolsRule(true, path), "added");
-  assert.equal(await syncBbToolsRule(true, path), "unchanged");
+  assert.equal(await ensureBbToolsRule(path), "added");
+  assert.equal(await ensureBbToolsRule(path), "unchanged");
   assert.equal(statSync(path).mode & 0o777, 0o600);
-  assert.equal(await syncBbToolsRule(false, path), "removed");
-  assert.equal(readFileSync(path, "utf8"), original);
-  assert.equal(await syncBbToolsRule(false, path), "unchanged");
 });

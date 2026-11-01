@@ -35,16 +35,6 @@ export function normalizeModelSelection(value: unknown): ModelSelection {
   return { enabledModels: normalizeModelSettings(value).enabledModels };
 }
 
-export function legacyProviderSettings(
-  value: unknown,
-): ProviderSettingsValues | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return undefined;
-  const candidate = value as Record<string, unknown>;
-  if (!("disableSubagents" in candidate)) return undefined;
-  return { allowSubagents: candidate.disableSubagents === false };
-}
-
 export function normalizeModelSettings(value: unknown): ModelSettings {
   const parsed = modelSettingsSchema.safeParse(value);
   if (parsed.success) {

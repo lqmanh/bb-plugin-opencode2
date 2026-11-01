@@ -31,9 +31,8 @@ Set it with `bb thread spawn --option agent=<name>` or
 `bb thread options --set agent=<name>`; it applies on the next turn. BB's plan
 mode (`/plan` or `--plan`) runs that turn on OpenCode's `plan` agent and then
 returns to the selected agent. Agent changes made in OpenCode update BB's Agent
-option. Model changes made in OpenCode are replaced by BB's sticky model on the
-next turn and show a warning. Titles set in OpenCode fill an untitled BB thread.
-BB instructions are appended rather than replacing OpenCode's.
+option. Titles set in OpenCode fill an untitled BB thread. BB instructions are
+appended rather than replacing OpenCode's.
 
 OpenCode's slash commands are listed in the composer `/` menu. Commands run
 through OpenCode's own command registry, so project and MCP commands work too.

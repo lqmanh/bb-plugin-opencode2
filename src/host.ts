@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import {
   experimental_defineHostEntry,
   experimental_filterResolvedNativeRoots,
@@ -13,7 +12,7 @@ import {
   OPENCODE_LOGIN_COMMAND,
   providerHealth,
 } from "./host/maintenance.ts";
-import { syncBbToolsRule } from "./host/opencode-config.ts";
+import { ensureBbToolsRule } from "./host/opencode-config.ts";
 import { openCodeServer } from "./host/opencode-server.ts";
 import { MIN_OPENCODE_VERSION } from "./host/opencode-version.ts";
 import { shutdownBridge } from "./host/provider-bridge.ts";
@@ -72,11 +71,7 @@ export {
   answerFormFields,
   planFormQuestions,
 } from "./host/opencode-interactions.ts";
-export {
-  addBbToolsRule,
-  removeBbToolsRule,
-  syncBbToolsRule,
-} from "./host/opencode-config.ts";
+export { addBbToolsRule, ensureBbToolsRule } from "./host/opencode-config.ts";
 export { experimental_providerBridge } from "./host/provider-bridge.ts";
 export {
   agentOptionChoice,
@@ -169,13 +164,9 @@ export default experimental_defineHostEntry({
       await openCodeServer.writeModelSettings(input);
       // Best-effort: a config we cannot edit only leaves BB tools visible
       // to OpenCode's own sessions, where calling them is refused anyway.
-      await syncBbToolsRule(
-        true,
-        undefined,
-        join(context.experimental_paths.dataDir, "opencode2-config-edit.json"),
-      )
+      await ensureBbToolsRule()
         .then((result) => {
-          if (result !== "unchanged") openCodeServer.reloadConfigWhenIdle();
+          if (result === "added") openCodeServer.reloadConfigWhenIdle();
         })
         .catch((error) =>
           process.stderr.write(

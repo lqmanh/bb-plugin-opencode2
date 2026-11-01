@@ -853,7 +853,7 @@ test("cancels a form BB cannot represent with a visible reason", async () => {
   assert.match(close?.item.error, /external/);
 });
 
-test("syncs agent, model, and title changes made in OpenCode", async () => {
+test("syncs agent and title changes made in OpenCode", async () => {
   const { emitted, event, session } = sessionFixture(emptyApi);
   session.agent = "build";
   session.agentChoice = "build";
@@ -891,25 +891,6 @@ test("syncs agent, model, and title changes made in OpenCode", async () => {
   await event("session.agent.selected", { agent: "build" });
   assert.equal(session.agentChoice, "reviewer");
   session.planMode = false;
-
-  session.model = { providerID: "p", id: "m1" };
-  session.contextWindow = 1000;
-  await event("session.model.selected", {
-    model: { providerID: "p", id: "m2" },
-  });
-  assert.deepEqual(session.model, { providerID: "p", id: "m2" });
-  assert.equal(session.contextWindow, undefined);
-  assert.equal(
-    emitted.filter((delta) => delta.kind === "provider.warning").length,
-    1,
-  );
-  await event("session.model.selected", {
-    model: { providerID: "p", id: "m2" },
-  });
-  assert.equal(
-    emitted.filter((delta) => delta.kind === "provider.warning").length,
-    1,
-  );
 
   session.expectedTitle = "BB title";
   await event("session.renamed", { title: "BB title" });
