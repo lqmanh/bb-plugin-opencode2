@@ -3,6 +3,11 @@ import { z } from "zod";
 
 /** The BB session option through which OpenCode's primary agent is chosen. */
 export const AGENT_OPTION_ID = "agent";
+/** Core thread-state kind for the declared session options. */
+export const SESSION_OPTIONS_STATE_KIND = "bb/session-options";
+/** Core thread-state kind for the selected session-option values. */
+export const SESSION_OPTION_SELECTIONS_STATE_KIND =
+  "bb/session-option-selections";
 /** OpenCode's default primary agent. */
 export const DEFAULT_AGENT = "build";
 

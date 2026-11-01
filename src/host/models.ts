@@ -170,8 +170,8 @@ export function resolveModelVariant(
 
 /**
  * BB's native per-model session option for choosing OpenCode's primary agent.
- * It is the only way to pick `build` or `plan`, since the provider does not
- * offer BB's own plan mode.
+ * It shows and stores the agent BB returns to after a plan-mode turn; plan
+ * mode itself is the `/plan` composer action.
  */
 export function agentSessionOption(
   agents: readonly { id: string; description?: string }[],
@@ -196,6 +196,38 @@ export function agentSessionOption(
       ...(agent.description ? { description: agent.description } : {}),
     })),
   };
+}
+
+/**
+ * Patch the serialized agent session options after OpenCode selects an agent,
+ * so BB's Agent row shows it. Returns undefined when the published options are
+ * absent, unreadable, or cannot represent the agent.
+ */
+export function withSelectedAgent(
+  publishedOptions: string | undefined,
+  agent: string,
+): RecordValue[] | undefined {
+  if (!publishedOptions) return undefined;
+  let options: RecordValue[];
+  try {
+    const parsed: unknown = JSON.parse(publishedOptions);
+    if (!Array.isArray(parsed)) return undefined;
+    options = parsed.map(inputRecord);
+  } catch {
+    return undefined;
+  }
+  let changed = false;
+  for (const option of options) {
+    if (option.id !== AGENT_OPTION_ID) continue;
+    const values = Array.isArray(option.values)
+      ? option.values.map(inputRecord)
+      : [];
+    if (!values.some((value) => value.id === agent)) continue;
+    if (option.value === agent) continue;
+    option.value = agent;
+    changed = true;
+  }
+  return changed ? options : undefined;
 }
 
 export function mapModel(

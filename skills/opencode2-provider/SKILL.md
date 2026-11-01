@@ -29,8 +29,17 @@ of `provider/model` IDs (`[]` hides all).
 Primary agents, including `plan`, are the `agent` session option on each model.
 Set it with `bb thread spawn --option agent=<name>` or
 `bb thread options --set agent=<name>`; it applies on the next turn. BB's plan
-mode is not offered, and BB instructions are appended rather than replacing
-OpenCode's.
+mode (`/plan` or `--plan`) runs that turn on OpenCode's `plan` agent and then
+returns to the selected agent. Agent changes made in OpenCode update BB's Agent
+option. Model changes made in OpenCode are replaced by BB's sticky model on the
+next turn and show a warning. Titles set in OpenCode fill an untitled BB thread.
+BB instructions are appended rather than replacing OpenCode's.
+
+OpenCode's slash commands are listed in the composer `/` menu. Commands run
+through OpenCode's own command registry, so project and MCP commands work too.
+BB archive and unarchive are mirrored to the OpenCode session; if OpenCode
+archives, deletes, or moves the session externally, the next turn explains the
+problem and asks you to start a new thread or unarchive it.
 
 Settings apply from the next turn. If a turn appears stuck, the bridge
 reconciles with OpenCode every 30 seconds and after event-stream reconnects.

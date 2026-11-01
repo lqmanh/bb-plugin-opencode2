@@ -15,6 +15,8 @@ import { openCodeServer } from "./opencode-server.ts";
 import {
   MIN_OPENCODE_VERSION,
   isSupportedVersion,
+  readLatestVersionCache,
+  writeLatestVersionCache,
 } from "./opencode-version.ts";
 import { errorMessage } from "./types.ts";
 
@@ -23,18 +25,17 @@ export const OPENCODE_NPM_PACKAGE = "@opencode/cli";
 export const OPENCODE_LOGIN_COMMAND = "opencode2 auth login";
 
 const LATEST_VERSION_TTL_MS = 60 * 60 * 1000;
-let latestVersionCache: { at: number; value: string | null } | undefined;
 
 async function latestVersion(checkUpdates: boolean) {
+  const cached = readLatestVersionCache();
   if (
-    latestVersionCache &&
-    (!checkUpdates ||
-      Date.now() - latestVersionCache.at < LATEST_VERSION_TTL_MS)
+    cached &&
+    (!checkUpdates || Date.now() - cached.at < LATEST_VERSION_TTL_MS)
   )
-    return latestVersionCache.value;
+    return cached.value;
   if (!checkUpdates) return null;
   const value = await npmLatestVersion(OPENCODE_NPM_PACKAGE).catch(() => null);
-  latestVersionCache = { at: Date.now(), value };
+  writeLatestVersionCache(value);
   return value;
 }
 

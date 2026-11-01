@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { OpenCodeServer } from "./support/host-api.js";
+import { OpenCodeServer, sessionsByProviderId } from "./support/host-api.js";
+import {
+  ARCHIVED_SESSION_MESSAGE,
+  type SessionState,
+} from "../src/host/types.ts";
 
 test("follows checkpoint cursors even when a page is shorter than the requested limit", async () => {
   const inputs: { limit?: number; order?: string; cursor?: string }[] = [];
@@ -188,4 +192,84 @@ test("serializes MCP registry mutations without dropping persisted entries", asy
     existing: { serverName: "bb_existing", cwd: "/existing" },
     "session-c": { serverName: "bb_c", cwd: "/c" },
   });
+});
+
+test("caches the command catalog until a command.updated event", async () => {
+  let calls = 0;
+  const server = new OpenCodeServer();
+  Object.assign(server, {
+    api: async () => ({
+      command: {
+        list: async () => {
+          calls += 1;
+          return {
+            data: [
+              { name: "init", description: "guided setup" },
+              { name: "review" },
+            ],
+          };
+        },
+      },
+    }),
+  });
+
+  assert.deepEqual(await server.commands("/repo"), [
+    { name: "init", description: "guided setup" },
+    { name: "review", description: "" },
+  ]);
+  await server.commands("/repo");
+  assert.equal(calls, 1);
+
+  await server.handleEvent({ type: "command.updated", data: {} });
+  await server.commands("/repo");
+  assert.equal(calls, 2);
+});
+
+test("forwards archive state and consumes its own archive event", async () => {
+  const updates: Record<string, unknown>[] = [];
+  const server = new OpenCodeServer();
+  Object.assign(server, {
+    api: async () => ({
+      session: {
+        update: async (input: Record<string, unknown>) => {
+          updates.push(input);
+        },
+      },
+    }),
+  });
+  const session = {
+    bbThreadId: "bb-archive",
+    providerThreadId: "ses_archive",
+    cwd: "/repo",
+    disableSubagents: true,
+    dynamicTools: [],
+    disallowedTools: new Set(),
+    enabledModels: null,
+    instructions: "",
+    bridgeEnvVars: {},
+    dynamicToolScope: {},
+    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+  } as SessionState;
+  sessionsByProviderId.set(session.providerThreadId, session);
+  try {
+    await server.setSessionArchived(session.providerThreadId, true);
+    assert.deepEqual(updates, [{ sessionID: "ses_archive", archived: true }]);
+
+    // The event caused by BB's own update must not look like an external
+    // archive to the lifecycle handler.
+    await server.handleEvent({
+      type: "session.archived",
+      data: { sessionID: session.providerThreadId },
+    });
+    assert.equal(session.terminalError, undefined);
+
+    // Unarchiving through BB clears the externally archived state directly.
+    session.terminalError = ARCHIVED_SESSION_MESSAGE;
+    session.terminalKind = "archived";
+    await server.setSessionArchived(session.providerThreadId, false);
+    assert.equal(session.terminalError, undefined);
+    assert.equal(session.terminalKind, undefined);
+  } finally {
+    sessionsByProviderId.delete(session.providerThreadId);
+  }
 });

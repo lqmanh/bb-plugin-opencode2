@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type { ModelSettings } from "../settings-contract.ts";
 import {
   BRIDGE_JSON_RPC_ERRORS,
+  commandListParamsSchema,
   createBridgeLineHandler,
   experimental_defineProviderBridge,
   initializeParamsSchema,
@@ -12,12 +13,14 @@ import {
   providerMaintenanceParamsSchema,
   runBridgeRequest,
   skillsConfigureParamsSchema,
+  threadArchiveParamsSchema,
   threadDiscardParamsSchema,
   threadForkParamsSchema,
   threadNameSetParamsSchema,
   threadResumeParamsSchema,
   threadStartParamsSchema,
   threadStopParamsSchema,
+  threadUnarchiveParamsSchema,
   THREAD_DELTA_GRAMMAR_V3,
   turnStartParamsSchema,
   turnSteerParamsSchema,
@@ -49,7 +52,12 @@ import {
   providerHealth,
 } from "./maintenance.ts";
 import { openCodeServer } from "./opencode-server.ts";
-import { promptBody } from "./prompt.ts";
+import {
+  hasCommandMention,
+  promptBody,
+  selectedCommandMention,
+  withoutCommandMention,
+} from "./prompt.ts";
 import {
   ensureSessionModel,
   prepareTurn,
@@ -83,6 +91,7 @@ let configuredSkillNames: Set<string> | undefined;
 const PARAM_SCHEMAS = {
   initialize: initializeParamsSchema,
   "model/list": modelListParamsSchema,
+  "commands/list": commandListParamsSchema,
   "provider/health": providerMaintenanceParamsSchema,
   "provider/installation/status": providerInstallationStatusParamsSchema,
   "provider/installation/run": providerInstallationRunParamsSchema,
@@ -91,6 +100,8 @@ const PARAM_SCHEMAS = {
   "thread/fork": threadForkParamsSchema,
   "thread/stop": threadStopParamsSchema,
   "thread/discard": threadDiscardParamsSchema,
+  "thread/archive": threadArchiveParamsSchema,
+  "thread/unarchive": threadUnarchiveParamsSchema,
   "thread/name/set": threadNameSetParamsSchema,
   "turn/start": turnStartParamsSchema,
   "turn/steer": turnSteerParamsSchema,
@@ -101,6 +112,50 @@ function providerSessionId(session: { id?: unknown }): string {
   const id = stringValue(session.id);
   if (!id) throw new Error("OpenCode did not return a session ID");
   return id;
+}
+
+/**
+ * Only commands OpenCode currently lists are dispatched as commands. A stale
+ * BB mention stays ordinary text instead of failing the turn.
+ */
+async function selectedSessionCommand(
+  session: SessionState,
+  input: RecordValue[],
+): Promise<{ name: string } | undefined> {
+  if (!hasCommandMention(input)) return undefined;
+  try {
+    return selectedCommandMention(
+      input,
+      await openCodeServer.commandNames(session.cwd),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Route a turn's input to an OpenCode command or a normal prompt: strip the
+ * plan mention, look up the command, and build the prompt body.
+ */
+async function prepareTurnInput(
+  session: SessionState,
+  input: RecordValue[],
+  planMode: boolean,
+) {
+  const promptInput = planMode ? withoutCommandMention(input, "plan") : input;
+  const command = planMode
+    ? undefined
+    : await selectedSessionCommand(session, promptInput);
+  const body = promptBody(
+    command ? withoutCommandMention(promptInput, command.name) : promptInput,
+    {
+      configuredSkillNames,
+      disableSubagents: session.disableSubagents,
+      nativeSkillNames: session.nativeSkillNames,
+      skillFiles: configuredSkillFiles,
+    },
+  );
+  return { command, body };
 }
 
 async function configureSession(
@@ -148,7 +203,7 @@ async function handle(request: RecordValue) {
         protocolVersion: 2,
         capabilities: {
           sessionRestore: true,
-          threadArchive: false,
+          threadArchive: true,
           threadRename: true,
           threadGoalClear: false,
           fork: "checkpoint",
@@ -156,6 +211,7 @@ async function handle(request: RecordValue) {
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
           steerMode: "queue",
           skills: { configure: true },
+          commands: { list: true },
         },
       });
       return;
@@ -175,6 +231,12 @@ async function handle(request: RecordValue) {
     case "provider/installation/run":
       sendResult(request.id, await installationRun(params.action));
       return;
+    case "commands/list": {
+      sendResult(request.id, {
+        commands: await openCodeServer.commands(String(params.cwd)),
+      });
+      return;
+    }
     case "model/list": {
       const cwd = params.cwd ?? process.cwd();
       const settings = await openCodeServer.readModelSettings();
@@ -218,6 +280,7 @@ async function handle(request: RecordValue) {
       return;
     }
     case "thread/start": {
+      openCodeServer.clearThreadBroken(String(params.threadId));
       const modelSettings = await openCodeServer.readModelSettings(
         params.options?.providerOptions,
       );
@@ -254,6 +317,7 @@ async function handle(request: RecordValue) {
       return;
     }
     case "thread/resume": {
+      openCodeServer.clearThreadBroken(String(params.threadId));
       await openCodeServer.start();
       const modelSettings = await openCodeServer.readModelSettings(
         params.options?.providerOptions,
@@ -364,6 +428,7 @@ async function handle(request: RecordValue) {
           providerThreadId: params.sourceProviderThreadId,
           sessionRestorable: true,
         });
+        void publishAgentOption(rewound);
         return;
       }
       const boundary = await openCodeServer.forkBoundaryRetainingThrough(
@@ -393,20 +458,44 @@ async function handle(request: RecordValue) {
       });
       emit(params.threadId, [{ kind: "session.reset" }]);
       sendResult(request.id, { providerThreadId, sessionRestorable: true });
+      const forked = sessions.get(params.threadId);
+      if (forked) void publishAgentOption(forked);
       return;
     }
     case "thread/name/set": {
-      const api = await openCodeServer.api();
-      await api.session.update({
-        sessionID: params.providerThreadId,
-        title: params.title,
-      });
+      const session = sessions.get(params.threadId);
+      if (session) session.expectedTitle = params.title;
+      try {
+        const api = await openCodeServer.api();
+        await api.session.update({
+          sessionID: params.providerThreadId,
+          title: params.title,
+        });
+      } catch (error) {
+        if (session && session.expectedTitle === params.title)
+          session.expectedTitle = undefined;
+        throw error;
+      }
+      sendResult(request.id, { ok: true });
+      return;
+    }
+    case "thread/archive":
+    case "thread/unarchive": {
+      await openCodeServer.setSessionArchived(
+        String(params.providerThreadId),
+        request.method === "thread/archive",
+      );
       sendResult(request.id, { ok: true });
       return;
     }
     case "turn/start": {
       const session = sessions.get(params.threadId);
-      if (!session) throw new Error("No active OpenCode session");
+      if (!session)
+        throw new Error(
+          openCodeServer.threadBrokenReason(params.threadId) ??
+            "No active OpenCode session",
+        );
+      if (session.terminalError) throw new Error(session.terminalError);
       if (session.active) throw new Error("An OpenCode turn is already active");
       const active: ActiveTurn = {
         providerTurnId: `turn_${Date.now()}_${nextBridgeSequence()}`,
@@ -474,29 +563,45 @@ async function handle(request: RecordValue) {
       // OpenCode reasoning effort is a model variant, and the prompt endpoint
       // accepts no model: switch the session model first so the effort picker
       // reaches OpenCode, then prompt.
+      // BB's plan mode is a `/plan` mention on the input; the OpenCode command
+      // of that name is not executed, the session switches to the `plan` agent.
+      const planMode = inputRecord(params.options).promptMode === "plan";
       // Track the user message ID optimistically so turn.boundary always
       // carries a providerCheckpointId for rewind/edit, even if the prompt
-      // response is slow. The response ID should match; keep the latest.
+      // response is slow. The response ID should match; keep the latest. A
+      // command turn has no message ID and replaces this with its inbox ID.
       const promptId = `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       active.checkpointId = promptId;
       active.promptIds = new Set([promptId]);
-      const promptPayload = {
-        id: promptId,
-        ...promptBody(params.input, {
-          configuredSkillNames,
-          disableSubagents: session.disableSubagents,
-          nativeSkillNames: session.nativeSkillNames,
-          skillFiles: configuredSkillFiles,
-        }),
-        delivery: "steer" as const,
-      };
       void (async () => {
         try {
           await prepareTurn(session, params.options);
+          const { command, body } = await prepareTurnInput(
+            session,
+            params.input,
+            planMode,
+          );
           const api = await openCodeServer.api();
+          if (command) {
+            // `session.command` returns no message ID. Keep the turn waiting
+            // for the first inbox message and adopt that as its checkpoint.
+            active.checkpointId = undefined;
+            active.promptIds = new Set();
+            active.awaitingCommandCheckpoint = true;
+            await api.session.command({
+              sessionID: session.providerThreadId,
+              name: command.name,
+              ...body,
+              delivery: "steer",
+            });
+            active.promptDelivered = true;
+            return;
+          }
           const result = await api.session.prompt({
             sessionID: session.providerThreadId,
-            ...promptPayload,
+            id: promptId,
+            ...body,
+            delivery: "steer",
           });
           const id = stringValue(result.id);
           if (id && session.active === active) {
@@ -519,7 +624,12 @@ async function handle(request: RecordValue) {
     }
     case "turn/steer": {
       const session = sessions.get(params.threadId);
-      if (!session) throw new Error("No active OpenCode session");
+      if (!session)
+        throw new Error(
+          openCodeServer.threadBrokenReason(params.threadId) ??
+            "No active OpenCode session",
+        );
+      if (session.terminalError) throw new Error(session.terminalError);
       const clientRequestId = stringValue(params.clientRequestId);
       if (!clientRequestId)
         throw new Error("Missing clientRequestId for steered input");
@@ -545,31 +655,47 @@ async function handle(request: RecordValue) {
           { kind: "turn.open", providerTurnId: active.providerTurnId },
         ]);
       }
+      const planMode = inputRecord(params.options).promptMode === "plan";
       try {
-        await prepareTurn(session, params.options);
+        await prepareTurn(session, params.options, { newTurn: openedTurn });
         const promptId = `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
         // Register before sending: OpenCode may report delivery first.
         (active.promptIds ??= new Set()).add(promptId);
         const api = await openCodeServer.api();
-        const result = await api.session.prompt({
-          sessionID: session.providerThreadId,
-          id: promptId,
-          ...promptBody(params.input, {
-            configuredSkillNames,
-            disableSubagents: session.disableSubagents,
-            nativeSkillNames: session.nativeSkillNames,
-            skillFiles: configuredSkillFiles,
-          }),
-          delivery: "steer",
-        });
+        const { command, body } = await prepareTurnInput(
+          session,
+          params.input,
+          planMode,
+        );
+        let id: string | undefined = promptId;
+        if (command) {
+          active.promptIds.delete(promptId);
+          active.awaitingCommandCheckpoint = true;
+          await api.session.command({
+            sessionID: session.providerThreadId,
+            name: command.name,
+            ...body,
+            delivery: "steer",
+          });
+          id = undefined;
+        } else {
+          const result = await api.session.prompt({
+            sessionID: session.providerThreadId,
+            id: promptId,
+            ...body,
+            delivery: "steer",
+          });
+          id = stringValue(result.id) ?? promptId;
+        }
         if (session.active !== active) {
           throw new Error(
             "OpenCode turn ended before steered input was accepted",
           );
         }
-        const id = stringValue(result.id) ?? promptId;
-        active.checkpointId = id;
-        active.promptIds.add(id);
+        if (id) {
+          active.checkpointId = id;
+          active.promptIds.add(id);
+        }
         active.promptDelivered = true;
         emit(session.bbThreadId, [
           steerAcceptedDelta(clientRequestId, active.providerTurnId),
@@ -597,13 +723,17 @@ async function handle(request: RecordValue) {
       return;
     }
     case "thread/discard": {
+      openCodeServer.clearThreadBroken(String(params.threadId));
       const session = sessions.get(params.threadId);
       if (session) {
+        session.closing = true;
         const api = await openCodeServer.api().catch(() => undefined);
         if (api)
           await api.session
             .remove({ sessionID: session.providerThreadId })
-            .catch(() => {});
+            .catch(() => {
+              session.closing = false;
+            });
         await releaseDynamicTools(session, "The BB thread was discarded");
       } else if (
         typeof params.providerThreadId === "string" &&

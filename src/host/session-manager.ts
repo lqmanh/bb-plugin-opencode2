@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import {
   AGENT_OPTION_ID,
   DEFAULT_AGENT,
+  SESSION_OPTIONS_STATE_KIND,
   type ModelSettings,
 } from "../settings-contract.ts";
 import { dynamicToolCallRouter, emit } from "./bridge-runtime.ts";
@@ -28,6 +29,7 @@ import {
 import { openCodeServer } from "./opencode-server.ts";
 import { enabledDynamicTools, sameDynamicTools } from "./prompt.ts";
 import {
+  ARCHIVED_SESSION_MESSAGE,
   errorMessage,
   inputRecord,
   parsePermissionMode,
@@ -215,12 +217,14 @@ async function installSessionInstructions(session: SessionState) {
 export async function ensureSessionPermissions(
   session: SessionState,
   permissionMode = session.permissionMode,
+  planMode = false,
 ) {
   const rules = sessionPermissionRules({
     permissionMode,
     disableSubagents: session.disableSubagents,
     dynamicToolServer: dynamicMcpServerName(session.providerThreadId),
     dynamicToolNames: session.dynamicTools.map((tool) => tool.name),
+    planMode,
   });
   const key = JSON.stringify(rules);
   if (session.appliedPermissions === key) {
@@ -259,6 +263,16 @@ async function installSessionEnvironment(session: SessionState) {
 
 export async function registerSession(session: SessionState) {
   const previous = sessions.get(session.bbThreadId);
+  if (!session.agent && previous?.providerThreadId === session.providerThreadId)
+    session.agent = previous.agent;
+  const state = await openCodeServer
+    .sessionState(session.providerThreadId)
+    .catch(() => undefined);
+  session.agent ??= state?.agent;
+  if (state?.archived) {
+    session.terminalError = ARCHIVED_SESSION_MESSAGE;
+    session.terminalKind = "archived";
+  }
   const reusableProxy =
     previous &&
     previous.providerThreadId === session.providerThreadId &&
@@ -342,11 +356,19 @@ export async function ensureSessionModel(
   const resolved = resolveModelVariant(desired, entry);
   if (!force && sameModelRef(session.model, resolved)) return;
   const api = await openCodeServer.api();
-  await api.session.switchModel({
-    sessionID: session.providerThreadId,
-    model: resolved,
-  });
+  // Set the model before the call: OpenCode emits `session.model.selected`
+  // while switching, and the router must recognize that event as our own.
+  const previous = session.model;
   session.model = resolved;
+  try {
+    await api.session.switchModel({
+      sessionID: session.providerThreadId,
+      model: resolved,
+    });
+  } catch (error) {
+    session.model = previous;
+    throw error;
+  }
 }
 
 export async function shutdownSessions(reason: string): Promise<void> {
@@ -421,6 +443,21 @@ export async function ensureSessionAgent(
 }
 
 /**
+ * The agent BB's Agent row should show. During a plan turn it names the agent
+ * the next ordinary turn returns to, matching `planAgentTransition`.
+ */
+export function agentOptionChoice(
+  session: Pick<
+    SessionState,
+    "agent" | "agentChoice" | "planMode" | "agentBeforePlan"
+  >,
+): string | undefined {
+  return session.planMode
+    ? (session.agentChoice ?? session.agentBeforePlan)
+    : (session.agentChoice ?? session.agent);
+}
+
+/**
  * Tell BB which agent this thread is on, so `bb thread options` and the
  * composer can show and change it after the thread exists. The model list only
  * offers the option before a thread does.
@@ -430,7 +467,7 @@ export async function publishAgentOption(session: SessionState) {
     .primaryAgents(session.cwd)
     .catch(() => undefined);
   if (!agents) return;
-  const option = agentSessionOption(agents, session.agentChoice);
+  const option = agentSessionOption(agents, agentOptionChoice(session));
   const options = option ? [option] : [];
   const serialized = JSON.stringify(options);
   if (session.publishedAgentOptions === serialized) return;
@@ -438,17 +475,72 @@ export async function publishAgentOption(session: SessionState) {
   emit(session.bbThreadId, [
     {
       kind: "extension.state",
-      extensionKind: "bb/session-options",
+      extensionKind: SESSION_OPTIONS_STATE_KIND,
       payload: { options },
     },
   ]);
 }
 
 /**
+ * Decide which OpenCode agent a turn needs. BB's plan mode maps to OpenCode's
+ * `plan` agent for one turn; the next ordinary turn returns to the agent picked
+ * through the `agent` session option.
+ */
+export function planAgentTransition(
+  session: Pick<
+    SessionState,
+    "agent" | "agentChoice" | "planMode" | "agentBeforePlan"
+  >,
+  planMode: boolean,
+  newTurn: boolean,
+): string | undefined {
+  if (planMode) {
+    if (!session.planMode) {
+      session.planMode = true;
+      session.agentBeforePlan =
+        session.agent && session.agent !== "plan" ? session.agent : undefined;
+    }
+    return "plan";
+  }
+  // A steer belongs to the running turn; it must not leave plan mode early.
+  if (!newTurn) return undefined;
+  if (session.planMode) {
+    session.planMode = false;
+    const restore =
+      session.agentChoice ?? session.agentBeforePlan ?? DEFAULT_AGENT;
+    session.agentBeforePlan = undefined;
+    return restore;
+  }
+  // The worker may have restarted after a plan turn, leaving OpenCode on the
+  // plan agent without the in-memory flag.
+  if (session.agent === "plan" && session.agentChoice !== "plan") {
+    return session.agentChoice ?? DEFAULT_AGENT;
+  }
+  return session.agentChoice;
+}
+
+/**
+ * Whether this turn keeps plan mode's file-edit denies. A steer joins the
+ * running turn, and BB only sends `promptMode` on the message that starts the
+ * plan, so the session's own flag has to carry the denies over.
+ */
+export function planPermissionModeForTurn(
+  planMode: boolean,
+  newTurn: boolean,
+  sessionPlanMode: boolean | undefined,
+) {
+  return planMode || (!newTurn && sessionPlanMode === true);
+}
+
+/**
  * Bring the OpenCode session in line with this turn's BB options before
  * prompting: plugin settings, permission mode, agent, and model.
  */
-export async function prepareTurn(session: SessionState, options: unknown) {
+export async function prepareTurn(
+  session: SessionState,
+  options: unknown,
+  turn: { newTurn?: boolean } = {},
+) {
   const opts = inputRecord(options);
   const settings = await openCodeServer.readModelSettings(opts.providerOptions);
   session.disableSubagents =
@@ -457,13 +549,21 @@ export async function prepareTurn(session: SessionState, options: unknown) {
     session.disallowedTools.has("subagent");
   session.enabledModels =
     settings.enabledModels === null ? null : new Set(settings.enabledModels);
+  if (!session.nativeSkillNames)
+    session.nativeSkillNames = await openCodeServer.nativeSkillNames(
+      session.cwd,
+    );
+  const planMode = opts.promptMode === "plan";
+  const newTurn = turn.newTurn !== false;
   await ensureSessionPermissions(
     session,
     parsePermissionMode(opts.permissionMode) ?? session.permissionMode,
+    planPermissionModeForTurn(planMode, newTurn, session.planMode),
   );
   // BB sends its native choice only when it changes, so keep it for later turns.
   session.agentChoice = nativeAgentChoice(opts) ?? session.agentChoice;
-  await ensureSessionAgent(session, session.agentChoice);
+  const agent = planAgentTransition(session, planMode, newTurn);
+  if (agent) await ensureSessionAgent(session, agent);
   void publishAgentOption(session);
   await ensureSessionModel(session, turnModelRef(session, options));
 }

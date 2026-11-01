@@ -2,8 +2,10 @@ import { pathToFileURL } from "node:url";
 import type { SessionPromptInput } from "@opencode/client";
 import {
   dynamicToolSchema,
+  removeCommandMentionsFromPromptInput,
   type DynamicTool,
   type PermissionMode,
+  type PromptInput,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import {
   inputRecord,
@@ -82,6 +84,75 @@ export function toolFailureError(
 
 type PromptFile = NonNullable<SessionPromptInput["files"]>[number];
 type PromptSkill = NonNullable<SessionPromptInput["skills"]>[number];
+
+function isCommandMention(mention: unknown): boolean {
+  const resource = inputRecord(inputRecord(mention).resource);
+  return (
+    resource.kind === "command" &&
+    resource.source === "command" &&
+    resource.trigger === "/"
+  );
+}
+
+/**
+ * Whether the input carries a slash command mention at all. Avoids fetching
+ * OpenCode's command catalog for ordinary prompts.
+ */
+export function hasCommandMention(input: readonly RecordValue[]): boolean {
+  return input.some(
+    (part) =>
+      part.type === "text" &&
+      Array.isArray(part.mentions) &&
+      part.mentions.some(isCommandMention),
+  );
+}
+
+/**
+ * The first slash command BB accepted from its command menu. Only commands
+ * OpenCode currently lists are routed to `session.command`; anything else
+ * stays ordinary prompt text.
+ */
+export function selectedCommandMention(
+  input: readonly RecordValue[],
+  knownCommands: ReadonlySet<string>,
+): { name: string } | undefined {
+  for (const part of input) {
+    if (part.type !== "text" || typeof part.text !== "string") continue;
+    const mentions = Array.isArray(part.mentions) ? part.mentions : [];
+    for (const mention of mentions) {
+      if (!isCommandMention(mention)) continue;
+      const resource = inputRecord(mention.resource);
+      const name = stringValue(resource.name);
+      const start = mention.start;
+      const end = mention.end;
+      if (!name || !knownCommands.has(name)) continue;
+      if (
+        typeof start !== "number" ||
+        typeof end !== "number" ||
+        !Number.isInteger(start) ||
+        !Number.isInteger(end) ||
+        start < 0 ||
+        start >= end ||
+        end > part.text.length ||
+        part.text.slice(start, end) !== `/${name}`
+      )
+        continue;
+      return { name };
+    }
+  }
+  return undefined;
+}
+
+/** Remove a `/command` mention while keeping every other mention aligned. */
+export function withoutCommandMention(
+  input: readonly RecordValue[],
+  name: string,
+): RecordValue[] {
+  return removeCommandMentionsFromPromptInput(input as PromptInput[], {
+    trigger: "/",
+    name,
+  }) as RecordValue[];
+}
 
 export function promptBody(
   input: RecordValue[],

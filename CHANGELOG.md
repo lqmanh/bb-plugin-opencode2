@@ -5,13 +5,41 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- OpenCode slash commands in BB's `/` menu, run through OpenCode's own command
+  registry.
+- BB plan mode (`/plan` and `--plan`) is available again, running that turn on
+  OpenCode's read-only `plan` agent before returning to the selected agent.
+- Archive and unarchive forwarding to OpenCode sessions, with recovery messages
+  when a session is archived, deleted, or moved outside BB.
+- OpenCode forms that fit BB's question schema use BB's native question UI;
+  unsupported forms are cancelled with a visible reason. Forms and permissions
+  answered in another OpenCode client are recognized, so a stale answer is never
+  sent.
+- Agent changes made in OpenCode update BB's Agent option, and OpenCode titles
+  fill an untitled BB thread.
+- External model changes in OpenCode show a warning; BB restores its selected
+  model on the next turn.
+- Live refresh of models, commands, and skills when OpenCode reports a change.
+- Session cost in BB's context and usage card.
+
 ### Changed
 
 - Turn diffs now use OpenCode's `session.diff`; file-change rows use OpenCode
-  tool metadata, and write rows no longer carry a per-file patch. Question forms
-  and MCP startup wait for OpenCode events instead of polling.
+  tool metadata, and write rows no longer carry a per-file patch.
+- Question forms and MCP startup wait for OpenCode events instead of polling.
 - Provider enablement now uses BB's provider controls, and the BB-tools deny
-  rule is always applied.
+  rule is always kept in the global OpenCode config.
+
+### Removed
+
+- The `providerEnabled` and `hideBbToolsOutsideBb` settings and their toggles.
+
+### Fixed
+
+- Forks created without a prompt publish their session options, so the Agent row
+  is available before the first turn.
 
 ## [1.3.0] - 2026-11-01
 

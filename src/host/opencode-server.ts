@@ -22,6 +22,7 @@ import { OpenCodeEventRouter } from "./opencode-event-router.ts";
 import {
   MIN_OPENCODE_VERSION,
   isSupportedVersion,
+  resetLatestVersionCache,
 } from "./opencode-version.ts";
 import { writeJsonFileAtomic } from "./persistence.ts";
 import {
@@ -29,6 +30,7 @@ import {
   inputRecord,
   stringValue,
   sessions,
+  sessionsByProviderId,
   type OpenCodeRecord,
   type SessionState,
 } from "./types.ts";
@@ -39,7 +41,11 @@ const SETTINGS_FILE = "opencode2-model-settings.json";
 const MCP_REGISTRY_FILE = "opencode2-mcp-registry.json";
 const SESSION_REGISTRY_FILE = "opencode2-session-registry.json";
 
-const MODEL_CATALOG_TTL_MS = 60_000;
+const CATALOG_TTL_MS = 60_000;
+const CATALOG_COLD_RETRIES = 10;
+const CATALOG_COLD_RETRY_MS = 300;
+const COMMAND_CATALOG_MAX = 500;
+const ARCHIVE_EVENT_TTL_MS = 30_000;
 const MCP_CONNECT_TIMEOUT_MS = 10_000;
 const MCP_SETTLE_MS = 1_000;
 const CONFIG_RELOAD_RETRY_MS = 30_000;
@@ -48,8 +54,6 @@ const CONFIG_RELOAD_MAX_ATTEMPTS = 2_880;
 const RECONCILE_INTERVAL_MS = 30_000;
 const RECONCILE_MIN_TURN_AGE_MS = 10_000;
 const RECONCILE_SETTLE_MS = 5_000;
-const MODEL_CATALOG_COLD_RETRIES = 10;
-const MODEL_CATALOG_COLD_RETRY_MS = 300;
 
 function isBusyError(error: unknown) {
   return (
@@ -83,6 +87,13 @@ export type OpenCodeModelCatalog = {
 };
 
 export type McpBridgeRegistration = { serverName: string; cwd: string };
+
+export type OpenCodeCommand = {
+  name: string;
+  description: string;
+};
+
+type CatalogCache<T> = Map<string, { at: number; result: Promise<T> }>;
 
 // Persisted so an in-place rewind (BB reuses the same BB thread ID) still
 // works when the host worker holding the live session is gone: after a worker
@@ -131,7 +142,14 @@ export class OpenCodeServer {
   private eventAbortController?: AbortController;
   private watchdog?: ReturnType<typeof setInterval>;
   private connectionGeneration = 0;
-  private readonly eventRouter = new OpenCodeEventRouter(() => this.api());
+  private readonly eventRouter = new OpenCodeEventRouter(
+    () => this.api(),
+    undefined,
+    sessionsByProviderId,
+    {
+      onSessionGone: (session, reason) => this.sessionGone(session, reason),
+    },
+  );
 
   setDataDir(dataDir: string) {
     this.dataDir = dataDir;
@@ -456,10 +474,45 @@ export class OpenCodeServer {
     return this.client;
   }
 
-  private modelCatalogs = new Map<
-    string,
-    { at: number; result: Promise<OpenCodeModelCatalog> }
-  >();
+  private async cachedCatalog<T>(
+    cache: CatalogCache<T>,
+    cwd: string,
+    fresh: boolean,
+    load: () => Promise<T>,
+    isEmpty: (value: T) => boolean,
+  ): Promise<T> {
+    const cached = cache.get(cwd);
+    if (!fresh && cached && Date.now() - cached.at < CATALOG_TTL_MS)
+      return cached.result;
+    const result = load();
+    cache.set(cwd, { at: Date.now(), result });
+    const forget = () => {
+      if (cache.get(cwd)?.result === result) cache.delete(cwd);
+    };
+    result.then((value) => {
+      if (isEmpty(value)) forget();
+    }, forget);
+    return result;
+  }
+
+  /**
+   * A location OpenCode has not loaded yet answers with an empty list for a
+   * few hundred milliseconds, so retry briefly before trusting it.
+   */
+  private async coldList<T>(load: () => Promise<T[]>): Promise<T[]> {
+    let items: T[] = [];
+    for (let attempt = 0; attempt < CATALOG_COLD_RETRIES; attempt++) {
+      if (attempt > 0)
+        await new Promise((resolve) =>
+          setTimeout(resolve, CATALOG_COLD_RETRY_MS),
+        );
+      items = await load();
+      if (items.length > 0) break;
+    }
+    return items;
+  }
+
+  private modelCatalogs: CatalogCache<OpenCodeModelCatalog> = new Map();
 
   /**
    * OpenCode's models and default model for a workspace. Cached briefly so a
@@ -470,59 +523,45 @@ export class OpenCodeServer {
     cwd: string,
     fresh = false,
   ): Promise<OpenCodeModelCatalog> {
-    const cached = this.modelCatalogs.get(cwd);
-    if (!fresh && cached && Date.now() - cached.at < MODEL_CATALOG_TTL_MS)
-      return cached.result;
-    const result = (async () => {
-      const api = await this.api();
-      const location = { directory: cwd };
-      // A location OpenCode has not loaded yet answers with an empty list
-      // for a few hundred milliseconds, so retry briefly before trusting it.
-      let models: RecordValue[] = [];
-      for (let attempt = 0; attempt < MODEL_CATALOG_COLD_RETRIES; attempt++) {
-        if (attempt > 0)
-          await new Promise((resolve) =>
-            setTimeout(resolve, MODEL_CATALOG_COLD_RETRY_MS),
-          );
-        const list = await api.model.list({ location });
-        models = (Array.isArray(list.data) ? list.data : [])
-          .map(inputRecord)
-          .filter(
-            (model) =>
-              model.enabled !== false &&
-              stringValue(model.providerID) !== undefined &&
-              stringValue(model.id) !== undefined,
-          );
-        if (models.length > 0) break;
-      }
-      const fallback = await api.model
-        .default({ location })
-        .catch(() => undefined);
-      const defaultModel = inputRecord(fallback?.data);
-      const defaultId =
-        stringValue(defaultModel.providerID) && stringValue(defaultModel.id)
-          ? `${defaultModel.providerID}/${defaultModel.id}`
-          : undefined;
-      return {
-        models,
-        defaultId,
-        entries: new Map(
-          models.map((model) => {
-            const entry = modelCatalogEntry(model);
-            return [entry.id, entry] as const;
-          }),
-        ),
-      };
-    })();
-    this.modelCatalogs.set(cwd, { at: Date.now(), result });
-    const forget = () => {
-      if (this.modelCatalogs.get(cwd)?.result === result)
-        this.modelCatalogs.delete(cwd);
-    };
-    result.then((catalog) => {
-      if (catalog.models.length === 0) forget();
-    }, forget);
-    return result;
+    return this.cachedCatalog(
+      this.modelCatalogs,
+      cwd,
+      fresh,
+      async () => {
+        const api = await this.api();
+        const location = { directory: cwd };
+        const models = await this.coldList(async () => {
+          const list = await api.model.list({ location });
+          return (Array.isArray(list.data) ? list.data : [])
+            .map(inputRecord)
+            .filter(
+              (model) =>
+                model.enabled !== false &&
+                stringValue(model.providerID) !== undefined &&
+                stringValue(model.id) !== undefined,
+            );
+        });
+        const fallback = await api.model
+          .default({ location })
+          .catch(() => undefined);
+        const defaultModel = inputRecord(fallback?.data);
+        const defaultId =
+          stringValue(defaultModel.providerID) && stringValue(defaultModel.id)
+            ? `${defaultModel.providerID}/${defaultModel.id}`
+            : undefined;
+        return {
+          models,
+          defaultId,
+          entries: new Map(
+            models.map((model) => {
+              const entry = modelCatalogEntry(model);
+              return [entry.id, entry] as const;
+            }),
+          ),
+        };
+      },
+      (catalog) => catalog.models.length === 0,
+    );
   }
 
   async lookupModel(
@@ -534,6 +573,137 @@ export class OpenCodeServer {
     } catch {
       return undefined;
     }
+  }
+
+  private commandCatalogs: CatalogCache<OpenCodeCommand[]> = new Map();
+
+  /** OpenCode's slash commands for a workspace, cached briefly. */
+  async commands(cwd: string): Promise<OpenCodeCommand[]> {
+    return this.cachedCatalog(
+      this.commandCatalogs,
+      cwd,
+      false,
+      async () => {
+        const api = await this.api();
+        const data = await this.coldList(async () => {
+          const list = await api.command.list({ location: { directory: cwd } });
+          return Array.isArray(list.data) ? list.data : [];
+        });
+        const seen = new Set<string>();
+        const commands: OpenCodeCommand[] = [];
+        for (const value of data) {
+          const command = inputRecord(value);
+          const name = stringValue(command.name);
+          if (!name || seen.has(name)) continue;
+          seen.add(name);
+          commands.push({
+            name,
+            description: stringValue(command.description) ?? "",
+          });
+          if (commands.length === COMMAND_CATALOG_MAX) break;
+        }
+        return commands;
+      },
+      (commands) => commands.length === 0,
+    );
+  }
+
+  async commandNames(cwd: string): Promise<Set<string>> {
+    return new Set((await this.commands(cwd)).map((command) => command.name));
+  }
+
+  invalidateModelCatalogs() {
+    this.modelCatalogs.clear();
+  }
+
+  invalidateCommands() {
+    this.commandCatalogs.clear();
+  }
+
+  invalidateNativeSkills() {
+    for (const session of sessions.values())
+      session.nativeSkillNames = undefined;
+  }
+
+  /** The OpenCode state a registered session needs to keep its own flags. */
+  async sessionState(sessionId: string): Promise<{
+    agent?: string;
+    archived: boolean;
+  }> {
+    const api = await this.api();
+    const info = inputRecord(await api.session.get({ sessionID: sessionId }));
+    const agent = stringValue(info.agent);
+    return {
+      ...(agent ? { agent } : {}),
+      archived: typeof inputRecord(info.time).archived === "number",
+    };
+  }
+
+  private readonly expectedArchiveEvents = new Map<
+    string,
+    { archived: boolean; at: number }
+  >();
+
+  /**
+   * Archive through BB. The resulting OpenCode event is ours, so the lifecycle
+   * handler must not present it as an external archive.
+   */
+  async setSessionArchived(sessionId: string, archived: boolean) {
+    const api = await this.api();
+    const now = Date.now();
+    for (const [id, expected] of this.expectedArchiveEvents)
+      if (now - expected.at > ARCHIVE_EVENT_TTL_MS)
+        this.expectedArchiveEvents.delete(id);
+    this.expectedArchiveEvents.set(sessionId, { archived, at: now });
+    try {
+      await api.session.update({ sessionID: sessionId, archived });
+    } catch (error) {
+      if (this.expectedArchiveEvents.get(sessionId)?.archived === archived)
+        this.expectedArchiveEvents.delete(sessionId);
+      throw error;
+    }
+    if (!archived) {
+      const session = sessionsByProviderId.get(sessionId);
+      if (session?.terminalKind === "archived") {
+        session.terminalError = undefined;
+        session.terminalKind = undefined;
+      }
+    }
+  }
+
+  private consumeExpectedArchive(sessionId: string, archived: boolean) {
+    const expected = this.expectedArchiveEvents.get(sessionId);
+    if (!expected || expected.archived !== archived) return false;
+    if (Date.now() - expected.at > ARCHIVE_EVENT_TTL_MS) {
+      this.expectedArchiveEvents.delete(sessionId);
+      return false;
+    }
+    this.expectedArchiveEvents.delete(sessionId);
+    return true;
+  }
+
+  private readonly brokenThreads = new Map<string, string>();
+
+  markThreadBroken(bbThreadId: string, reason: string) {
+    this.brokenThreads.set(bbThreadId, reason);
+  }
+
+  clearThreadBroken(bbThreadId: string) {
+    this.brokenThreads.delete(bbThreadId);
+  }
+
+  threadBrokenReason(bbThreadId: string): string | undefined {
+    return this.brokenThreads.get(bbThreadId);
+  }
+
+  private async sessionGone(session: SessionState, reason: string) {
+    this.markThreadBroken(session.bbThreadId, reason);
+    await this.forgetDetachedSession(session);
+  }
+
+  private async forgetDetachedSession(session: SessionState) {
+    await this.forgetSessionRegistration(session.bbThreadId).catch(() => {});
+    await this.forgetMcpRegistration(session.providerThreadId).catch(() => {});
   }
 
   /**
@@ -853,7 +1023,29 @@ export class OpenCodeServer {
   }
 
   async handleEvent(event: RecordValue): Promise<void> {
-    if (event.type === "mcp.status.changed") {
+    const eventType = stringValue(event.type) ?? "";
+    if (
+      eventType === "session.archived" ||
+      eventType === "session.unarchived"
+    ) {
+      const sessionId = stringValue(inputRecord(event.data).sessionID);
+      if (
+        sessionId &&
+        this.consumeExpectedArchive(sessionId, eventType === "session.archived")
+      )
+        return;
+    }
+    if (
+      eventType === "provider.updated" ||
+      eventType === "model.updated" ||
+      eventType === "credential.updated"
+    )
+      this.invalidateModelCatalogs();
+    if (eventType === "command.updated") this.invalidateCommands();
+    if (eventType === "skill.updated") this.invalidateNativeSkills();
+    if (eventType === "installation.update-available")
+      resetLatestVersionCache();
+    if (eventType === "mcp.status.changed") {
       const server = stringValue(inputRecord(event.data).server) ?? "";
       const waiters = this.mcpWaiters.get(server);
       if (waiters)

@@ -62,18 +62,29 @@ export {
   permissionReplyBody,
   promptBody,
   sameDynamicTools,
+  selectedCommandMention,
   SUBAGENT_DISABLED_TOOL_ERROR,
   subagentDisabledToolError,
   toolFailureError,
+  withoutCommandMention,
 } from "./host/prompt.ts";
+export {
+  answerFormFields,
+  planFormQuestions,
+} from "./host/opencode-interactions.ts";
 export {
   addBbToolsRule,
   removeBbToolsRule,
   syncBbToolsRule,
 } from "./host/opencode-config.ts";
 export { experimental_providerBridge } from "./host/provider-bridge.ts";
-export { sessionFromParams } from "./host/session-manager.ts";
-export { sessions } from "./host/types.ts";
+export {
+  agentOptionChoice,
+  planAgentTransition,
+  planPermissionModeForTurn,
+  sessionFromParams,
+} from "./host/session-manager.ts";
+export { sessions, sessionsByProviderId } from "./host/types.ts";
 export {
   boundedTimelineDelta,
   boundedTimelineText,

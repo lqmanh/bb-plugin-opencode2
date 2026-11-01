@@ -58,6 +58,7 @@ export function sessionPermissionRules(input: {
   disableSubagents: boolean;
   dynamicToolServer?: string;
   dynamicToolNames?: readonly string[];
+  planMode?: boolean;
 }): PermissionRule[] {
   const rules: PermissionRule[] = [];
   if (input.permissionMode === "accept-edits") {
@@ -93,6 +94,14 @@ export function sessionPermissionRules(input: {
     rules.push(
       { action: "subagent", resource: "*", effect: "deny" },
       { action: "task", resource: "*", effect: "deny" },
+    );
+  // Session rules are merged after the agent's rules, so full mode's broad
+  // allow would otherwise override the plan agent's edit deny.
+  if (input.planMode)
+    rules.push(
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "write", resource: "*", effect: "deny" },
+      { action: "patch", resource: "*", effect: "deny" },
     );
   return rules;
 }

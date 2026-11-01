@@ -13,6 +13,14 @@ export type OpenCodeRecord = Record<string, any>;
 
 export type OpenCodePermissionMode = "accept-edits" | "auto" | "full";
 export type OpenCodePermissionReply = "once" | "always" | "reject";
+export type SessionTerminalKind = "archived" | "deleted" | "moved";
+
+export const DELETED_SESSION_MESSAGE =
+  "The OpenCode session for this thread was deleted. Start a new thread to continue.";
+export const MOVED_SESSION_MESSAGE =
+  "The OpenCode session moved to another workspace. Start a new thread to continue.";
+export const ARCHIVED_SESSION_MESSAGE =
+  "The OpenCode session was archived outside BB. Unarchive it before sending another message.";
 
 export type ModelRef = {
   providerID: string;
@@ -27,6 +35,8 @@ export type ActiveTurn = {
   promptDelivered?: boolean;
   /** Message IDs of this turn's prompts (the first and any steers). */
   promptIds?: Set<string>;
+  /** A command turn adopts the first inbox message as its checkpoint. */
+  awaitingCommandCheckpoint?: boolean;
   /**
    * Set when OpenCode starts working on one of this turn's prompts. Terminal
    * execution events before that belong to earlier work (for example a
@@ -76,8 +86,22 @@ export type SessionState = {
   agent?: string;
   /** The agent chosen through BB's `agent` session option, kept across turns. */
   agentChoice?: string;
+  /** Set while the previous turn ran on OpenCode's `plan` agent. */
+  planMode?: boolean;
+  /** The agent to return to when the plan turn ends. */
+  agentBeforePlan?: string;
+  /** Last session-option selection published to BB, to skip repeats. */
+  publishedAgentSelection?: string;
   /** Last session-options state published to BB, to skip repeats. */
   publishedAgentOptions?: string;
+  /** The title this bridge just set, so its rename event is not echoed back. */
+  expectedTitle?: string;
+  /** Set when OpenCode deleted, moved, or archived the session. */
+  terminalError?: string;
+  /** Why the session stopped being usable, without comparing `terminalError`. */
+  terminalKind?: SessionTerminalKind;
+  /** True while BB itself is removing the OpenCode session. */
+  closing?: boolean;
   usage: {
     input: number;
     output: number;

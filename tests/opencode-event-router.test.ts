@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { OpenCodeClient } from "@opencode/client";
 import { OpenCodeEventRouter } from "./support/host-api.js";
-import type { OpenCodeRecord, SessionState } from "../src/host/types.ts";
+import type {
+  ActiveTurn,
+  OpenCodeRecord,
+  SessionState,
+} from "../src/host/types.ts";
 
 const emptyApi = async () =>
   ({ session: { diff: async () => [] } }) as unknown as OpenCodeClient;
@@ -121,7 +125,7 @@ test("translates current OpenCode v2 text, reasoning, tool, and terminal events"
   });
   // OpenCode follows each step with the session's cumulative totals.
   await event("session.usage.updated", {
-    cost: 0,
+    cost: 1.25,
     tokens: {
       input: 30,
       output: 20,
@@ -172,6 +176,7 @@ test("translates current OpenCode v2 text, reasoning, tool, and terminal events"
   const context = emitted.find((delta) => delta.kind === "contextWindow");
   assert.equal(context?.used, 15);
   assert.equal(context?.size, 1000);
+  assert.deepEqual(context?.cost, { amount: 1.25, currency: "USD" });
   assert.equal(session.active, undefined);
   assert.equal(emitted.at(-1)?.kind, "turn.boundary");
   assert.equal(emitted.at(-1)?.status, "completed");
@@ -277,9 +282,16 @@ test("nests a native subagent's work under its delegation row", async () => {
   assert.equal(emitted.length, count);
 });
 
-function sessionFixture(api: () => Promise<OpenCodeClient>) {
+function sessionFixture(
+  api: () => Promise<OpenCodeClient>,
+  hooks?: NonNullable<ConstructorParameters<typeof OpenCodeEventRouter>[3]>,
+  overrides: {
+    active?: Partial<ActiveTurn> | null;
+    session?: Partial<SessionState>;
+  } = {},
+) {
   const emitted: OpenCodeRecord[] = [];
-  const active = {
+  const active: ActiveTurn = {
     providerTurnId: "turn-1",
     startedAt: Date.now(),
     abortController: new AbortController(),
@@ -291,6 +303,7 @@ function sessionFixture(api: () => Promise<OpenCodeClient>) {
     touchedFiles: new Map<string, string[]>(),
     openQuestions: new Map<string, string>(),
     settledTools: new Set<string>(),
+    ...(overrides.active ?? {}),
   };
   const session: SessionState = {
     bbThreadId: "bb-thread",
@@ -303,17 +316,23 @@ function sessionFixture(api: () => Promise<OpenCodeClient>) {
     instructions: "",
     bridgeEnvVars: {},
     dynamicToolScope: {},
-    active,
+    active: overrides.active === null ? undefined : active,
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    ...overrides.session,
   };
+  const lookup = new Map([[session.providerThreadId, session]]);
   const router = new OpenCodeEventRouter(
     api,
     (_threadId, deltas) => emitted.push(...deltas),
-    new Map([[session.providerThreadId, session]]),
+    lookup,
+    hooks,
   );
-  const event = (type: string, data: OpenCodeRecord) =>
-    router.handleEvent({ type, data: { sessionID: "ses_1", ...data } });
-  return { emitted, event, session, router };
+  const event = (type: string, data: OpenCodeRecord = {}) =>
+    router.handleEvent({
+      type,
+      data: { sessionID: session.providerThreadId, ...data },
+    });
+  return { active, emitted, event, lookup, router, session };
 }
 
 function sessionWithTurnDiff(
@@ -438,7 +457,9 @@ test("routes form.created to the question tool without polling", async () => {
         },
       },
     }) as unknown as OpenCodeClient;
-  const { emitted, event, session, router } = sessionFixture(api);
+  const { emitted, event, session, router } = sessionFixture(api, {
+    requestInteraction: async () => ({}),
+  });
 
   await event("session.tool.input.started", { id: "call_q", name: "question" });
   await event("session.tool.called", {
@@ -451,7 +472,7 @@ test("routes form.created to the question tool without polling", async () => {
       sessionID: "ses_1",
       title: "Pick",
       metadata: { tool: { id: "call_q" } },
-      fields: [{ key: "q", title: "Pick", type: "text" }],
+      fields: [{ key: "q", title: "Pick", type: "string" }],
     },
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -641,4 +662,348 @@ test("a failed permission reply never escapes as an unhandled rejection", async 
   }
   assert.equal(replied, true);
   assert.deepEqual(unhandled, []);
+});
+
+const nextTick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("adopts a command's inbox message as the turn checkpoint", async () => {
+  const { active, emitted, event, session } = sessionFixture(
+    emptyApi,
+    undefined,
+    {
+      active: {
+        providerTurnId: "turn-cmd",
+        promptIds: new Set(),
+        inputDelivered: false,
+        awaitingCommandCheckpoint: true,
+      },
+    },
+  );
+
+  // The turn cannot end before its command input is known.
+  await event("session.execution.succeeded");
+  assert.equal(session.active, active);
+
+  await event("session.inbox.enqueued", { inboxID: "msg_cmd" });
+  assert.equal(active.checkpointId, "msg_cmd");
+  assert.equal(active.promptIds?.has("msg_cmd"), true);
+  await event("session.inbox.delivered", { inboxID: "msg_cmd" });
+  await event("session.execution.succeeded");
+  assert.equal(session.active, undefined);
+  assert.equal(emitted.at(-1)?.providerCheckpointId, "msg_cmd");
+});
+
+test("fails a turn and reports a deleted OpenCode session", async () => {
+  const notifications: OpenCodeRecord[] = [];
+  const { emitted, lookup, router, session } = sessionFixture(emptyApi, {
+    notify: (method, params) => notifications.push({ method, params }),
+  });
+
+  await router.handleEvent({
+    type: "session.deleted",
+    data: { sessionID: session.providerThreadId },
+  });
+
+  assert.equal(session.active, undefined);
+  assert.equal(lookup.has(session.providerThreadId), false);
+  assert.ok(emitted.some((delta) => delta.kind === "provider.error"));
+  assert.equal(notifications[0]?.method, "provider/recovery");
+  assert.equal(notifications[0]?.params.kind, "restartRecommended");
+  assert.match(session.terminalError ?? "", /deleted/);
+});
+
+test("reports an external archive and clears it on unarchive", async () => {
+  const notifications: OpenCodeRecord[] = [];
+  const { router, session } = sessionFixture(
+    emptyApi,
+    { notify: (method, params) => notifications.push({ method, params }) },
+    { active: null },
+  );
+
+  await router.handleEvent({
+    type: "session.archived",
+    data: { sessionID: session.providerThreadId },
+  });
+  assert.match(session.terminalError ?? "", /archived/);
+  assert.equal(session.terminalKind, "archived");
+  assert.equal(notifications[0]?.params.kind, "sessionArchived");
+
+  await router.handleEvent({
+    type: "session.unarchived",
+    data: { sessionID: session.providerThreadId },
+  });
+  assert.equal(session.terminalError, undefined);
+  assert.equal(session.terminalKind, undefined);
+});
+
+test("answers a general form through BB's question UI", async () => {
+  const replies: OpenCodeRecord[] = [];
+  const api = async () =>
+    ({
+      session: {
+        diff: async () => [],
+        form: {
+          reply: async (input: OpenCodeRecord) => {
+            replies.push(input);
+          },
+          cancel: async () => {},
+        },
+      },
+    }) as unknown as OpenCodeClient;
+  const { emitted, event } = sessionFixture(api, {
+    requestInteraction: async () => ({
+      resolution: {
+        kind: "user_answer",
+        answers: {
+          name: { selected: [], freeText: "Ada" },
+          count: { selected: [], freeText: "3" },
+          active: { selected: ["true"] },
+          tags: { selected: ["a"], freeText: "b" },
+        },
+      },
+    }),
+  });
+
+  await event("form.created", {
+    form: {
+      id: "frm_1",
+      sessionID: "ses_1",
+      fields: [
+        { key: "name", title: "Name", type: "string", required: true },
+        { key: "count", title: "Count", type: "integer", minimum: 1 },
+        { key: "active", title: "Active", type: "boolean" },
+        {
+          key: "tags",
+          title: "Tags",
+          type: "multiselect",
+          options: [
+            { value: "a", label: "A" },
+            { value: "b", label: "B" },
+          ],
+          custom: true,
+        },
+      ],
+    },
+  });
+  await nextTick();
+
+  assert.deepEqual(replies, [
+    {
+      sessionID: "ses_1",
+      formID: "frm_1",
+      answer: { name: "Ada", count: 3, active: true, tags: ["a", "b"] },
+    },
+  ]);
+  const open = emitted.find(
+    (delta) =>
+      delta.kind === "item.open" && delta.key?.providerItemId === "form:frm_1",
+  );
+  assert.equal(open?.item.tool, "question");
+  const close = emitted.find(
+    (delta) =>
+      delta.kind === "item.close" && delta.key?.providerItemId === "form:frm_1",
+  );
+  assert.equal(close?.status, "completed");
+});
+
+test("cancels a form BB cannot represent with a visible reason", async () => {
+  const cancelled: OpenCodeRecord[] = [];
+  let requested = false;
+  const api = async () =>
+    ({
+      session: {
+        diff: async () => [],
+        form: {
+          reply: async () => {},
+          cancel: async (input: OpenCodeRecord) => {
+            cancelled.push(input);
+          },
+        },
+      },
+    }) as unknown as OpenCodeClient;
+  const { emitted, event } = sessionFixture(api, {
+    requestInteraction: async () => {
+      requested = true;
+      return {};
+    },
+  });
+
+  await event("form.created", {
+    form: {
+      id: "frm_x",
+      sessionID: "ses_1",
+      fields: [{ key: "url", type: "external", url: "https://example.com" }],
+    },
+  });
+  await nextTick();
+
+  assert.equal(requested, false);
+  assert.deepEqual(cancelled, [
+    {
+      sessionID: "ses_1",
+      formID: "frm_x",
+      message: "OpenCode form uses an external step that BB cannot show",
+    },
+  ]);
+  const close = emitted.find(
+    (delta) =>
+      delta.kind === "item.close" && delta.key?.providerItemId === "form:frm_x",
+  );
+  assert.equal(close?.status, "failed");
+  assert.match(close?.item.error, /external/);
+});
+
+test("syncs agent, model, and title changes made in OpenCode", async () => {
+  const { emitted, event, session } = sessionFixture(emptyApi);
+  session.agent = "build";
+  session.agentChoice = "build";
+  session.publishedAgentOptions = JSON.stringify([
+    {
+      type: "select",
+      id: "agent",
+      label: "Agent",
+      description: "OpenCode primary agent",
+      value: "build",
+      values: [
+        { id: "build", label: "build" },
+        { id: "reviewer", label: "reviewer" },
+      ],
+    },
+  ]);
+
+  await event("session.agent.selected", { agent: "reviewer" });
+  assert.equal(session.agent, "reviewer");
+  assert.equal(session.agentChoice, "reviewer");
+  const options = emitted.find(
+    (delta) =>
+      delta.kind === "extension.state" &&
+      delta.extensionKind === "bb/session-options",
+  );
+  assert.equal(options?.payload.options[0].value, "reviewer");
+  const selection = emitted.find(
+    (delta) =>
+      delta.kind === "extension.state" &&
+      delta.extensionKind === "bb/session-option-selections",
+  );
+  assert.equal(selection?.payload.selections.agent, "reviewer");
+
+  session.planMode = true;
+  await event("session.agent.selected", { agent: "build" });
+  assert.equal(session.agentChoice, "reviewer");
+  session.planMode = false;
+
+  session.model = { providerID: "p", id: "m1" };
+  session.contextWindow = 1000;
+  await event("session.model.selected", {
+    model: { providerID: "p", id: "m2" },
+  });
+  assert.deepEqual(session.model, { providerID: "p", id: "m2" });
+  assert.equal(session.contextWindow, undefined);
+  assert.equal(
+    emitted.filter((delta) => delta.kind === "provider.warning").length,
+    1,
+  );
+  await event("session.model.selected", {
+    model: { providerID: "p", id: "m2" },
+  });
+  assert.equal(
+    emitted.filter((delta) => delta.kind === "provider.warning").length,
+    1,
+  );
+
+  session.expectedTitle = "BB title";
+  await event("session.renamed", { title: "BB title" });
+  assert.equal(
+    emitted.filter((delta) => delta.kind === "thread.name").length,
+    0,
+  );
+  await event("session.renamed", { title: "OpenCode title" });
+  const renamed = emitted.find((delta) => delta.kind === "thread.name");
+  assert.equal(renamed?.name, "OpenCode title");
+  assert.equal(renamed?.source, "agent");
+});
+
+test("reports a form answered in OpenCode instead of replying again", async () => {
+  const replies: OpenCodeRecord[] = [];
+  const api = async () =>
+    ({
+      session: {
+        diff: async () => [],
+        form: {
+          reply: async (input: OpenCodeRecord) => {
+            replies.push(input);
+          },
+          cancel: async () => {},
+        },
+      },
+    }) as unknown as OpenCodeClient;
+  let resolveInteraction!: (value: OpenCodeRecord) => void;
+  const interaction = new Promise<OpenCodeRecord>((resolve) => {
+    resolveInteraction = resolve;
+  });
+  const { emitted, event } = sessionFixture(api, {
+    requestInteraction: () => interaction,
+  });
+
+  await event("form.created", {
+    form: {
+      id: "frm_ext",
+      sessionID: "ses_1",
+      fields: [{ key: "name", type: "string" }],
+    },
+  });
+  await nextTick();
+  await event("form.replied", {
+    id: "frm_ext",
+    sessionID: "ses_1",
+    answer: { name: "Alice" },
+  });
+  resolveInteraction({
+    resolution: {
+      kind: "user_answer",
+      answers: { name: { selected: [], freeText: "Bob" } },
+    },
+  });
+  await nextTick();
+
+  assert.deepEqual(replies, []);
+  const close = emitted.find(
+    (delta) =>
+      delta.kind === "item.close" &&
+      delta.key?.providerItemId === "form:frm_ext",
+  );
+  assert.equal(close?.status, "completed");
+  assert.equal(close?.item.result, "Answered in OpenCode");
+});
+
+test("skips a permission reply already answered in OpenCode", async () => {
+  const replies: OpenCodeRecord[] = [];
+  const api = async () =>
+    ({
+      permission: {
+        reply: async (input: OpenCodeRecord) => {
+          replies.push(input);
+        },
+      },
+      session: { diff: async () => [] },
+    }) as unknown as OpenCodeClient;
+  let resolveInteraction!: (value: OpenCodeRecord) => void;
+  const interaction = new Promise<OpenCodeRecord>((resolve) => {
+    resolveInteraction = resolve;
+  });
+  const { event } = sessionFixture(api, {
+    requestInteraction: () => interaction,
+  });
+
+  await event("permission.asked", {
+    id: "per_1",
+    action: "shell",
+    message: "run?",
+  });
+  await nextTick();
+  await event("permission.replied", { requestID: "per_1", reply: "once" });
+  resolveInteraction({ resolution: { decision: "allow_once" } });
+  await nextTick();
+
+  assert.deepEqual(replies, []);
 });

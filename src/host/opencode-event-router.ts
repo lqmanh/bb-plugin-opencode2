@@ -1,5 +1,11 @@
 import { experimental_COMPACTION_PRESENTATION as compactionPresentation } from "@get-bb/plugin-sdk/provider-bridge";
-import { dynamicToolCallRouter, emit } from "./bridge-runtime.ts";
+import {
+  AGENT_OPTION_ID,
+  SESSION_OPTIONS_STATE_KIND,
+  SESSION_OPTION_SELECTIONS_STATE_KIND,
+} from "../settings-contract.ts";
+import { dynamicToolCallRouter, emit, notify } from "./bridge-runtime.ts";
+import { sameModelRef, withSelectedAgent } from "./models.ts";
 import { OpenCodeInteractions } from "./opencode-interactions.ts";
 import { toolFailureError } from "./prompt.ts";
 import { dynamicMcpServerName } from "./opencode-requests.ts";
@@ -20,9 +26,13 @@ import {
   workspacePath,
 } from "./tool-mapping.ts";
 import {
+  ARCHIVED_SESSION_MESSAGE,
+  DELETED_SESSION_MESSAGE,
+  MOVED_SESSION_MESSAGE,
   errorMessage,
   inputRecord,
   parseInputText,
+  sessions,
   sessionsByProviderId,
   stringValue,
   type ActiveTurn,
@@ -70,6 +80,13 @@ function tokenCount(value: unknown) {
     : 0;
 }
 
+/** OpenCode reports session cost in USD; ignore malformed values. */
+function usageCost(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? { amount: value, currency: "USD" }
+    : undefined;
+}
+
 function tokenBreakdown(raw: unknown) {
   const tokens = inputRecord(raw);
   const cache = inputRecord(tokens.cache);
@@ -103,6 +120,7 @@ export function usageDeltas(
   session: SessionState,
   active: ActiveTurn,
   totals: unknown,
+  cost?: unknown,
 ): RecordValue[] {
   const total = tokenBreakdown(totals);
   const last = tokenBreakdown(active.lastStepTokens ?? {});
@@ -115,6 +133,7 @@ export function usageDeltas(
   };
   const size = session.contextWindow ?? null;
   const used = active.lastStepTokens ? last.breakdown.totalTokens : null;
+  const sessionCost = usageCost(cost);
   return [
     {
       kind: "usage",
@@ -131,6 +150,7 @@ export function usageDeltas(
             size,
             estimated: false,
             attach: "currentOrLast",
+            ...(sessionCost ? { cost: sessionCost } : {}),
             providerTurnId: active.providerTurnId,
           },
         ]
@@ -159,11 +179,22 @@ export function subagentSummary(text: string): string {
     .trim();
 }
 
+export type OpenCodeEventRouterHooks = {
+  onSessionGone?: (
+    session: SessionState,
+    reason: string,
+  ) => Promise<void> | void;
+  notify?: typeof notify;
+  requestInteraction?: ConstructorParameters<typeof OpenCodeInteractions>[2];
+};
+
 export class OpenCodeEventRouter {
   private readonly interactions: OpenCodeInteractions;
   private readonly emitTimeline: typeof emit;
   private readonly sessionLookup: ReadonlyMap<string, SessionState>;
   private readonly api: OpenCodeApi;
+  private readonly onSessionGone?: OpenCodeEventRouterHooks["onSessionGone"];
+  private readonly sendNotification: typeof notify;
   /** Native subagent sessions, routed into their parent BB turn. */
   private readonly childSessions = new Map<
     string,
@@ -178,11 +209,18 @@ export class OpenCodeEventRouter {
     api: OpenCodeApi,
     emitTimeline: typeof emit = emit,
     sessionLookup: ReadonlyMap<string, SessionState> = sessionsByProviderId,
+    hooks: OpenCodeEventRouterHooks = {},
   ) {
     this.api = api;
     this.emitTimeline = emitTimeline;
-    this.interactions = new OpenCodeInteractions(api, this.emit);
+    this.interactions = new OpenCodeInteractions(
+      api,
+      this.emit,
+      hooks.requestInteraction,
+    );
     this.sessionLookup = sessionLookup;
+    this.onSessionGone = hooks.onSessionGone;
+    this.sendNotification = hooks.notify ?? notify;
   }
 
   /**
@@ -224,6 +262,14 @@ export class OpenCodeEventRouter {
         this.interactions.handleCreatedForm(session, form ?? {});
       return;
     }
+    if (event.type === "permission.replied") {
+      if (session) this.interactions.handlePermissionReplied(session, data);
+      return;
+    }
+    if (event.type === "form.replied" || event.type === "form.cancelled") {
+      if (session) this.interactions.handleFormEvent(session, event.type, data);
+      return;
+    }
     if (session) return this.handleSessionEvent(session, event, data);
     const child = this.childSessions.get(sessionId);
     const type = stringValue(event.type) ?? "";
@@ -246,6 +292,34 @@ export class OpenCodeEventRouter {
     const active = session.active;
     if (event.type === "permission.asked") {
       void this.interactions.handlePermission(session, data);
+      return;
+    }
+    if (event.type === "session.agent.selected") {
+      this.handleAgentSelected(session, data);
+      return;
+    }
+    if (event.type === "session.model.selected") {
+      this.handleModelSelected(session, data);
+      return;
+    }
+    if (event.type === "session.renamed") {
+      this.handleSessionRenamed(session, data);
+      return;
+    }
+    if (event.type === "session.deleted") {
+      await this.handleSessionDeleted(session);
+      return;
+    }
+    if (event.type === "session.moved") {
+      await this.handleSessionMoved(session, data);
+      return;
+    }
+    if (event.type === "session.archived") {
+      this.handleSessionArchived(session);
+      return;
+    }
+    if (event.type === "session.unarchived") {
+      this.handleSessionUnarchived(session);
       return;
     }
     if (!active) return;
@@ -560,7 +634,10 @@ export class OpenCodeEventRouter {
         active.lastStepTokens = inputRecord(data.tokens);
     }
     if (event.type === "session.usage.updated") {
-      this.emit(session.bbThreadId, usageDeltas(session, active, data.tokens));
+      this.emit(
+        session.bbThreadId,
+        usageDeltas(session, active, data.tokens, data.cost),
+      );
     }
     if (event.type === "session.retry.scheduled") {
       const error = inputRecord(data.error);
@@ -577,15 +654,21 @@ export class OpenCodeEventRouter {
         },
       ]);
     }
-    if (
-      event.type === "session.inbox.delivered" &&
-      active.promptIds?.has(stringValue(data.inboxID) ?? "")
-    )
-      active.inputDelivered = true;
+    if (event.type === "session.inbox.enqueued") {
+      this.adoptCommandCheckpoint(active, stringValue(data.inboxID));
+    }
+    if (event.type === "session.inbox.delivered") {
+      const inboxId = stringValue(data.inboxID);
+      if (this.adoptCommandCheckpoint(active, inboxId)) {
+        active.inputDelivered = true;
+      } else if (inboxId && active.promptIds?.has(inboxId)) {
+        active.inputDelivered = true;
+      }
+    }
     if (
       eventType.startsWith("session.execution.") &&
-      active.promptIds?.size &&
-      !active.inputDelivered
+      (active.awaitingCommandCheckpoint ||
+        (active.promptIds?.size && !active.inputDelivered))
     )
       return;
     if (event.type === "session.execution.succeeded")
@@ -600,6 +683,172 @@ export class OpenCodeEventRouter {
         stringValue(error.message) ?? "OpenCode execution failed",
       );
     }
+  }
+
+  private notifyRecovery(
+    session: SessionState,
+    kind: "sessionArchived" | "restartRecommended",
+    message: string,
+  ) {
+    this.sendNotification("provider/recovery", {
+      kind,
+      message,
+      retryable: false,
+      threadId: session.bbThreadId,
+    });
+  }
+
+  private async detachSession(session: SessionState, reason: string) {
+    dynamicToolCallRouter.resolve(session.dynamicToolScope, reason);
+    const proxy = session.dynamicToolProxy;
+    session.dynamicToolProxy = undefined;
+    if (proxy) {
+      proxy.close();
+      try {
+        const api = await this.api();
+        await api.experimental.mcp.remove({
+          server: proxy.serverName,
+          location: { directory: session.cwd },
+        });
+      } catch {
+        // The session is gone; the registry entry is dropped below even when
+        // the MCP server could not be removed.
+      }
+    }
+    if (this.sessionLookup.get(session.providerThreadId) === session) {
+      (this.sessionLookup as Map<string, SessionState>).delete(
+        session.providerThreadId,
+      );
+    }
+    if (sessions.get(session.bbThreadId) === session) {
+      sessions.delete(session.bbThreadId);
+    }
+    if (sessionsByProviderId.get(session.providerThreadId) === session) {
+      sessionsByProviderId.delete(session.providerThreadId);
+    }
+    await this.onSessionGone?.(session, reason);
+  }
+
+  private async handleSessionDeleted(session: SessionState) {
+    if (session.closing) return;
+    if (session.active)
+      await this.finish(session, "failed", DELETED_SESSION_MESSAGE);
+    session.terminalError = DELETED_SESSION_MESSAGE;
+    session.terminalKind = "deleted";
+    this.notifyRecovery(session, "restartRecommended", DELETED_SESSION_MESSAGE);
+    await this.detachSession(session, DELETED_SESSION_MESSAGE);
+  }
+
+  private async handleSessionMoved(session: SessionState, data: RecordValue) {
+    if (session.closing) return;
+    const directory = stringValue(inputRecord(data.location).directory);
+    const message = directory
+      ? `The OpenCode session moved to ${directory}. Start a new thread to continue there.`
+      : MOVED_SESSION_MESSAGE;
+    session.terminalError = message;
+    session.terminalKind = "moved";
+    if (session.active) await this.finish(session, "failed", message);
+    this.notifyRecovery(session, "restartRecommended", message);
+  }
+
+  private handleSessionArchived(session: SessionState) {
+    if (session.closing) return;
+    session.terminalError = ARCHIVED_SESSION_MESSAGE;
+    session.terminalKind = "archived";
+    this.notifyRecovery(session, "sessionArchived", ARCHIVED_SESSION_MESSAGE);
+  }
+
+  private handleSessionUnarchived(session: SessionState) {
+    if (session.terminalKind !== "archived") return;
+    session.terminalError = undefined;
+    session.terminalKind = undefined;
+  }
+
+  /** Mirror an agent selected in OpenCode back into BB's session options. */
+  private handleAgentSelected(session: SessionState, data: RecordValue) {
+    const agent = stringValue(data.agent);
+    if (!agent) return;
+    session.agent = agent;
+    // Plan mode owns the agent for its turn; the next ordinary turn restores
+    // the BB choice. Do not overwrite it with the plan switch's own event.
+    if (session.planMode) return;
+    if (agent === session.agentChoice) return;
+    session.agentChoice = agent;
+    this.publishAgentChoice(session, agent);
+  }
+
+  private publishAgentChoice(session: SessionState, agent: string) {
+    if (session.publishedAgentSelection !== agent) {
+      session.publishedAgentSelection = agent;
+      this.emit(session.bbThreadId, [
+        {
+          kind: "extension.state",
+          extensionKind: SESSION_OPTION_SELECTIONS_STATE_KIND,
+          payload: { selections: { [AGENT_OPTION_ID]: agent } },
+        },
+      ]);
+    }
+    const options = withSelectedAgent(session.publishedAgentOptions, agent);
+    if (!options) return;
+    session.publishedAgentOptions = JSON.stringify(options);
+    this.emit(session.bbThreadId, [
+      {
+        kind: "extension.state",
+        extensionKind: SESSION_OPTIONS_STATE_KIND,
+        payload: { options },
+      },
+    ]);
+  }
+
+  /**
+   * OpenCode can change the model from its own UI. BB owns the sticky model,
+   * so keep local state accurate and surface the change; the next turn returns
+   * to BB's selection.
+   */
+  private handleModelSelected(session: SessionState, data: RecordValue) {
+    const raw = inputRecord(data.model);
+    const providerID = stringValue(raw.providerID);
+    const id = stringValue(raw.id);
+    if (!providerID || !id) return;
+    const variant = stringValue(raw.variant);
+    const next = { providerID, id, ...(variant ? { variant } : {}) };
+    if (sameModelRef(session.model, next)) return;
+    session.model = next;
+    session.contextWindow = undefined;
+    this.emit(session.bbThreadId, [
+      {
+        kind: "provider.warning",
+        summary: "OpenCode model changed",
+        details: `OpenCode selected ${providerID}/${id}${variant ? `#${variant}` : ""}. BB will use its selected model on the next turn.`,
+      },
+    ]);
+  }
+
+  /** Fill an untitled BB thread with a title set in OpenCode. */
+  private handleSessionRenamed(session: SessionState, data: RecordValue) {
+    const title = stringValue(data.title);
+    if (!title) return;
+    const expected = session.expectedTitle;
+    session.expectedTitle = undefined;
+    if (expected === title) return;
+    this.emit(session.bbThreadId, [
+      { kind: "thread.name", name: title, source: "agent" },
+    ]);
+  }
+
+  /**
+   * `session.command` returns no message ID, so the first inbox message after
+   * dispatch becomes the turn's checkpoint and input to wait on.
+   */
+  private adoptCommandCheckpoint(
+    active: ActiveTurn,
+    inboxId: string | undefined,
+  ) {
+    if (!inboxId || !active.awaitingCommandCheckpoint) return false;
+    active.checkpointId = inboxId;
+    (active.promptIds ??= new Set()).add(inboxId);
+    active.awaitingCommandCheckpoint = false;
+    return true;
   }
 
   private handleCompactionEvent(

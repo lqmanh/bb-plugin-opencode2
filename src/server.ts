@@ -199,7 +199,7 @@ export default async function plugin(bb: BbPluginApi) {
       supportsServiceTier: false,
       supportsNativeUserQuestion: true,
       supportsManualCompaction: true,
-      supportsThreadArchive: false,
+      supportsThreadArchive: true,
       supportsThreadRename: true,
       fork: "checkpoint",
       permissionModes: ["accept-edits", "auto", "full"],
@@ -213,9 +213,9 @@ export default async function plugin(bb: BbPluginApi) {
         "ultra",
       ],
     },
-    // BB's plan mode is not offered; `plan` is an OpenCode agent picked through
-    // the `agent` session option instead.
-    composerActions: [],
+    // `/plan` maps to OpenCode's read-only `plan` agent for that turn, then
+    // returns to the agent picked through the `agent` session option.
+    composerActions: ["plan"],
     // OpenCode discovers skills in more places than BB scans by default;
     // the host entry answers with the roots OpenCode actually uses.
     experimental_resolvesNativeRoots: true,

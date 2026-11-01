@@ -20,6 +20,8 @@ test("registers OpenCode v2 as an installed checkpoint-capable provider with eve
   assert.equal(provider.capabilities.fork, "checkpoint");
   assert.equal(provider.capabilities.supportsManualCompaction, true);
   assert.equal(provider.capabilities.supportsThreadRename, true);
+  assert.equal(provider.capabilities.supportsThreadArchive, true);
+  assert.deepEqual(provider.composerActions, ["plan"]);
   assert.deepEqual(provider.capabilities.permissionModes, [
     "accept-edits",
     "auto",

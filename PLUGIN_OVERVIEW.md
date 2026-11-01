@@ -1,38 +1,38 @@
 ## What you get
 
-OpenCode v2 appears in BB's provider picker next to your other providers. Start
-a thread, choose any model OpenCode has connected, and BB drives the session
-through OpenCode while keeping its usual interface: timeline rows for reads,
-searches, commands with live output, and file changes built from OpenCode's own
-patches.
+OpenCode v2 appears in BB's provider picker. Start a thread, pick a model
+OpenCode has connected, and work in BB's usual interface.
 
-- **Threads behave like any BB thread.** Fork at a checkpoint, rewind and edit
-  (files are restored), steer a running turn, stop, rename, and `/compact`.
-- **Permission modes carry over.** Accept edits, auto, and full map to
-  OpenCode permission rules. A denial goes back to the agent as feedback and the
-  turn continues.
-- **Pick OpenCode's primary agent** (`build`, `plan`, or your own) in the Agent
-  row of BB's model switcher, and OpenCode's questions use BB's native question
-  UI.
-- **BB's tools and skills work inside OpenCode.** BB dynamic tools are exposed
-  through a local MCP server, BB's `/` menu lists the skills OpenCode finds for
-  the workspace, and shells get the `bb` CLI on `PATH`.
-- **Model control.** Reasoning levels map to each model's variants, and the
-  settings page can allow or block individual models.
+- **BB thread controls.** Fork at a checkpoint, rewind and edit with files
+  restored, steer a running turn, stop, rename, and `/compact`.
+- **Commands and plan mode.** OpenCode's slash commands appear in BB's `/` menu.
+  `/plan` runs a turn on OpenCode's read-only `plan` agent, then returns to the
+  selected agent.
+- **Permissions and questions.** Accept edits, auto, and full map to OpenCode
+  permission rules. OpenCode's questions, and forms that fit BB's question
+  schema, use BB's native question UI; unsupported forms are cancelled with a
+  visible reason.
+- **Agents, tools, and cost.** Pick an OpenCode primary agent in BB's Agent row;
+  agent changes made in OpenCode flow back. BB tools and OpenCode skills work
+  inside the thread, and shells get the `bb` CLI on `PATH`. OpenCode's reported
+  session cost appears in BB's context card.
 
 ## Requirements
 
 - OpenCode v2 2.2.5 or newer, with `opencode2` on the host's `PATH`. BB can
   install and update it from the provider settings.
 - At least one model provider connected in OpenCode (`opencode2 auth login`).
-  OpenCode owns model credentials; BB never stores them.
+  OpenCode owns the credentials; model usage is billed by that provider, not BB.
 
 ## Good to know
 
-- Native OpenCode subagents are off by default, so agents delegate through BB.
-  Turn them on in the plugin settings and they appear as nested delegation rows.
-- By default the plugin adds one deny rule to your global OpenCode config so
-  BB threads' tools do not show up in OpenCode's own sessions. You can turn this
-  off in settings, which restores the file.
-- Not supported, because OpenCode has no API for it: archive, goals, service
-  tiers, and the usage dashboard.
+- Native OpenCode subagents are off by default. Turn them on in the plugin
+  settings to see nested delegation rows.
+- The plugin keeps one deny rule in your global OpenCode config so BB threads'
+  tools do not appear in OpenCode's own sessions. The rule stays after the
+  plugin is disabled; it only matches this plugin's server names.
+- BB archive and unarchive are mirrored to the OpenCode session. If OpenCode
+  archives, deletes, or moves the session externally, the next turn explains the
+  problem instead of silently resuming it.
+- Thread goals, service tiers, and the full usage dashboard are not supported.
+  OpenCode reports session cost, but not rate-limit windows.

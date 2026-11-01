@@ -76,9 +76,31 @@ Inside `src/host/`:
   dropped event stream does not leave a turn running forever.
 - **Turn diffs come from OpenCode's `session.diff`.** Write rows show only path
   and kind because write success carries no patch.
+- **Commands run through `session.command`.** A `/name` mention is routed only
+  when OpenCode currently lists that command; its mention is stripped and the
+  rest of the prompt becomes its arguments. The resulting inbox message becomes
+  the turn checkpoint.
+- **BB plan mode maps to OpenCode's `plan` agent.** The `/plan` mention is
+  removed, the agent switches for that turn, and the next ordinary turn returns
+  to the agent picked through the session option.
+- **Archive state is mirrored, not inferred.** BB archive and unarchive forward
+  to `session.update`; external archive, deletion, and moves raise a recovery
+  hint and block later turns with a clear error instead of resuming a session
+  OpenCode no longer has.
+- **Forms use BB's native question UI only when their schema fits.** External,
+  conditional, or oversized forms are cancelled with a model-facing message.
+- **Catalog refresh is best-effort.** Plugin caches invalidate on OpenCode
+  events; BB's own model and command caches refresh on their own schedule.
+- **OpenCode-side state changes are mirrored where BB has a surface.** Agent
+  selections update BB's option, titles fill only untitled threads, and model
+  changes produce a warning because BB owns the sticky model. Provider
+  interactions cannot be cancelled by the bridge, so an externally answered form
+  closes its row but not the BB card.
 
 ## Known gaps
 
+- Command turns adopt the first inbox message as their checkpoint. A command
+  that creates no inbox message has no rewind checkpoint.
 - Child-session questions: a subagent's question closes without its `parentRef`.
   Cosmetic and rare.
 - Turn reconciliation is covered by unit tests only; a dropped event stream was
