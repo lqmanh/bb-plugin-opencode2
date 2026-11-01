@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { OpenCodeClient } from "@opencode/client";
-import { OpenCodeEventRouter } from "./support/host-api.js";
+import { OpenCodeEventRouter, createActiveTurn } from "./support/host-api.js";
 import type {
   ActiveTurn,
   OpenCodeRecord,
@@ -12,44 +12,14 @@ const emptyApi = async () =>
   ({ session: { diff: async () => [] } }) as unknown as OpenCodeClient;
 
 test("translates current OpenCode v2 text, reasoning, tool, and terminal events", async () => {
-  const emitted: OpenCodeRecord[] = [];
-  const active = {
-    providerTurnId: "turn-1",
-    startedAt: Date.now(),
-    abortController: new AbortController(),
-    opened: new Map<string, OpenCodeRecord>(),
-    pendingTools: new Map<string, string>(),
-    pendingInput: new Map<string, string>(),
-    touchedFiles: new Map<string, string[]>(),
-    openQuestions: new Map<string, string>(),
-    settledTools: new Set<string>(),
-  };
-  const session: SessionState = {
-    bbThreadId: "bb-thread",
-    providerThreadId: "oc-session",
-    cwd: process.cwd(),
-    disableSubagents: false,
-    dynamicTools: [],
-    disallowedTools: new Set(),
-    enabledModels: null,
-    instructions: "",
-    bridgeEnvVars: {},
-    dynamicToolScope: {},
-    active,
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 1000,
-  };
-  const sessionLookup = new Map([[session.providerThreadId, session]]);
-  const router = new OpenCodeEventRouter(
-    emptyApi,
-    (_threadId, deltas) => emitted.push(...deltas),
-    sessionLookup,
-  );
-  const event = (type: string, data: OpenCodeRecord) =>
-    router.handleEvent({
-      type,
-      data: { sessionID: session.providerThreadId, ...data },
-    });
+  const { emitted, event, session } = sessionFixture(emptyApi, undefined, {
+    session: {
+      providerThreadId: "oc-session",
+      cwd: process.cwd(),
+      disableSubagents: false,
+      contextWindow: 1000,
+    },
+  });
 
   await event("session.text.started", {
     assistantMessageID: "msg-assistant",
@@ -183,68 +153,49 @@ test("translates current OpenCode v2 text, reasoning, tool, and terminal events"
 });
 
 test("nests a native subagent's work under its delegation row", async () => {
-  const emitted: OpenCodeRecord[] = [];
-  const active = {
-    providerTurnId: "turn-1",
-    startedAt: Date.now(),
-    abortController: new AbortController(),
-    opened: new Map<string, OpenCodeRecord>(),
-    pendingTools: new Map<string, string>(),
-    pendingInput: new Map<string, string>(),
-    touchedFiles: new Map<string, string[]>(),
-    openQuestions: new Map<string, string>(),
-    settledTools: new Set<string>(),
-  };
-  const session: SessionState = {
-    bbThreadId: "bb-thread",
-    providerThreadId: "ses_parent",
-    cwd: process.cwd(),
-    disableSubagents: false,
-    dynamicTools: [],
-    disallowedTools: new Set(),
-    enabledModels: null,
-    instructions: "",
-    bridgeEnvVars: {},
-    dynamicToolScope: {},
-    active,
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-  };
-  const router = new OpenCodeEventRouter(
+  const { active, emitted, event, router, session } = sessionFixture(
     emptyApi,
-    (_threadId, deltas) => emitted.push(...deltas),
-    new Map([[session.providerThreadId, session]]),
+    undefined,
+    {
+      session: {
+        providerThreadId: "ses_parent",
+        cwd: process.cwd(),
+        disableSubagents: false,
+      },
+    },
   );
-  const event = (sessionID: string, type: string, data: OpenCodeRecord) =>
-    router.handleEvent({ type, data: { sessionID, ...data } });
 
-  await event("ses_parent", "session.tool.input.started", {
+  await event("session.tool.input.started", {
     id: "call_sub",
     name: "subagent",
   });
-  await event("ses_parent", "session.tool.called", {
+  await event("session.tool.called", {
     id: "call_sub",
     input: { agent: "explore", description: "List files", prompt: "ls" },
   });
-  await event("ses_parent", "session.tool.progress", {
+  await event("session.tool.progress", {
     id: "call_sub",
     metadata: { sessionID: "ses_child", status: "running" },
   });
-  await event("ses_child", "session.tool.input.started", {
+  await event("session.tool.input.started", {
+    sessionID: "ses_child",
     id: "call_child",
     name: "read",
   });
-  await event("ses_child", "session.tool.called", {
+  await event("session.tool.called", {
+    sessionID: "ses_child",
     id: "call_child",
     input: { path: "package.json" },
   });
-  await event("ses_child", "session.tool.success", {
+  await event("session.tool.success", {
+    sessionID: "ses_child",
     id: "call_child",
     content: [{ type: "text", text: "{}" }],
   });
   // The child's own lifecycle must not settle the parent turn.
-  await event("ses_child", "session.execution.succeeded", {});
+  await event("session.execution.succeeded", { sessionID: "ses_child" });
   assert.equal(session.active, active);
-  await event("ses_parent", "session.tool.success", {
+  await event("session.tool.success", {
     id: "call_sub",
     content: [
       {
@@ -275,7 +226,8 @@ test("nests a native subagent's work under its delegation row", async () => {
   // Child events after the delegation's turn ended are dropped.
   await router.finish(session, "completed");
   const count = emitted.length;
-  await event("ses_child", "session.text.started", {
+  await event("session.text.started", {
+    sessionID: "ses_child",
     assistantMessageID: "m",
     ordinal: 0,
   });
@@ -292,17 +244,9 @@ function sessionFixture(
 ) {
   const emitted: OpenCodeRecord[] = [];
   const active: ActiveTurn = {
-    providerTurnId: "turn-1",
-    startedAt: Date.now(),
-    abortController: new AbortController(),
+    ...createActiveTurn("turn-1"),
     promptIds: new Set(["msg_user"]),
     inputDelivered: true,
-    opened: new Map<string, OpenCodeRecord>(),
-    pendingTools: new Map<string, string>(),
-    pendingInput: new Map<string, string>(),
-    touchedFiles: new Map<string, string[]>(),
-    openQuestions: new Map<string, string>(),
-    settledTools: new Set<string>(),
     ...(overrides.active ?? {}),
   };
   const session: SessionState = {
@@ -490,40 +434,17 @@ test("routes form.created to the question tool without polling", async () => {
 });
 
 test("ignores terminal events from earlier work until the turn's prompt is delivered", async () => {
-  const emitted: OpenCodeRecord[] = [];
-  const active = {
-    providerTurnId: "turn-2",
-    startedAt: Date.now(),
-    abortController: new AbortController(),
-    opened: new Map<string, OpenCodeRecord>(),
-    pendingTools: new Map<string, string>(),
-    pendingInput: new Map<string, string>(),
-    touchedFiles: new Map<string, string[]>(),
-    openQuestions: new Map<string, string>(),
-    settledTools: new Set<string>(),
-    promptIds: new Set(["msg_prompt"]),
-  };
-  const session: SessionState = {
-    bbThreadId: "bb-thread",
-    providerThreadId: "ses_1",
-    cwd: "/repo",
-    disableSubagents: true,
-    dynamicTools: [],
-    disallowedTools: new Set(),
-    enabledModels: null,
-    instructions: "",
-    bridgeEnvVars: {},
-    dynamicToolScope: {},
-    active,
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-  };
-  const router = new OpenCodeEventRouter(
+  const { active, emitted, event, session } = sessionFixture(
     emptyApi,
-    (_threadId, deltas) => emitted.push(...deltas),
-    new Map([[session.providerThreadId, session]]),
+    undefined,
+    {
+      active: {
+        providerTurnId: "turn-2",
+        promptIds: new Set(["msg_prompt"]),
+        inputDelivered: false,
+      },
+    },
   );
-  const event = (type: string, data: OpenCodeRecord = {}) =>
-    router.handleEvent({ type, data: { sessionID: "ses_1", ...data } });
   // A compaction from the previous turn finishes after this turn opened.
   await event("session.execution.succeeded");
   assert.equal(session.active, active);
@@ -537,42 +458,9 @@ test("ignores terminal events from earlier work until the turn's prompt is deliv
 });
 
 test("shows a Code Mode execute as one code row without nested rows", async () => {
-  const emitted: OpenCodeRecord[] = [];
-  const active = {
-    providerTurnId: "turn-1",
-    startedAt: Date.now(),
-    abortController: new AbortController(),
-    opened: new Map<string, OpenCodeRecord>(),
-    pendingTools: new Map<string, string>(),
-    pendingInput: new Map<string, string>(),
-    touchedFiles: new Map<string, string[]>(),
-    openQuestions: new Map<string, string>(),
-    settledTools: new Set<string>(),
-  };
-  const session: SessionState = {
-    bbThreadId: "bb-thread",
-    providerThreadId: "ses_1",
-    cwd: "/repo",
-    disableSubagents: true,
-    dynamicTools: [],
-    disallowedTools: new Set(),
-    enabledModels: null,
-    instructions: "",
-    bridgeEnvVars: {},
-    dynamicToolScope: {},
-    active,
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-  };
-  const router = new OpenCodeEventRouter(
-    emptyApi,
-    (_threadId, deltas) => emitted.push(...deltas),
-    new Map([[session.providerThreadId, session]]),
-  );
+  const { emitted, event: send } = sessionFixture(emptyApi);
   const event = (type: string, data: OpenCodeRecord) =>
-    router.handleEvent({
-      type,
-      data: { sessionID: "ses_1", id: "call_exec", ...data },
-    });
+    send(type, { id: "call_exec", ...data });
   // Shapes recorded from OpenCode 2.0.27 with a Code Mode MCP server.
   const code =
     'const a = await tools.cm_echo.shout({text: "hello"});\nreturn a;';
@@ -600,32 +488,6 @@ test("shows a Code Mode execute as one code row without nested rows", async () =
 });
 
 test("a failed permission reply never escapes as an unhandled rejection", async () => {
-  const active = {
-    providerTurnId: "turn-1",
-    startedAt: Date.now(),
-    abortController: new AbortController(),
-    opened: new Map<string, OpenCodeRecord>(),
-    pendingTools: new Map<string, string>(),
-    pendingInput: new Map<string, string>(),
-    touchedFiles: new Map<string, string[]>(),
-    openQuestions: new Map<string, string>(),
-    settledTools: new Set<string>(),
-  };
-  const session: SessionState = {
-    bbThreadId: "bb-thread",
-    providerThreadId: "ses_1",
-    cwd: "/repo",
-    permissionMode: "full",
-    disableSubagents: true,
-    dynamicTools: [],
-    disallowedTools: new Set(),
-    enabledModels: null,
-    instructions: "",
-    bridgeEnvVars: {},
-    dynamicToolScope: {},
-    active,
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-  };
   let replied = false;
   const api = async () => {
     return {
@@ -640,21 +502,16 @@ test("a failed permission reply never escapes as an unhandled rejection", async 
       },
     } as unknown as OpenCodeClient;
   };
-  const router = new OpenCodeEventRouter(
-    api,
-    () => {},
-    new Map([[session.providerThreadId, session]]),
-  );
+  const { event } = sessionFixture(api, undefined, {
+    session: { permissionMode: "full" },
+  });
   const unhandled: unknown[] = [];
   const onUnhandled = (reason: unknown) => unhandled.push(reason);
   process.on("unhandledRejection", onUnhandled);
   const stderrWrite = process.stderr.write;
   process.stderr.write = () => true;
   try {
-    await router.handleEvent({
-      type: "permission.asked",
-      data: { sessionID: "ses_1", id: "per_1", action: "shell" },
-    });
+    await event("permission.asked", { id: "per_1", action: "shell" });
     await new Promise((resolve) => setTimeout(resolve, 20));
   } finally {
     process.stderr.write = stderrWrite;
@@ -987,4 +844,47 @@ test("skips a permission reply already answered in OpenCode", async () => {
   await nextTick();
 
   assert.deepEqual(replies, []);
+});
+
+test("drops settlements from a turn abandoned without finish", async () => {
+  const replies: OpenCodeRecord[] = [];
+  const api = async () =>
+    ({
+      session: {
+        diff: async () => [],
+        form: {
+          reply: async (input: OpenCodeRecord) => {
+            replies.push(input);
+          },
+          cancel: async () => {},
+        },
+      },
+    }) as unknown as OpenCodeClient;
+  const { active, event, session } = sessionFixture(api, {
+    requestInteraction: async () => ({
+      resolution: {
+        kind: "user_answer",
+        answers: { name: { selected: [], freeText: "Alice" } },
+      },
+    }),
+  });
+
+  await event("form.replied", { id: "frm_reused" });
+  assert.equal(active.settledForms.get("frm_reused"), "answered");
+
+  // Discard the turn without finish(), then reuse the form ID in the next one.
+  const next = createActiveTurn("turn-2");
+  session.active = next;
+
+  await event("form.created", {
+    form: {
+      id: "frm_reused",
+      sessionID: "ses_1",
+      fields: [{ key: "name", type: "string" }],
+    },
+  });
+  await nextTick();
+
+  assert.equal(replies.length, 1);
+  assert.equal(next.settledForms.size, 0);
 });

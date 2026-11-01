@@ -330,23 +330,6 @@ export function answerFormFields(
 }
 
 export class OpenCodeInteractions {
-  private readonly questionWaiters = new Map<
-    string,
-    {
-      session: SessionState;
-      active: ActiveTurn;
-      resolve(form: RecordValue | undefined): void;
-    }
-  >();
-  private readonly earlyQuestionForms = new Map<string, RecordValue>();
-  private readonly settledForms = new Map<string, "answered" | "cancelled">();
-  private readonly ownFormReplies = new Set<string>();
-  private readonly ownFormCancels = new Set<string>();
-  private readonly settledPermissions = new Map<
-    string,
-    OpenCodePermissionReply
-  >();
-  private readonly ownPermissionReplies = new Set<string>();
   private readonly interactions: InteractionRequest;
 
   constructor(
@@ -357,10 +340,6 @@ export class OpenCodeInteractions {
     this.interactions =
       requestInteraction ??
       ((method, params, options) => requestRuntime(method, params, options));
-  }
-
-  private sessionKey(sessionId: string, id: string) {
-    return `${sessionId}:${id}`;
   }
 
   private questionCallId(form: RecordValue) {
@@ -396,11 +375,10 @@ export class OpenCodeInteractions {
       (reply !== "once" && reply !== "always" && reply !== "reject")
     )
       return;
-    const key = this.sessionKey(session.providerThreadId, requestId);
-    if (this.ownPermissionReplies.delete(key)) return;
     const active = session.active;
     if (!active || active.finishing) return;
-    this.settledPermissions.set(key, reply);
+    if (active.ownPermissionReplies.delete(requestId)) return;
+    active.settledPermissions.add(requestId);
   }
 
   /**
@@ -415,18 +393,13 @@ export class OpenCodeInteractions {
   ) {
     const formId = stringValue(data.id);
     if (!formId) return;
-    const key = this.sessionKey(session.providerThreadId, formId);
-    if (type === "form.replied") {
-      if (this.ownFormReplies.delete(key)) return;
-      const active = session.active;
-      if (!active || active.finishing) return;
-      this.settledForms.set(key, "answered");
-      return;
-    }
-    if (this.ownFormCancels.delete(key)) return;
     const active = session.active;
     if (!active || active.finishing) return;
-    this.settledForms.set(key, "cancelled");
+    if (active.ownForms.delete(formId)) return;
+    active.settledForms.set(
+      formId,
+      type === "form.replied" ? "answered" : "cancelled",
+    );
   }
 
   private async resolvePermission(session: SessionState, data: RecordValue) {
@@ -435,8 +408,7 @@ export class OpenCodeInteractions {
     const sessionId = stringValue(data.sessionID);
     const requestId = stringValue(data.id);
     if (!sessionId || !requestId) return;
-    const permissionKey = this.sessionKey(sessionId, requestId);
-    if (this.settledPermissions.delete(permissionKey)) return;
+    if (active.settledPermissions.delete(requestId)) return;
     const action = stringValue(data.action) ?? "";
     const automaticReply = automaticPermissionReply(
       session.permissionMode,
@@ -444,7 +416,7 @@ export class OpenCodeInteractions {
       action,
     );
     if (automaticReply) {
-      await this.replyPermission(sessionId, requestId, automaticReply);
+      await this.replyPermission(active, sessionId, requestId, automaticReply);
       return;
     }
     const tool = action || "OpenCode permission";
@@ -483,27 +455,27 @@ export class OpenCodeInteractions {
         { signal: active.abortController.signal },
       );
       const decision = result?.resolution?.decision;
-      if (this.settledPermissions.delete(permissionKey)) return;
+      if (active.settledPermissions.delete(requestId)) return;
       const reply =
         session.active === active
           ? approvalPermissionReply(decision)
           : "reject";
-      await this.replyPermission(sessionId, requestId, reply);
+      await this.replyPermission(active, sessionId, requestId, reply);
     } catch {
-      if (this.settledPermissions.delete(permissionKey)) return;
-      await this.replyPermission(sessionId, requestId, "reject").catch(
+      if (active.settledPermissions.delete(requestId)) return;
+      await this.replyPermission(active, sessionId, requestId, "reject").catch(
         () => {},
       );
     }
   }
 
   private async replyPermission(
+    active: ActiveTurn,
     sessionId: string,
     requestId: string,
     decision: OpenCodePermissionReply,
   ) {
-    const key = this.sessionKey(sessionId, requestId);
-    this.ownPermissionReplies.add(key);
+    active.ownPermissionReplies.add(requestId);
     try {
       const api = await this.api();
       await api.permission.reply({
@@ -512,30 +484,30 @@ export class OpenCodeInteractions {
         ...permissionReplyBody(decision),
       });
     } catch (error) {
-      this.ownPermissionReplies.delete(key);
+      active.ownPermissionReplies.delete(requestId);
       throw error;
     }
   }
 
   /** Route a `form.created` event to the question tool that raised it. */
   handleCreatedForm(session: SessionState, form: RecordValue) {
+    const active = session.active;
+    if (!active) return;
     const callId = this.questionCallId(form);
     if (callId) {
-      const key = this.sessionKey(session.providerThreadId, callId);
-      const waiter = this.questionWaiters.get(key);
+      const waiter = active.questionWaiters.get(callId);
       if (waiter) {
-        this.questionWaiters.delete(key);
+        active.questionWaiters.delete(callId);
         waiter.resolve(form);
         return;
       }
       if (inputRecord(form.metadata).kind === "question") {
-        this.earlyQuestionForms.set(key, form);
+        active.earlyQuestionForms.set(callId, form);
         return;
       }
     }
-    const active = session.active;
     const formId = stringValue(form.id);
-    if (!active || !formId) return;
+    if (!formId) return;
     const key = `form:${formId}`;
     if (active.openQuestions.has(key) || active.settledTools.has(key)) return;
     if (!active.opened.has(key)) {
@@ -553,50 +525,28 @@ export class OpenCodeInteractions {
     void this.answerQuestionForm(session, active, key, form).catch(() => {});
   }
 
-  cancelQuestionWaiters(session: SessionState, active: ActiveTurn) {
-    for (const [key, waiter] of this.questionWaiters) {
-      if (
-        waiter.session.providerThreadId !== session.providerThreadId ||
-        waiter.active !== active
-      )
-        continue;
-      this.questionWaiters.delete(key);
+  cancelQuestionWaiters(active: ActiveTurn) {
+    for (const waiter of active.questionWaiters.values())
       waiter.resolve(undefined);
-    }
-    const prefix = `${session.providerThreadId}:`;
-    for (const key of this.earlyQuestionForms.keys())
-      if (key.startsWith(prefix)) this.earlyQuestionForms.delete(key);
-    for (const key of [...this.settledForms.keys()])
-      if (key.startsWith(prefix)) this.settledForms.delete(key);
-    for (const key of [...this.settledPermissions.keys()])
-      if (key.startsWith(prefix)) this.settledPermissions.delete(key);
-    for (const set of [
-      this.ownFormReplies,
-      this.ownFormCancels,
-      this.ownPermissionReplies,
-    ])
-      for (const key of [...set]) if (key.startsWith(prefix)) set.delete(key);
+    active.questionWaiters.clear();
+    active.earlyQuestionForms.clear();
   }
 
   private waitForQuestionForm(
-    session: SessionState,
     active: ActiveTurn,
     callId: string,
   ): Promise<RecordValue | undefined> {
-    const key = this.sessionKey(session.providerThreadId, callId);
-    const early = this.earlyQuestionForms.get(key);
+    const early = active.earlyQuestionForms.get(callId);
     if (early) {
-      this.earlyQuestionForms.delete(key);
+      active.earlyQuestionForms.delete(callId);
       return Promise.resolve(early);
     }
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
-        this.questionWaiters.delete(key);
+        active.questionWaiters.delete(callId);
         resolve(undefined);
       }, QUESTION_WAIT_TIMEOUT_MS);
-      this.questionWaiters.set(key, {
-        session,
-        active,
+      active.questionWaiters.set(callId, {
         resolve(form) {
           clearTimeout(timeout);
           resolve(form);
@@ -607,11 +557,11 @@ export class OpenCodeInteractions {
 
   async cancelQuestionForm(
     session: SessionState,
+    active: ActiveTurn,
     formId: string,
     message?: string,
   ) {
-    const key = this.sessionKey(session.providerThreadId, formId);
-    this.ownFormCancels.add(key);
+    active.ownForms.add(formId);
     await this.api()
       .then((api) =>
         api.session.form.cancel({
@@ -621,7 +571,7 @@ export class OpenCodeInteractions {
         }),
       )
       .catch(() => {
-        this.ownFormCancels.delete(key);
+        active.ownForms.delete(formId);
       });
   }
 
@@ -661,7 +611,7 @@ export class OpenCodeInteractions {
     formId: string,
     result: "answered" | "cancelled",
   ) {
-    this.settledForms.delete(this.sessionKey(session.providerThreadId, formId));
+    active.settledForms.delete(formId);
     this.closeQuestion(
       session,
       active,
@@ -676,7 +626,7 @@ export class OpenCodeInteractions {
     active: ActiveTurn,
     callId: string,
   ) {
-    const form = await this.waitForQuestionForm(session, active, callId);
+    const form = await this.waitForQuestionForm(active, callId);
     if (session.active !== active || !active.opened.has(callId)) return;
     if (!form) {
       this.closeQuestion(
@@ -699,7 +649,7 @@ export class OpenCodeInteractions {
     message: string,
     cancelMessage?: string,
   ) {
-    await this.cancelQuestionForm(session, formId, cancelMessage);
+    await this.cancelQuestionForm(session, active, formId, cancelMessage);
     this.closeQuestion(session, active, callId, "failed", message);
   }
 
@@ -721,8 +671,7 @@ export class OpenCodeInteractions {
       return;
     }
     active.openQuestions.set(callId, formId);
-    const formKey = this.sessionKey(session.providerThreadId, formId);
-    const settled = this.settledForms.get(formKey);
+    const settled = active.settledForms.get(formId);
     if (settled) {
       this.closeExternalForm(session, active, callId, formId, settled);
       return;
@@ -756,7 +705,7 @@ export class OpenCodeInteractions {
       resolution = undefined;
     }
     if (session.active !== active || !active.opened.has(callId)) return;
-    const external = this.settledForms.get(formKey);
+    const external = active.settledForms.get(formId);
     if (external) {
       this.closeExternalForm(session, active, callId, formId, external);
       return;
@@ -787,15 +736,15 @@ export class OpenCodeInteractions {
     }
     try {
       const api = await this.api();
-      this.ownFormReplies.add(formKey);
+      active.ownForms.add(formId);
       await api.session.form.reply({
         sessionID: session.providerThreadId,
         formID: formId,
         answer: mapped.answer,
       });
     } catch (error) {
-      this.ownFormReplies.delete(formKey);
-      const late = this.settledForms.get(formKey);
+      active.ownForms.delete(formId);
+      const late = active.settledForms.get(formId);
       if (late) {
         this.closeExternalForm(session, active, callId, formId, late);
         return;

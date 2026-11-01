@@ -79,7 +79,11 @@ export {
   planPermissionModeForTurn,
   sessionFromParams,
 } from "./host/session-manager.ts";
-export { sessions, sessionsByProviderId } from "./host/types.ts";
+export {
+  createActiveTurn,
+  sessions,
+  sessionsByProviderId,
+} from "./host/types.ts";
 export {
   boundedTimelineDelta,
   boundedTimelineText,

@@ -60,7 +60,39 @@ export type ActiveTurn = {
   shellPolls?: Map<string, { stopped: boolean }>;
   /** Token counts of the latest finished step, for `usage.last`. */
   lastStepTokens?: OpenCodeRecord;
+  /** Question calls waiting for their form, keyed by tool call ID. */
+  questionWaiters: Map<string, { resolve(form?: OpenCodeRecord): void }>;
+  /** Forms that arrived before their question tool registered a waiter. */
+  earlyQuestionForms: Map<string, OpenCodeRecord>;
+  /** Form outcomes observed from OpenCode, keyed by raw form ID. */
+  settledForms: Map<string, "answered" | "cancelled">;
+  /** Raw IDs of BB's own form writes, removed when their OpenCode echo arrives. */
+  ownForms: Set<string>;
+  /** Permission requests settled in OpenCode, keyed by raw request ID. */
+  settledPermissions: Set<string>;
+  /** Raw IDs of BB's own permission replies, removed on their echo. */
+  ownPermissionReplies: Set<string>;
 };
+
+export function createActiveTurn(providerTurnId: string): ActiveTurn {
+  return {
+    providerTurnId,
+    startedAt: Date.now(),
+    abortController: new AbortController(),
+    opened: new Map(),
+    pendingTools: new Map(),
+    pendingInput: new Map(),
+    touchedFiles: new Map(),
+    openQuestions: new Map(),
+    settledTools: new Set(),
+    questionWaiters: new Map(),
+    earlyQuestionForms: new Map(),
+    settledForms: new Map(),
+    ownForms: new Set(),
+    settledPermissions: new Set(),
+    ownPermissionReplies: new Set(),
+  };
+}
 
 export type SessionState = {
   bbThreadId: string;

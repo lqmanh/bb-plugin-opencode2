@@ -1088,8 +1088,8 @@ export class OpenCodeEventRouter {
       "OpenCode turn ended before the BB tool returned",
     );
     for (const [, formId] of active.openQuestions)
-      void this.interactions.cancelQuestionForm(session, formId);
-    this.interactions.cancelQuestionWaiters(session, active);
+      void this.interactions.cancelQuestionForm(session, active, formId);
+    this.interactions.cancelQuestionWaiters(active);
     for (const [id, item] of active.opened) {
       this.emit(session.bbThreadId, [
         {
