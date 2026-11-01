@@ -25,12 +25,11 @@ import {
   resetLatestVersionCache,
 } from "./opencode-version.ts";
 import { writeJsonFileAtomic } from "./persistence.ts";
+import { sessions, sessionsByProviderId } from "./session-teardown.ts";
 import {
   errorMessage,
   inputRecord,
   stringValue,
-  sessions,
-  sessionsByProviderId,
   type OpenCodeRecord,
   type SessionState,
 } from "./types.ts";

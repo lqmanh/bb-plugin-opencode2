@@ -11,6 +11,14 @@ import type {
 const emptyApi = async () =>
   ({ session: { diff: async () => [] } }) as unknown as OpenCodeClient;
 
+function mcpApi(remove: (input: OpenCodeRecord) => Promise<void>) {
+  return async () =>
+    ({
+      session: { diff: async () => [] },
+      experimental: { mcp: { remove } },
+    }) as unknown as OpenCodeClient;
+}
+
 test("translates current OpenCode v2 text, reasoning, tool, and terminal events", async () => {
   const { emitted, event, session } = sessionFixture(emptyApi, undefined, {
     session: {
@@ -567,6 +575,61 @@ test("fails a turn and reports a deleted OpenCode session", async () => {
   assert.equal(notifications[0]?.method, "provider/recovery");
   assert.equal(notifications[0]?.params.kind, "restartRecommended");
   assert.match(session.terminalError ?? "", /deleted/);
+});
+
+test("removes dynamic tools before detaching a deleted session", async () => {
+  const events: string[] = [];
+  const removed: OpenCodeRecord[] = [];
+  const api = mcpApi(async (input) => {
+    events.push("remove");
+    removed.push(input);
+  });
+  const { event, lookup, session } = sessionFixture(api, {
+    onSessionGone: async () => {
+      events.push("gone");
+    },
+  });
+  session.active?.abortController.signal.addEventListener("abort", () =>
+    events.push("abort"),
+  );
+  session.dynamicToolProxy = {
+    serverName: "bb_opencode2_ses_1",
+    config: {} as never,
+    close: () => events.push("close"),
+  };
+
+  await event("session.deleted", {});
+
+  // The active turn finishes first, then teardown runs before onSessionGone.
+  assert.deepEqual(events, ["abort", "close", "remove", "gone"]);
+  assert.deepEqual(removed, [
+    { server: "bb_opencode2_ses_1", location: { directory: "/repo" } },
+  ]);
+  assert.equal(lookup.has(session.providerThreadId), false);
+});
+
+test("detaches a deleted session even when MCP removal fails", async () => {
+  const events: string[] = [];
+  const api = mcpApi(async () => {
+    events.push("remove");
+    throw new Error("server is gone");
+  });
+  const { event, lookup, session } = sessionFixture(api, {
+    onSessionGone: async () => {
+      events.push("gone");
+    },
+  });
+  session.dynamicToolProxy = {
+    serverName: "bb_opencode2_ses_1",
+    config: {} as never,
+    close: () => events.push("close"),
+  };
+
+  await event("session.deleted", {});
+
+  assert.deepEqual(events, ["close", "remove", "gone"]);
+  assert.equal(session.dynamicToolProxy, undefined);
+  assert.equal(lookup.has(session.providerThreadId), false);
 });
 
 test("reports an external archive and clears it on unarchive", async () => {

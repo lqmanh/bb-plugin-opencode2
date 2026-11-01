@@ -10,6 +10,11 @@ import { OpenCodeInteractions } from "./opencode-interactions.ts";
 import { toolFailureError } from "./prompt.ts";
 import { dynamicMcpServerName } from "./opencode-requests.ts";
 import {
+  releaseSessionTools,
+  removeSessionEntries,
+  sessionsByProviderId,
+} from "./session-teardown.ts";
+import {
   boundedTimelineText,
   itemKey,
   itemKeyForOpenItem,
@@ -32,8 +37,6 @@ import {
   errorMessage,
   inputRecord,
   parseInputText,
-  sessions,
-  sessionsByProviderId,
   stringValue,
   type ActiveTurn,
   type OpenCodeApi,
@@ -695,33 +698,13 @@ export class OpenCodeEventRouter {
   }
 
   private async detachSession(session: SessionState, reason: string) {
-    dynamicToolCallRouter.resolve(session.dynamicToolScope, reason);
-    const proxy = session.dynamicToolProxy;
-    session.dynamicToolProxy = undefined;
-    if (proxy) {
-      proxy.close();
-      try {
-        const api = await this.api();
-        await api.experimental.mcp.remove({
-          server: proxy.serverName,
-          location: { directory: session.cwd },
-        });
-      } catch {
-        // The session is gone; the registry entry is dropped below even when
-        // the MCP server could not be removed.
-      }
-    }
+    await releaseSessionTools(session, reason, () => this.api());
     if (this.sessionLookup.get(session.providerThreadId) === session) {
       (this.sessionLookup as Map<string, SessionState>).delete(
         session.providerThreadId,
       );
     }
-    if (sessions.get(session.bbThreadId) === session) {
-      sessions.delete(session.bbThreadId);
-    }
-    if (sessionsByProviderId.get(session.providerThreadId) === session) {
-      sessionsByProviderId.delete(session.providerThreadId);
-    }
+    removeSessionEntries(session);
     await this.onSessionGone?.(session, reason);
   }
 

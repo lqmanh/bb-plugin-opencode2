@@ -29,13 +29,19 @@ import {
 import { openCodeServer } from "./opencode-server.ts";
 import { enabledDynamicTools, sameDynamicTools } from "./prompt.ts";
 import {
+  releaseSessionTools,
+  removeMcpServers,
+  removeSessionEntries,
+  sessions,
+  sessionsByProviderId,
+  stopDynamicTools,
+} from "./session-teardown.ts";
+import {
   ARCHIVED_SESSION_MESSAGE,
   errorMessage,
   inputRecord,
   parsePermissionMode,
   stringValue,
-  sessions,
-  sessionsByProviderId,
   type ModelRef,
   type OpenCodeRecord,
   type SessionState,
@@ -172,21 +178,13 @@ export async function releaseDynamicTools(
   session: SessionState,
   reason: string,
 ) {
-  dynamicToolCallRouter.resolve(session.dynamicToolScope, reason);
-  const proxy = session.dynamicToolProxy;
-  if (!proxy) return;
-  session.dynamicToolProxy = undefined;
-  proxy.close();
-  try {
-    const api = await openCodeServer.api();
-    await api.experimental.mcp.remove({
-      server: proxy.serverName,
-      location: { directory: session.cwd },
-    });
-    await openCodeServer.forgetMcpRegistration(session.providerThreadId);
-  } catch {
-    // Keep the registry entry so a later discard can retry the removal.
-  }
+  const removed = await releaseSessionTools(session, reason, () =>
+    openCodeServer.api(),
+  );
+  if (!removed) return;
+  await openCodeServer
+    .forgetMcpRegistration(session.providerThreadId)
+    .catch(() => {});
 }
 
 async function installSessionInstructions(session: SessionState) {
@@ -294,7 +292,7 @@ export async function registerSession(session: SessionState) {
     } else {
       await releaseDynamicTools(previous, "The BB thread session was replaced");
     }
-    sessionsByProviderId.delete(previous.providerThreadId);
+    removeSessionEntries(previous);
   }
   sessions.set(session.bbThreadId, session);
   sessionsByProviderId.set(session.providerThreadId, session);
@@ -304,8 +302,7 @@ export async function registerSession(session: SessionState) {
     await ensureSessionPermissions(session);
     if (!reusableProxy) await installDynamicTools(session);
   } catch (error) {
-    sessions.delete(session.bbThreadId);
-    sessionsByProviderId.delete(session.providerThreadId);
+    removeSessionEntries(session);
     await releaseDynamicTools(session, "OpenCode session setup failed");
     throw error;
   }
@@ -330,12 +327,7 @@ export async function unregisterSession(
   session: SessionState,
   reason: string,
 ): Promise<void> {
-  if (sessions.get(session.bbThreadId) === session) {
-    sessions.delete(session.bbThreadId);
-  }
-  if (sessionsByProviderId.get(session.providerThreadId) === session) {
-    sessionsByProviderId.delete(session.providerThreadId);
-  }
+  removeSessionEntries(session);
   session.active?.abortController.abort();
   await releaseDynamicTools(session, reason);
   await openCodeServer
@@ -377,38 +369,15 @@ export async function shutdownSessions(reason: string): Promise<void> {
 
   const removals = currentSessions.flatMap((session) => {
     session.active?.abortController.abort();
-    dynamicToolCallRouter.resolve(session.dynamicToolScope, reason);
-    const proxy = session.dynamicToolProxy;
-    if (!proxy) return [];
-    session.dynamicToolProxy = undefined;
-    proxy.close();
-    return [
-      {
-        providerThreadId: session.providerThreadId,
-        serverName: proxy.serverName,
-        cwd: session.cwd,
-      },
-    ];
+    const server = stopDynamicTools(session, reason);
+    return server ? [server] : [];
   });
 
   const api =
     removals.length > 0
       ? await openCodeServer.api().catch(() => undefined)
       : undefined;
-  const results = api
-    ? await Promise.allSettled(
-        removals.map(async ({ providerThreadId, serverName, cwd }) => {
-          await api.experimental.mcp.remove(
-            { server: serverName, location: { directory: cwd } },
-            { signal: AbortSignal.timeout(2_000) },
-          );
-          return providerThreadId;
-        }),
-      )
-    : [];
-  const removedIds = results.flatMap((result) =>
-    result.status === "fulfilled" ? [result.value] : [],
-  );
+  const removedIds = api ? await removeMcpServers(api, removals) : [];
   if (removedIds.length > 0) {
     await openCodeServer.forgetMcpRegistrations(removedIds);
   }

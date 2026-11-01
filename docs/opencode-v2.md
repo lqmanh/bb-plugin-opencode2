@@ -2,7 +2,7 @@
 
 The bridge calls OpenCode through `@opencode/client`. Its generated types cover
 request and response fields and event envelopes, but not the semantics and
-metadata below. Official API docs: <https://opencode.ai/v2/docs/api>.
+metadata below. Official docs: https://opencode.ai/v2/docs/build/client.
 
 ## Permissions
 

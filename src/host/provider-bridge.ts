@@ -69,6 +69,11 @@ import {
   unregisterSession,
 } from "./session-manager.ts";
 import {
+  removeMcpServer,
+  sessions,
+  sessionsByProviderId,
+} from "./session-teardown.ts";
+import {
   isManualCompactionTurn,
   manualCompactionStartDeltas,
 } from "./timeline.ts";
@@ -76,8 +81,6 @@ import {
   createActiveTurn,
   errorMessage,
   inputRecord,
-  sessions,
-  sessionsByProviderId,
   stringValue,
   type OpenCodeRecord,
   type SessionState,
@@ -732,10 +735,7 @@ async function handle(request: RecordValue) {
         const api = await openCodeServer.api().catch(() => undefined);
         if (orphan && api) {
           try {
-            await api.experimental.mcp.remove({
-              server: orphan.serverName,
-              location: { directory: orphan.cwd },
-            });
+            await removeMcpServer(api, orphan);
             await openCodeServer.forgetMcpRegistration(params.providerThreadId);
           } catch {
             // Keep the registry entry so a later discard can retry.

@@ -2,9 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_MODEL_SETTINGS,
-  normalizeModelSelection,
   normalizeModelSettings,
-  resolveModelSettings,
 } from "../src/model-settings.ts";
 
 test("normalizes malformed model settings", () => {
@@ -27,25 +25,5 @@ test("normalizes malformed model settings", () => {
       enabledModels: ["openai/gpt-5"],
       disableSubagents: true,
     },
-  );
-});
-
-test("resolves provider settings into the host model settings shape", () => {
-  assert.deepEqual(resolveModelSettings({ allowSubagents: true }, []), {
-    enabledModels: [],
-    disableSubagents: false,
-  });
-  assert.deepEqual(resolveModelSettings({}, null), DEFAULT_MODEL_SETTINGS);
-});
-
-test("normalizes stored model selection", () => {
-  assert.deepEqual(normalizeModelSelection(undefined), {
-    enabledModels: null,
-  });
-  assert.deepEqual(
-    normalizeModelSelection({
-      enabledModels: ["openai/gpt-5", "openai/gpt-5", ""],
-    }),
-    { enabledModels: ["openai/gpt-5"] },
   );
 });

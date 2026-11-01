@@ -143,9 +143,6 @@ export type SessionState = {
   };
 };
 
-export const sessions = new Map<string, SessionState>();
-export const sessionsByProviderId = new Map<string, SessionState>();
-
 export function isSubagentTool(name: string): boolean {
   const tool = name.toLowerCase();
   return tool === "task" || tool === "subagent";

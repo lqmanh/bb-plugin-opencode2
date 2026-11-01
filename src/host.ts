@@ -17,7 +17,8 @@ import { openCodeServer } from "./host/opencode-server.ts";
 import { MIN_OPENCODE_VERSION } from "./host/opencode-version.ts";
 import { shutdownBridge } from "./host/provider-bridge.ts";
 import { nativeSkillRoots } from "./host/opencode-requests.ts";
-import { errorMessage, sessions } from "./host/types.ts";
+import { sessions } from "./host/session-teardown.ts";
+import { errorMessage } from "./host/types.ts";
 
 export { createDynamicToolCallRouter } from "./host/bridge-runtime.ts";
 export {
@@ -79,11 +80,13 @@ export {
   planPermissionModeForTurn,
   sessionFromParams,
 } from "./host/session-manager.ts";
+export { createActiveTurn } from "./host/types.ts";
 export {
-  createActiveTurn,
+  releaseSessionTools,
+  removeMcpServers,
   sessions,
   sessionsByProviderId,
-} from "./host/types.ts";
+} from "./host/session-teardown.ts";
 export {
   boundedTimelineDelta,
   boundedTimelineText,
