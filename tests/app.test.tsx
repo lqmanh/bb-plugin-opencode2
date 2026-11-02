@@ -11,52 +11,37 @@ afterEach(() => {
 });
 
 describe("OpenCode settings", () => {
-  it("loads models and persists model selection changes", async () => {
+  it("shows host status and usage source without a model list", async () => {
     const app = await loadPluginApp(() => import("../src/app.tsx"));
     const registration = app.settingsSections[0];
     expect(registration?.id).toBe("settings");
 
-    const saveModelSelection = vi.fn(async (settings) => settings);
+    const getStatus = vi.fn(async () => ({
+      hosts: [
+        {
+          hostId: "host_1",
+          hostName: "laptop",
+          status: {
+            status: "ready" as const,
+            statusMessage: null,
+            installedVersion: "2.2.5",
+            latestVersion: "2.2.6",
+            minimumSupportedVersion: "2.2.5",
+            loginCommand: "opencode2 auth login",
+          },
+          usage: {
+            status: "active" as const,
+            sourceType: "local" as const,
+            source: "/tmp/opencode-usage",
+            providerCount: 2,
+          },
+        },
+      ],
+    }));
     const slot = renderSlot<{}, typeof opencodeSettingsRpcContract>(
       registration!,
       {},
-      {
-        rpc: {
-          getModelSelection: async () => ({ enabledModels: null }),
-          listModels: async () => ({
-            models: [
-              {
-                id: "openai/gpt-5",
-                providerId: "openai",
-                displayName: "GPT-5",
-              },
-            ],
-          }),
-          saveModelSelection,
-          getStatus: async () => ({
-            hosts: [
-              {
-                hostId: "host_1",
-                hostName: "laptop",
-                status: {
-                  status: "ready" as const,
-                  statusMessage: null,
-                  installedVersion: "2.2.5",
-                  latestVersion: "2.2.6",
-                  minimumSupportedVersion: "2.2.5",
-                  loginCommand: "opencode2 auth login",
-                },
-                usage: {
-                  status: "active" as const,
-                  sourceType: "local" as const,
-                  source: "/tmp/opencode-usage",
-                  providerCount: 2,
-                },
-              },
-            ],
-          }),
-        },
-      },
+      { rpc: { getStatus } },
     );
     mountedSlots.push(slot);
 
@@ -66,24 +51,12 @@ describe("OpenCode settings", () => {
     expect(slot.getByText("Ready")).toBeTruthy();
     expect(slot.getByText(/opencode-usage · local · 2 providers/)).toBeTruthy();
     expect(slot.getByText("Active")).toBeTruthy();
+    expect(slot.queryByText("Models")).toBeNull();
+    expect(slot.queryByRole("switch")).toBeNull();
 
-    // Provider groups start collapsed; expanding shows the models.
-    const group = await slot.findByRole("button", { name: /openai/ });
-    expect(slot.queryByText("GPT-5")).toBeNull();
-    fireEvent.click(group);
-    expect(await slot.findByText("GPT-5")).toBeTruthy();
-
-    const modelSwitch = await slot.findByRole("switch", {
-      name: "Enable GPT-5 from openai",
-    });
-    fireEvent.click(modelSwitch);
+    fireEvent.click(slot.getByRole("button", { name: "Refresh" }));
     await waitFor(() => {
-      expect(saveModelSelection).toHaveBeenCalledWith({ enabledModels: [] });
-    });
-
-    fireEvent.click(modelSwitch);
-    await waitFor(() => {
-      expect(saveModelSelection).toHaveBeenCalledWith({ enabledModels: null });
+      expect(getStatus).toHaveBeenCalledTimes(2);
     });
   });
 });

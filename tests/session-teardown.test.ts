@@ -12,7 +12,6 @@ function fakeSession(id: string): SessionState {
     disableSubagents: true,
     dynamicTools: [],
     disallowedTools: new Set(),
-    enabledModels: null,
     instructions: "",
     bridgeEnvVars: {},
     dynamicToolScope: {},

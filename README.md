@@ -31,7 +31,7 @@ the provider is enabled in BB's provider controls.
 | Provider picker        | Visible when `opencode2` is installed and the provider is enabled in BB's provider controls.                                                                                                                                                                     |
 | Health                 | Reports not installed, unsupported version, no model provider connected, or service unreachable, with the command to fix it.                                                                                                                                     |
 | Install and update     | Install through npm; update through `opencode2 upgrade`, which handles npm, bun, brew, and curl installs.                                                                                                                                                        |
-| Model discovery        | Models come from OpenCode for the thread's workspace. OpenCode's default model is BB's default. The settings page can allow or block individual models.                                                                                                          |
+| Model discovery        | Models come from OpenCode for the thread's workspace. OpenCode's default model is BB's default.                                                                                                                                                                  |
 | Reasoning levels       | BB levels map to each model's OpenCode variants (`minimal` serves as low and `thinking` as high when the model lacks those levels). Models without variants run on their defaults.                                                                               |
 | New, resumed threads   | BB creates or reconnects to an OpenCode session and keeps its ID.                                                                                                                                                                                                |
 | Fork at a checkpoint   | Forks copy history through the checkpoint turn into a new OpenCode session.                                                                                                                                                                                      |
@@ -83,7 +83,6 @@ Open the plugin settings page in BB (Settings → OpenCode v2).
   is active, missing, or unavailable, and how many providers it exposes.
 - **Disable provider subagents** hides OpenCode's native subagent tool so agents
   delegate through BB. Off by default.
-- **Models** controls the allowlist, grouped by OpenCode provider.
 
 Use BB's provider controls to hide or disable the provider. The plugin always
 keeps BB thread tools out of OpenCode's own sessions: it adds one
@@ -94,7 +93,7 @@ are unaffected: each allows its own tools in its session rules.
 
 Settings apply from the next turn. See
 [`skills/opencode2-provider/SKILL.md`](skills/opencode2-provider/SKILL.md) for
-the settings keys, model allowlist RPC, and troubleshooting.
+the settings keys and troubleshooting.
 
 ## Development
 

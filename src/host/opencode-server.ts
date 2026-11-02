@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   OpenCode,
   isConflictError,
@@ -7,12 +7,8 @@ import {
   type OpenCodeClient,
 } from "@opencode/client";
 import { Service } from "@opencode/client/service";
-import {
-  DEFAULT_MODEL_SETTINGS,
-  normalizeModelSettings,
-} from "../model-settings.ts";
-import type { ModelSettings } from "../settings-contract.ts";
 import { modelCatalogEntry, type ModelCatalogEntry } from "./models.ts";
+import { ensureBbToolsRule } from "./opencode-config.ts";
 import {
   forkBoundaryRetainingThrough,
   revertTargetRetainingThrough,
@@ -36,7 +32,6 @@ import {
 
 type RecordValue = OpenCodeRecord;
 
-const SETTINGS_FILE = "opencode2-model-settings.json";
 const MCP_REGISTRY_FILE = "opencode2-mcp-registry.json";
 const SESSION_REGISTRY_FILE = "opencode2-session-registry.json";
 
@@ -154,39 +149,14 @@ export class OpenCodeServer {
     this.dataDir = dataDir;
   }
 
-  private settingsPath() {
-    return this.dataDir ? join(this.dataDir, SETTINGS_FILE) : undefined;
-  }
-
-  /**
-   * Plugin settings reach session and turn commands as `providerOptions`
-   * (see `deriveProviderOptions` in server.ts), which is always current.
-   * Sessionless maintenance requests (`model/list`, `provider/health`) carry
-   * only static options, so they read the copy the host RPC worker keeps in
-   * its own data directory, a sibling of the bridge's.
-   */
-  async readModelSettings(providerOptions?: unknown): Promise<ModelSettings> {
-    const derived = inputRecord(providerOptions).modelSettings;
-    if (derived !== undefined) return normalizeModelSettings(derived);
-    if (!this.dataDir) return DEFAULT_MODEL_SETTINGS;
-    for (const path of [
-      join(this.dataDir, SETTINGS_FILE),
-      join(dirname(this.dataDir), "host-data", SETTINGS_FILE),
-    ]) {
-      try {
-        const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-        return normalizeModelSettings(parsed);
-      } catch {
-        // Try the next location.
-      }
+  private async ensureHostConfig() {
+    try {
+      if ((await ensureBbToolsRule()) === "added") this.reloadConfigWhenIdle();
+    } catch (error) {
+      process.stderr.write(
+        `[opencode2] Could not update OpenCode's global config: ${errorMessage(error)}\n`,
+      );
     }
-    return DEFAULT_MODEL_SETTINGS;
-  }
-
-  async writeModelSettings(settings: ModelSettings) {
-    const path = this.settingsPath();
-    if (!path) throw new Error("OpenCode host data directory is unavailable");
-    await writeJsonFileAtomic(path, settings);
   }
 
   // Tracks per-session MCP bridges so discard can remove OpenCode's
@@ -465,6 +435,7 @@ export class OpenCodeServer {
       );
       this.watchdog.unref();
     }
+    void this.ensureHostConfig();
   }
 
   async api(): Promise<OpenCodeClient> {

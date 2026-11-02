@@ -63,10 +63,6 @@ test("reads session instructions from bridge execution options", () => {
       },
     },
     "session_1",
-    {
-      enabledModels: null,
-      disableSubagents: true,
-    },
   );
 
   assert.equal(session.instructions, "Use the repository conventions.");

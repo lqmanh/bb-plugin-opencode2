@@ -28,6 +28,11 @@ test("registers OpenCode v2 as an installed checkpoint-capable provider with eve
     "full",
   ]);
   assert.deepEqual(harness.experimental_hostRpcCalls, []);
+  const rpcMethods = harness.inspection.registrations.rpcMethods;
+  assert.ok(rpcMethods.includes("getStatus"));
+  assert.ok(!rpcMethods.includes("getModelSelection"));
+  assert.ok(!rpcMethods.includes("saveModelSelection"));
+  assert.deepEqual(harness.inspection.registrations.services, []);
   assert.deepEqual(provider.capabilities.reasoningLevels, [
     "none",
     "low",
@@ -39,63 +44,26 @@ test("registers OpenCode v2 as an installed checkpoint-capable provider with eve
   ]);
 });
 
-test("aborts a pending settings sync when the background service stops", async () => {
+test("derives provider options from the subagent setting", async () => {
   const { bb, harness } = createFakePluginHost({
     pluginId: "opencode2",
     experimental_hostEntry: true,
-    sdk: {
-      hosts: {
-        list: async () => [{ id: "host-a", status: "connected" }],
-      },
-    },
-    experimental_callHostRpc: async () => new Promise(() => {}),
   });
+
   await plugin(bb);
 
-  const service = harness.runService("sync-model-settings");
-  await new Promise((resolve) => setImmediate(resolve));
-  service.controller.abort();
-  await Promise.race([
-    service.done,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("settings sync did not abort")), 100),
-    ),
-  ]);
-});
-
-test("synchronizes settings when each host connects", async () => {
-  let connected = [{ id: "host-a", status: "connected" }];
-  const { bb, harness } = createFakePluginHost({
-    pluginId: "opencode2",
-    experimental_hostEntry: true,
-    sdk: {
-      hosts: {
-        list: async () => connected,
-      },
-    },
-    experimental_callHostRpc: async () => ({ ok: true }),
-  });
-  await plugin(bb);
-
-  const firstRun = harness.runService("sync-model-settings");
-  await new Promise((resolve) => setImmediate(resolve));
-  firstRun.controller.abort();
-  await firstRun.done;
-  assert.deepEqual(
-    harness.experimental_hostRpcCalls.map((call) => call.hostId),
-    ["host-a"],
+  const provider = harness.inspection.registrations.providerRegistrations.find(
+    (registration) => registration.id === "opencode2",
   );
-
-  connected = [
-    { id: "host-a", status: "connected" },
-    { id: "host-b", status: "connected" },
-  ];
-  const secondRun = harness.runService("sync-model-settings");
-  await new Promise((resolve) => setImmediate(resolve));
-  secondRun.controller.abort();
-  await secondRun.done;
+  assert.ok(provider?.deriveProviderOptions);
   assert.deepEqual(
-    harness.experimental_hostRpcCalls.map((call) => call.hostId),
-    ["host-a", "host-b"],
+    provider.deriveProviderOptions({
+      threadId: "thread_1",
+      projectId: "project_1",
+      model: "openai/gpt-5",
+      permissionMode: "auto",
+      settings: { subagentsDisabled: true },
+    }),
+    { disableSubagents: true },
   );
 });

@@ -244,7 +244,6 @@ test("forwards archive state and consumes its own archive event", async () => {
     disableSubagents: true,
     dynamicTools: [],
     disallowedTools: new Set(),
-    enabledModels: null,
     instructions: "",
     bridgeEnvVars: {},
     dynamicToolScope: {},

@@ -10,6 +10,11 @@ All notable changes to this plugin are documented here. The format follows
 - The `allowSubagents` setting is now `subagentsDisabled` (inverted), matching
   the built-in providers. Native subagents are now enabled by default.
 
+### Removed
+
+- The model allowlist in the settings page and the `sync-model-settings`
+  background service.
+
 ## [1.4.0] - 2026-11-02
 
 ### Added

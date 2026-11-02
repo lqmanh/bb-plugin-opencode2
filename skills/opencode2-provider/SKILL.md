@@ -1,8 +1,8 @@
 ---
 name: opencode2-provider
 description:
-  "Configure or troubleshoot BB-specific OpenCode v2 settings, model allowlist,
-  agents, and stale sessions."
+  "Configure or troubleshoot BB-specific OpenCode v2 settings, agents, and stale
+  sessions."
 ---
 
 # OpenCode v2 provider
@@ -20,11 +20,6 @@ Use BB's provider controls to enable or disable the provider. The plugin always
 keeps one `bb_opencode2_*` deny rule at the end of `permissions` in the host's
 global OpenCode config, so OpenCode's own sessions do not list BB threads'
 tools. OpenCode applies it at its next idle location reload.
-
-The model allowlist is on the plugin settings page. Read it with
-`bb plugin rpc call opencode2 getModelSelection --json`; write it with
-`saveModelSelection`: `enabledModels` is `null` for every model or an exact list
-of `provider/model` IDs (`[]` hides all).
 
 Primary agents, including `plan`, are the `agent` session option on each model.
 Set it with `bb thread spawn --option agent=<name>` or

@@ -51,15 +51,6 @@ export function modelId(model: ModelRef): string {
   return `${model.providerID}/${model.id}`;
 }
 
-export function assertModelEnabled(
-  model: ModelRef | undefined,
-  enabledModels: ReadonlySet<string> | null,
-): void {
-  if (model && enabledModels !== null && !enabledModels.has(modelId(model))) {
-    throw new Error(`OpenCode model is disabled: ${modelId(model)}`);
-  }
-}
-
 export function sameModelRef(
   a: ModelRef | undefined,
   b: ModelRef | undefined,
@@ -236,8 +227,8 @@ export function mapModel(
   sessionOptions: readonly NonNullable<
     ReturnType<typeof agentSessionOption>
   >[] = [],
+  entry = modelCatalogEntry(model),
 ) {
-  const entry = modelCatalogEntry(model);
   const providerId = stringValue(model.providerID) ?? "unknown";
   const levels = [...entry.variants.keys()].map((level) => ({
     reasoningEffort: level,

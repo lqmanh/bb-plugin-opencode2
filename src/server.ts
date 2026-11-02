@@ -12,7 +12,6 @@ import {
   opencodeSettingsRpcContract,
   unavailableUsageStatus,
   type HostStatus,
-  type ModelSummary,
 } from "./settings-contract.ts";
 import {
   parseUsageResourceId,
@@ -20,35 +19,20 @@ import {
   usageResourceFromSnapshot,
   usageResources,
 } from "./provider-usage.ts";
-import {
-  DEFAULT_PROVIDER_SETTINGS,
-  normalizeModelSelection,
-  resolveModelSettings,
-} from "./model-settings.ts";
 import { errorMessage } from "./host/types.ts";
 
-const SETTINGS_KEY = "model-settings";
-
-export default async function plugin(bb: BbPluginApi) {
-  const providerSettings = bb.settings.define({
+export default function plugin(bb: BbPluginApi) {
+  bb.settings.define({
     subagentsDisabled: {
       type: "boolean",
       label: "Disable provider subagents",
       description:
         "Prevent OpenCode from starting native subagents so agents use BB for delegation.",
-      default: DEFAULT_PROVIDER_SETTINGS.subagentsDisabled,
+      default: false,
     },
   });
 
-  const storedSettings = await bb.storage.kv.get(SETTINGS_KEY);
-  let selection = normalizeModelSelection(storedSettings);
-
-  let settingValues = await providerSettings.get();
-  function currentModelSettings() {
-    return resolveModelSettings(settingValues, selection.enabledModels);
-  }
   const host = bb.hosts.experimental_client({ contract: opencodeHostContract });
-  const syncedSettings = new Map<string, string>();
 
   async function connectedHostIds(signal?: AbortSignal) {
     return (await bb.sdk.hosts.list({ signal }))
@@ -65,68 +49,6 @@ export default async function plugin(bb: BbPluginApi) {
       hostId,
       result: results[index],
     }));
-  }
-
-  async function syncSettings(hostIds?: string[], signal?: AbortSignal) {
-    const connected = hostIds ?? (await connectedHostIds(signal));
-    const modelSettings = currentModelSettings();
-    const revision = JSON.stringify(modelSettings);
-    const targets = connected.filter(
-      (hostId) => syncedSettings.get(hostId) !== revision,
-    );
-    const results = await Promise.allSettled(
-      targets.map((hostId) => {
-        const call = host.call("setModelSettings", modelSettings, {
-          hostId,
-          signal,
-        });
-        if (!signal) return call;
-        return new Promise((resolve, reject) => {
-          const aborted = () =>
-            reject(signal.reason ?? new Error("Settings sync aborted"));
-          if (signal.aborted) {
-            aborted();
-            return;
-          }
-          signal.addEventListener("abort", aborted, { once: true });
-          call.then(resolve, reject).finally(() => {
-            signal.removeEventListener("abort", aborted);
-          });
-        });
-      }),
-    );
-    results.forEach((result, index) => {
-      if (result.status === "fulfilled") {
-        syncedSettings.set(targets[index], revision);
-      }
-    });
-    for (const hostId of syncedSettings.keys()) {
-      if (!connected.includes(hostId)) syncedSettings.delete(hostId);
-    }
-    if (
-      !signal?.aborted &&
-      results.some((result) => result.status === "rejected")
-    ) {
-      bb.log.warn(
-        "Could not sync OpenCode model settings to every connected host",
-      );
-    }
-  }
-
-  async function listModels() {
-    const hostIds = await connectedHostIds();
-    await syncSettings(hostIds);
-    const results = await settleHostCalls(hostIds, (hostId) =>
-      host.call("listModels", {}, { hostId }),
-    );
-    const models = new Map<string, ModelSummary>();
-    for (const { result } of results) {
-      if (result.status !== "fulfilled") continue;
-      for (const model of result.value.models) models.set(model.id, model);
-    }
-    return {
-      models: [...models.values()].sort((a, b) => a.id.localeCompare(b.id)),
-    };
   }
 
   async function getStatus() {
@@ -155,18 +77,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { hosts: results };
   }
 
-  bb.rpc.register(opencodeSettingsRpcContract, {
-    getModelSelection: () => selection,
-    listModels,
-    getStatus,
-    async saveModelSelection(next) {
-      selection = normalizeModelSelection(next);
-      await bb.storage.kv.set(SETTINGS_KEY, selection);
-      await syncSettings();
-      bb.realtime.publish("settings-changed", selection);
-      return selection;
-    },
-  });
+  bb.rpc.register(opencodeSettingsRpcContract, { getStatus });
 
   bb.rpc.register(
     providerUsageRpcContract,
@@ -220,35 +131,6 @@ export default async function plugin(bb: BbPluginApi) {
     },
   );
 
-  providerSettings.onChange((next) => {
-    settingValues = next;
-    void syncSettings().catch((error) =>
-      bb.log.warn(
-        `Could not sync OpenCode provider settings: ${errorMessage(error)}`,
-      ),
-    );
-  });
-
-  bb.background.service("sync-model-settings", {
-    async start(signal) {
-      while (!signal.aborted) {
-        await syncSettings(undefined, signal);
-        if (signal.aborted) break;
-        await new Promise<void>((resolve) => {
-          const stop = () => {
-            clearTimeout(timeout);
-            resolve();
-          };
-          const timeout = setTimeout(() => {
-            signal.removeEventListener("abort", stop);
-            resolve();
-          }, 5_000);
-          signal.addEventListener("abort", stop, { once: true });
-        });
-      }
-    },
-  });
-
   bb.providers.register({
     id: OPENCODE_PROVIDER_ID,
     displayName: "OpenCode v2",
@@ -291,9 +173,9 @@ export default async function plugin(bb: BbPluginApi) {
     // the host entry answers with the roots OpenCode actually uses.
     experimental_resolvesNativeRoots: true,
     // Settings reach every session and turn command as providerOptions, so a
-    // change applies on the next turn without waiting for the host sync.
+    // change applies from the next turn.
     deriveProviderOptions: ({ settings }) => ({
-      modelSettings: resolveModelSettings(settings, selection.enabledModels),
+      disableSubagents: settings.subagentsDisabled === true,
     }),
   });
 

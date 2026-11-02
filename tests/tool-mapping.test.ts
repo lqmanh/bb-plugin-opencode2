@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   approvalPermissionReply,
-  assertModelEnabled,
   automaticPermissionReply,
   forkBoundaryRetainingThrough,
   isManualCompactionTurn,
@@ -67,23 +66,6 @@ test("keeps channel-qualified keys when unfinished items are closed", () => {
     providerItemId: "tool_1",
     channel: "tool",
   });
-});
-
-test("rejects model selections outside the configured allowlist", () => {
-  assert.doesNotThrow(() =>
-    assertModelEnabled(
-      { providerID: "openai", id: "gpt-5" },
-      new Set(["openai/gpt-5"]),
-    ),
-  );
-  assert.throws(
-    () =>
-      assertModelEnabled(
-        { providerID: "openai", id: "gpt-5" },
-        new Set(["anthropic/claude"]),
-      ),
-    /model is disabled/,
-  );
 });
 
 test("projects provider failures as a visible error followed by a failed turn boundary", () => {

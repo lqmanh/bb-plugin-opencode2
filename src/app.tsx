@@ -6,8 +6,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "settings",
     title: "OpenCode v2",
-    description:
-      "Check OpenCode on each host and choose which models BB can use.",
+    description: "Check OpenCode and its usage source on each connected host.",
     component: SettingsSection,
   });
 });

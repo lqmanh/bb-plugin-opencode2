@@ -3,16 +3,12 @@ import {
   experimental_filterResolvedNativeRoots,
   experimental_nativeRootsHostContract,
 } from "@get-bb/plugin-sdk/host";
-import {
-  modelSummarySchema,
-  opencodeHostContract,
-} from "./settings-contract.ts";
+import { opencodeHostContract } from "./settings-contract.ts";
 import {
   installationStatus,
   OPENCODE_LOGIN_COMMAND,
   providerHealth,
 } from "./host/maintenance.ts";
-import { ensureBbToolsRule } from "./host/opencode-config.ts";
 import { openCodeServer } from "./host/opencode-server.ts";
 import {
   getProviderUsage,
@@ -22,8 +18,6 @@ import {
 import { MIN_OPENCODE_VERSION } from "./host/opencode-version.ts";
 import { shutdownBridge } from "./host/provider-bridge.ts";
 import { nativeSkillRoots } from "./host/opencode-requests.ts";
-import { sessions } from "./host/session-teardown.ts";
-import { errorMessage } from "./host/types.ts";
 
 export { createDynamicToolCallRouter } from "./host/bridge-runtime.ts";
 export {
@@ -33,7 +27,6 @@ export {
 } from "./host/dynamic-tools-mcp.ts";
 export {
   agentSessionOption,
-  assertModelEnabled,
   mapModel,
   modelCatalogEntry,
   resolveModelVariant,
@@ -132,24 +125,6 @@ export default experimental_defineHostEntry({
         },
       ).answer;
     },
-    async listModels(input, context) {
-      openCodeServer.setDataDir(context.experimental_paths.dataDir);
-      const catalog = await openCodeServer.modelCatalog(
-        input.cwd ?? process.cwd(),
-        true,
-      );
-      return {
-        models: catalog.models.map((model) => {
-          const id = `${model.providerID}/${model.id}`;
-          return modelSummarySchema.parse({
-            id,
-            providerId: model.providerID,
-            displayName: typeof model.name === "string" ? model.name : id,
-            ...(id === catalog.defaultId ? { isDefault: true } : {}),
-          });
-        }),
-      };
-    },
     async getStatus(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
       const cwd = process.cwd();
@@ -165,27 +140,6 @@ export default experimental_defineHostEntry({
         minimumSupportedVersion: MIN_OPENCODE_VERSION,
         loginCommand: OPENCODE_LOGIN_COMMAND,
       };
-    },
-    async setModelSettings(input, context) {
-      openCodeServer.setDataDir(context.experimental_paths.dataDir);
-      await openCodeServer.writeModelSettings(input);
-      // Best-effort: a config we cannot edit only leaves BB tools visible
-      // to OpenCode's own sessions, where calling them is refused anyway.
-      await ensureBbToolsRule()
-        .then((result) => {
-          if (result === "added") openCodeServer.reloadConfigWhenIdle();
-        })
-        .catch((error) =>
-          process.stderr.write(
-            `[opencode2] Could not update OpenCode's global config: ${errorMessage(error)}\n`,
-          ),
-        );
-      for (const session of sessions.values()) {
-        session.disableSubagents = input.disableSubagents !== false;
-        session.enabledModels =
-          input.enabledModels === null ? null : new Set(input.enabledModels);
-      }
-      return { ok: true as const };
     },
     "usage/list": () => listProviderUsage(() => openCodeServer.api()),
     "usage/get": (input) =>

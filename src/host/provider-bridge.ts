@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import type { ModelSettings } from "../settings-contract.ts";
 import {
   BRIDGE_JSON_RPC_ERRORS,
   commandListParamsSchema,
@@ -39,9 +38,9 @@ import {
   runDynamicToolsMcpStdioChild,
 } from "./dynamic-tools-mcp.ts";
 import {
-  assertModelEnabled,
   agentSessionOption,
   mapModel,
+  modelCatalogEntry,
   modelRefFromOptions,
   sameModelRef,
 } from "./models.ts";
@@ -170,10 +169,9 @@ async function prepareTurnInput(
 async function configureSession(
   params: RecordValue,
   providerThreadId: string,
-  modelSettings: ModelSettings,
   forceModel: boolean,
 ): Promise<SessionState> {
-  const session = sessionFromParams(params, providerThreadId, modelSettings);
+  const session = sessionFromParams(params, providerThreadId);
   try {
     session.nativeSkillNames = await openCodeServer.nativeSkillNames(
       params.cwd,
@@ -258,40 +256,29 @@ async function handle(request: RecordValue) {
     }
     case "model/list": {
       const cwd = params.cwd ?? process.cwd();
-      const settings = await openCodeServer.readModelSettings();
-      if (settings.enabledModels?.length === 0) {
-        sendResult(request.id, { models: [], selectedOnlyModels: [] });
-        return;
-      }
       const catalog = await openCodeServer.modelCatalog(cwd, true);
       const models = catalog.models
-        .filter(
-          (model) =>
-            settings.enabledModels === null ||
-            settings.enabledModels.includes(`${model.providerID}/${model.id}`),
-        )
-        .sort((left, right) =>
-          `${left.providerID}/${left.id}`.localeCompare(
-            `${right.providerID}/${right.id}`,
-          ),
-        );
+        .map((model) => {
+          const entry = modelCatalogEntry(model);
+          return { model, entry, id: entry.id };
+        })
+        .sort((left, right) => left.id.localeCompare(right.id));
       // Mark OpenCode's own default; fall back to the first listed model when
-      // the default is unknown or blocked by the allowlist.
-      const defaultId = models.some(
-        (model) => `${model.providerID}/${model.id}` === catalog.defaultId,
-      )
+      // the default is unknown.
+      const defaultId = models.some(({ id }) => id === catalog.defaultId)
         ? catalog.defaultId
-        : models[0] && `${models[0].providerID}/${models[0].id}`;
+        : models[0]?.id;
       // Agents come from this workspace, so project-level agents show up.
       const agentOption = agentSessionOption(
         await openCodeServer.primaryAgents(cwd).catch(() => []),
       );
       sendResult(request.id, {
-        models: models.map((model) =>
+        models: models.map(({ model, entry, id }) =>
           mapModel(
             model,
-            `${model.providerID}/${model.id}` === defaultId,
+            id === defaultId,
             agentOption ? [agentOption] : [],
+            entry,
           ),
         ),
         selectedOnlyModels: [],
@@ -300,16 +287,7 @@ async function handle(request: RecordValue) {
     }
     case "thread/start": {
       openCodeServer.clearThreadBroken(String(params.threadId));
-      const modelSettings = await openCodeServer.readModelSettings(
-        params.options?.providerOptions,
-      );
       const selected = modelRefFromOptions(params.options);
-      assertModelEnabled(
-        selected,
-        modelSettings.enabledModels === null
-          ? null
-          : new Set(modelSettings.enabledModels),
-      );
       const api = await openCodeServer.api();
       const result = await api.session.create({
         location: { directory: String(params.cwd) },
@@ -317,7 +295,7 @@ async function handle(request: RecordValue) {
       });
       const providerThreadId = providerSessionId(result);
       try {
-        await configureSession(params, providerThreadId, modelSettings, false);
+        await configureSession(params, providerThreadId, false);
       } catch (error) {
         await api.session
           .remove({ sessionID: providerThreadId })
@@ -338,15 +316,7 @@ async function handle(request: RecordValue) {
     case "thread/resume": {
       openCodeServer.clearThreadBroken(String(params.threadId));
       await openCodeServer.start();
-      const modelSettings = await openCodeServer.readModelSettings(
-        params.options?.providerOptions,
-      );
-      await configureSession(
-        params,
-        params.providerThreadId,
-        modelSettings,
-        true,
-      );
+      await configureSession(params, params.providerThreadId, true);
       notify("thread/identity", {
         threadId: params.threadId,
         providerThreadId: params.providerThreadId,
@@ -408,13 +378,9 @@ async function handle(request: RecordValue) {
           params.sourceProviderThreadId,
           checkpointId,
         );
-        const modelSettings = await openCodeServer.readModelSettings(
-          params.options?.providerOptions,
-        );
         const rewound = sessionFromParams(
           params,
           params.sourceProviderThreadId,
-          modelSettings,
         );
         rewound.usage =
           existing?.usage ?? statelessRewindUsage ?? rewound.usage;
@@ -459,11 +425,8 @@ async function handle(request: RecordValue) {
         ...boundary,
       });
       const providerThreadId = providerSessionId(result);
-      const modelSettings = await openCodeServer.readModelSettings(
-        params.options?.providerOptions,
-      );
       try {
-        await configureSession(params, providerThreadId, modelSettings, true);
+        await configureSession(params, providerThreadId, true);
       } catch (error) {
         await api.session
           .remove({ sessionID: providerThreadId })

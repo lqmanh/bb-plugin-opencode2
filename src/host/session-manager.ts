@@ -3,7 +3,6 @@ import {
   AGENT_OPTION_ID,
   DEFAULT_AGENT,
   SESSION_OPTIONS_STATE_KIND,
-  type ModelSettings,
 } from "../settings-contract.ts";
 import { dynamicToolCallRouter, emit } from "./bridge-runtime.ts";
 import {
@@ -12,7 +11,6 @@ import {
 } from "./dynamic-tools-mcp.ts";
 import {
   agentSessionOption,
-  assertModelEnabled,
   modelId,
   modelRefFromOptions,
   resolveModelVariant,
@@ -49,10 +47,20 @@ import {
 
 type RecordValue = OpenCodeRecord;
 
+function subagentsDisabled(
+  options: RecordValue,
+  disallowedTools: ReadonlySet<string>,
+): boolean {
+  return (
+    inputRecord(options.providerOptions).disableSubagents === true ||
+    disallowedTools.has("task") ||
+    disallowedTools.has("subagent")
+  );
+}
+
 export function sessionFromParams(
   params: RecordValue,
   providerThreadId: string,
-  modelSettings: ModelSettings,
 ): SessionState {
   const disallowedTools = new Set(
     Array.isArray(params.disallowedTools)
@@ -77,12 +85,7 @@ export function sessionFromParams(
       if (typeof value === "string") bridgeEnvVars[key] = value;
     }
   }
-  const enabledModels =
-    modelSettings.enabledModels === null
-      ? null
-      : new Set(modelSettings.enabledModels);
   const model = modelRefFromOptions(options);
-  assertModelEnabled(model, enabledModels);
 
   return {
     bbThreadId: String(params.threadId),
@@ -91,13 +94,9 @@ export function sessionFromParams(
     permissionMode: parsePermissionMode(options.permissionMode),
     // Preserve the existing policy backstop when a caller explicitly blocks
     // OpenCode's native subagent tools as well as when the plugin setting does.
-    disableSubagents:
-      modelSettings.disableSubagents !== false ||
-      disallowedTools.has("task") ||
-      disallowedTools.has("subagent"),
+    disableSubagents: subagentsDisabled(options, disallowedTools),
     dynamicTools: enabledDynamicTools(params.dynamicTools, disallowedTools),
     disallowedTools,
-    enabledModels,
     instructions: stringValue(options.instructions) ?? "",
     bridgeEnvVars,
     dynamicToolScope: {},
@@ -341,7 +340,6 @@ export async function ensureSessionModel(
   force = false,
 ) {
   if (!desired) return;
-  assertModelEnabled(desired, session.enabledModels);
   const entry = await openCodeServer.lookupModel(session.cwd, modelId(desired));
   if (entry) session.contextWindow = entry.contextWindow;
   // BB levels the model lacks are not sent; compare what OpenCode receives.
@@ -510,13 +508,7 @@ export async function prepareTurn(
   turn: { newTurn?: boolean } = {},
 ) {
   const opts = inputRecord(options);
-  const settings = await openCodeServer.readModelSettings(opts.providerOptions);
-  session.disableSubagents =
-    settings.disableSubagents !== false ||
-    session.disallowedTools.has("task") ||
-    session.disallowedTools.has("subagent");
-  session.enabledModels =
-    settings.enabledModels === null ? null : new Set(settings.enabledModels);
+  session.disableSubagents = subagentsDisabled(opts, session.disallowedTools);
   if (!session.nativeSkillNames)
     session.nativeSkillNames = await openCodeServer.nativeSkillNames(
       session.cwd,

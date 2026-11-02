@@ -264,7 +264,6 @@ function sessionFixture(
     disableSubagents: true,
     dynamicTools: [],
     disallowedTools: new Set(),
-    enabledModels: null,
     instructions: "",
     bridgeEnvVars: {},
     dynamicToolScope: {},

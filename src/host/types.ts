@@ -105,7 +105,6 @@ export type SessionState = {
   nativeSkillNames?: Set<string>;
   dynamicTools: DynamicTool[];
   disallowedTools: Set<string>;
-  enabledModels: ReadonlySet<string> | null;
   instructions: string;
   bridgeEnvVars: Record<string, string>;
   dynamicToolScope: object;

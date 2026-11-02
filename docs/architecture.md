@@ -23,13 +23,12 @@ directory first.
 
 ```text
 src/
-  server.ts            BB server entry: provider metadata, settings storage, sync to hosts
+  server.ts            BB server entry: provider metadata, settings, and RPCs
   host.ts              Host entry: host RPC, provider bridge, and public test helpers
   app.tsx              Frontend entry: registers the settings slot
   app/                 Settings page
   components/, lib/    UI primitives used by the settings page
   settings-contract.ts Settings and RPC shapes shared by server, host, and app
-  model-settings.ts    Model selection and provider setting normalization
   host/                Host implementation, described below
 tests/                 Node tests, plus a jsdom test for the settings UI
 skills/                Agent skill shipped with the plugin
