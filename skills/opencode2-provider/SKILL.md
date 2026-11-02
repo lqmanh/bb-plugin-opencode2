@@ -40,7 +40,11 @@ BB archive and unarchive are mirrored to the OpenCode session; if OpenCode
 archives, deletes, or moves the session externally, the next turn explains the
 problem and asks you to start a new thread or unarchive it.
 
-Settings apply from the next turn. If a turn appears stuck, the bridge
-reconciles with OpenCode every 30 seconds and after event-stream reconnects.
-Stale `bb_opencode2_*` MCP servers are removed by discarding the thread; logs
-are in `~/.bb/plugins/opencode2/logs/plugin.log`.
+Settings apply from the next turn. Provider usage comes from
+[opencode-usage](https://github.com/lqmanh/opencode-usage) OpenCode plugin when
+it is installed; this plugin has no usage settings of its own.
+
+If a turn appears stuck, the bridge reconciles with OpenCode every 30 seconds
+and after event-stream reconnects. Stale `bb_opencode2_*` MCP servers are
+removed by discarding the thread; logs are in
+`~/.bb/plugins/opencode2/logs/plugin.log`.

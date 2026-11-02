@@ -2,13 +2,23 @@
 //
 // The host bridge talks to OpenCode's local v2 HTTP API. This file only owns
 // provider metadata and keeps process/API details out of the BB server runtime.
-import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import {
+  type BbPluginApi,
+  experimental_PluginRpcRefusal,
+} from "@get-bb/plugin-sdk";
+import {
+  OPENCODE_PROVIDER_ID,
   opencodeHostContract,
   opencodeSettingsRpcContract,
   type HostStatus,
   type ModelSummary,
 } from "./settings-contract.ts";
+import {
+  parseUsageResourceId,
+  providerUsageRpcContract,
+  usageResourceFromSnapshot,
+  usageResources,
+} from "./provider-usage.ts";
 import {
   DEFAULT_PROVIDER_SETTINGS,
   normalizeModelSelection,
@@ -16,7 +26,6 @@ import {
 } from "./model-settings.ts";
 import { errorMessage } from "./host/types.ts";
 
-const PROVIDER_ID = "opencode2";
 const SETTINGS_KEY = "model-settings";
 
 export default async function plugin(bb: BbPluginApi) {
@@ -44,6 +53,17 @@ export default async function plugin(bb: BbPluginApi) {
     return (await bb.sdk.hosts.list({ signal }))
       .filter((item) => item.status === "connected")
       .map((item) => item.id);
+  }
+
+  async function callHosts<T>(
+    hostIds: readonly string[],
+    call: (hostId: string) => Promise<T>,
+  ) {
+    const results = await Promise.allSettled(hostIds.map(call));
+    return hostIds.map((hostId, index) => ({
+      hostId,
+      result: results[index],
+    }));
   }
 
   async function syncSettings(hostIds?: string[], signal?: AbortSignal) {
@@ -95,11 +115,11 @@ export default async function plugin(bb: BbPluginApi) {
   async function listModels() {
     const hostIds = await connectedHostIds();
     await syncSettings(hostIds);
-    const results = await Promise.allSettled(
-      hostIds.map((hostId) => host.call("listModels", {}, { hostId })),
+    const results = await callHosts(hostIds, (hostId) =>
+      host.call("listModels", {}, { hostId }),
     );
     const models = new Map<string, ModelSummary>();
-    for (const result of results) {
+    for (const { result } of results) {
       if (result.status !== "fulfilled") continue;
       for (const model of result.value.models) models.set(model.id, model);
     }
@@ -145,6 +165,58 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  bb.rpc.register(
+    providerUsageRpcContract,
+    {
+      async "provider-usage.v1.listResources"(_input, context) {
+        const hostIds = await connectedHostIds(context.experimental_signal);
+        const results = await callHosts(hostIds, (hostId) =>
+          host.call(
+            "usage/list",
+            {},
+            { hostId, signal: context.experimental_signal },
+          ),
+        );
+        const resources = usageResources(
+          results.map(({ hostId, result }) => ({
+            hostId,
+            usage: result.status === "fulfilled" ? result.value : undefined,
+          })),
+        );
+        return resources.length > 0
+          ? { label: "OpenCode v2", resources }
+          : { resources: [] };
+      },
+      async "provider-usage.v1.getResource"({ resourceId, refresh }, context) {
+        const target = parseUsageResourceId(resourceId);
+        if (!target) {
+          throw new experimental_PluginRpcRefusal({
+            code: "not_found",
+            message: "OpenCode usage resource no longer exists.",
+          });
+        }
+        try {
+          const snapshot = await host.call(
+            "usage/get",
+            { providerID: target.providerID, bypassCache: refresh },
+            { hostId: target.hostId, signal: context.experimental_signal },
+          );
+          return usageResourceFromSnapshot(snapshot);
+        } catch (error) {
+          throw new experimental_PluginRpcRefusal({
+            code: "not_found",
+            message: errorMessage(error),
+          });
+        }
+      },
+    },
+    {
+      experimental_discoverable: true,
+      experimental_description:
+        "OpenCode v2 provider usage, sourced from the opencode-usage OpenCode plugin.",
+    },
+  );
+
   providerSettings.onChange((next) => {
     settingValues = next;
     void syncSettings().catch((error) =>
@@ -175,7 +247,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.providers.register({
-    id: PROVIDER_ID,
+    id: OPENCODE_PROVIDER_ID,
     displayName: "OpenCode v2",
     icon: "./icons/opencode.svg",
     strings: {
@@ -189,7 +261,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     // Only show the provider when `opencode2` is installed on the target machine.
     experimental_visibility: "installed",
-    maintenance: { health: true, usage: false, installation: true },
+    maintenance: { health: true, usage: true, installation: true },
     models: { scope: "workspace" },
     capabilities: {
       supportsServiceTier: false,

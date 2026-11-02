@@ -14,6 +14,7 @@ import {
 } from "./host/maintenance.ts";
 import { ensureBbToolsRule } from "./host/opencode-config.ts";
 import { openCodeServer } from "./host/opencode-server.ts";
+import { getProviderUsage, listProviderUsage } from "./host/opencode-usage.ts";
 import { MIN_OPENCODE_VERSION } from "./host/opencode-version.ts";
 import { shutdownBridge } from "./host/provider-bridge.ts";
 import { nativeSkillRoots } from "./host/opencode-requests.ts";
@@ -187,6 +188,11 @@ export default experimental_defineHostEntry({
       }
       return { ok: true as const };
     },
+    "usage/list": () => listProviderUsage(() => openCodeServer.api()),
+    "usage/get": (input) =>
+      getProviderUsage(() => openCodeServer.api(), input.providerID, {
+        bypassCache: input.bypassCache ?? false,
+      }),
   },
   dispose: async () => {
     await shutdownBridge("OpenCode host worker disposed");

@@ -10,6 +10,8 @@ export const SESSION_OPTION_SELECTIONS_STATE_KIND =
   "bb/session-option-selections";
 /** OpenCode's default primary agent. */
 export const DEFAULT_AGENT = "build";
+/** This plugin's BB provider ID. */
+export const OPENCODE_PROVIDER_ID = "opencode2";
 
 export const modelSummarySchema = z
   .object({
@@ -67,6 +69,64 @@ export const modelSelectionSchema = z
   })
   .strict();
 
+export const usageWindowSchema = z
+  .object({
+    id: z.string().min(1),
+    label: z.string().min(1),
+    percent: z.number(),
+    resetsAt: z.string(),
+  })
+  .strict();
+
+export const usageErrorSchema = z
+  .object({
+    code: z.enum(["expired", "unavailable", "failed"]),
+    message: z.string().min(1),
+  })
+  .strict();
+
+export type UsageErrorCode = z.infer<typeof usageErrorSchema>["code"];
+
+export function usageStatusFromErrorCode(
+  code: UsageErrorCode,
+): "expired" | "unauthenticated" | "error" {
+  switch (code) {
+    case "expired":
+      return "expired";
+    case "unavailable":
+      return "unauthenticated";
+    case "failed":
+      return "error";
+  }
+}
+
+export const usageSnapshotSchema = z
+  .object({
+    providerID: z.string().min(1),
+    providerName: z.string().min(1),
+    accountLabel: z.string().optional(),
+    accountKey: z.string().min(1).nullable(),
+    fetchedAt: z.number().nonnegative(),
+    windows: z.array(usageWindowSchema),
+    error: usageErrorSchema.optional(),
+  })
+  .strict();
+
+export const usageProviderSchema = usageSnapshotSchema.pick({
+  providerID: true,
+  providerName: true,
+  accountLabel: true,
+  accountKey: true,
+});
+
+export const usageListSchema = z
+  .object({
+    available: z.boolean(),
+    providers: z.array(usageProviderSchema).max(10_000),
+    error: z.string().optional(),
+  })
+  .strict();
+
 export const opencodeHostContract = defineRpcContract({
   listModels: {
     input: z.object({ cwd: z.string().min(1).optional() }).strict(),
@@ -81,6 +141,19 @@ export const opencodeHostContract = defineRpcContract({
   getStatus: {
     input: z.object({}).strict(),
     output: openCodeStatusSchema,
+  },
+  "usage/list": {
+    input: z.object({}).strict(),
+    output: usageListSchema,
+  },
+  "usage/get": {
+    input: z
+      .object({
+        providerID: z.string().min(1),
+        bypassCache: z.boolean().optional(),
+      })
+      .strict(),
+    output: usageSnapshotSchema,
   },
 });
 
@@ -110,3 +183,5 @@ export type ModelSelection = z.infer<typeof modelSelectionSchema>;
 export type ModelSummary = z.infer<typeof modelSummarySchema>;
 export type OpenCodeStatus = z.infer<typeof openCodeStatusSchema>;
 export type HostStatus = z.infer<typeof hostStatusSchema>;
+export type UsageList = z.infer<typeof usageListSchema>;
+export type UsageSnapshot = z.infer<typeof usageSnapshotSchema>;

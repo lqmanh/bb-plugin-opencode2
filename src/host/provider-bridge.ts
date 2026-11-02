@@ -52,6 +52,7 @@ import {
   providerHealth,
 } from "./maintenance.ts";
 import { openCodeServer } from "./opencode-server.ts";
+import { providerUsageAggregate } from "./opencode-usage.ts";
 import {
   hasCommandMention,
   promptBody,
@@ -96,6 +97,7 @@ const PARAM_SCHEMAS = {
   "model/list": modelListParamsSchema,
   "commands/list": commandListParamsSchema,
   "provider/health": providerMaintenanceParamsSchema,
+  "provider/usage": providerMaintenanceParamsSchema,
   "provider/installation/status": providerInstallationStatusParamsSchema,
   "provider/installation/run": providerInstallationRunParamsSchema,
   "thread/start": threadStartParamsSchema,
@@ -227,6 +229,16 @@ async function handle(request: RecordValue) {
         supported: true,
         health: await providerHealth(params.cwd ?? process.cwd()),
       });
+      return;
+    }
+    case "provider/usage": {
+      sendResult(
+        request.id,
+        await providerUsageAggregate(
+          () => openCodeServer.api(),
+          params.cwd ?? process.cwd(),
+        ),
+      );
       return;
     }
     case "provider/installation/status":
