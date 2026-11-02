@@ -14,7 +14,11 @@ import {
 } from "./host/maintenance.ts";
 import { ensureBbToolsRule } from "./host/opencode-config.ts";
 import { openCodeServer } from "./host/opencode-server.ts";
-import { getProviderUsage, listProviderUsage } from "./host/opencode-usage.ts";
+import {
+  getProviderUsage,
+  listProviderUsage,
+  usageSourceStatus,
+} from "./host/opencode-usage.ts";
 import { MIN_OPENCODE_VERSION } from "./host/opencode-version.ts";
 import { shutdownBridge } from "./host/provider-bridge.ts";
 import { nativeSkillRoots } from "./host/opencode-requests.ts";
@@ -153,10 +157,6 @@ export default experimental_defineHostEntry({
         providerHealth(cwd),
         installationStatus(true),
       ]);
-      const modelCount = await openCodeServer
-        .modelCatalog(cwd)
-        .then((catalog) => catalog.models.length)
-        .catch(() => 0);
       return {
         status: health.status === "expired" ? "unauthenticated" : health.status,
         statusMessage: health.statusMessage,
@@ -164,7 +164,6 @@ export default experimental_defineHostEntry({
         latestVersion: installation.latestVersion,
         minimumSupportedVersion: MIN_OPENCODE_VERSION,
         loginCommand: OPENCODE_LOGIN_COMMAND,
-        modelCount: health.status === "ready" ? modelCount : 0,
       };
     },
     async setModelSettings(input, context) {
@@ -193,6 +192,7 @@ export default experimental_defineHostEntry({
       getProviderUsage(() => openCodeServer.api(), input.providerID, {
         bypassCache: input.bypassCache ?? false,
       }),
+    "usage/status": () => usageSourceStatus(() => openCodeServer.api()),
   },
   dispose: async () => {
     await shutdownBridge("OpenCode host worker disposed");

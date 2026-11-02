@@ -10,6 +10,7 @@ import {
   OPENCODE_PROVIDER_ID,
   opencodeHostContract,
   opencodeSettingsRpcContract,
+  unavailableUsageStatus,
   type HostStatus,
   type ModelSummary,
 } from "./settings-contract.ts";
@@ -55,7 +56,7 @@ export default async function plugin(bb: BbPluginApi) {
       .map((item) => item.id);
   }
 
-  async function callHosts<T>(
+  async function settleHostCalls<T>(
     hostIds: readonly string[],
     call: (hostId: string) => Promise<T>,
   ) {
@@ -115,7 +116,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function listModels() {
     const hostIds = await connectedHostIds();
     await syncSettings(hostIds);
-    const results = await callHosts(hostIds, (hostId) =>
+    const results = await settleHostCalls(hostIds, (hostId) =>
       host.call("listModels", {}, { hostId }),
     );
     const models = new Map<string, ModelSummary>();
@@ -134,19 +135,21 @@ export default async function plugin(bb: BbPluginApi) {
     );
     const results = await Promise.all(
       hosts.map(async (item): Promise<HostStatus> => {
-        try {
-          return {
-            hostId: item.id,
-            hostName: item.name,
-            status: await host.call("getStatus", {}, { hostId: item.id }),
-          };
-        } catch (error) {
-          return {
-            hostId: item.id,
-            hostName: item.name,
-            error: errorMessage(error),
-          };
-        }
+        const [opencodeStatus, usageStatus] = await Promise.allSettled([
+          host.call("getStatus", {}, { hostId: item.id }),
+          host.call("usage/status", {}, { hostId: item.id }),
+        ]);
+        return {
+          hostId: item.id,
+          hostName: item.name,
+          ...(opencodeStatus.status === "fulfilled"
+            ? { status: opencodeStatus.value }
+            : { error: errorMessage(opencodeStatus.reason) }),
+          usage:
+            usageStatus.status === "fulfilled"
+              ? usageStatus.value
+              : unavailableUsageStatus(errorMessage(usageStatus.reason)),
+        };
       }),
     );
     return { hosts: results };
@@ -170,7 +173,7 @@ export default async function plugin(bb: BbPluginApi) {
     {
       async "provider-usage.v1.listResources"(_input, context) {
         const hostIds = await connectedHostIds(context.experimental_signal);
-        const results = await callHosts(hostIds, (hostId) =>
+        const results = await settleHostCalls(hostIds, (hostId) =>
           host.call(
             "usage/list",
             {},

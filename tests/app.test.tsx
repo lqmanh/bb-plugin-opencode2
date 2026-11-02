@@ -14,7 +14,7 @@ describe("OpenCode settings", () => {
   it("loads models and persists model selection changes", async () => {
     const app = await loadPluginApp(() => import("../src/app.tsx"));
     const registration = app.settingsSections[0];
-    expect(registration?.id).toBe("models");
+    expect(registration?.id).toBe("settings");
 
     const saveModelSelection = vi.fn(async (settings) => settings);
     const slot = renderSlot<{}, typeof opencodeSettingsRpcContract>(
@@ -45,7 +45,12 @@ describe("OpenCode settings", () => {
                   latestVersion: "2.2.6",
                   minimumSupportedVersion: "2.2.5",
                   loginCommand: "opencode2 auth login",
-                  modelCount: 1,
+                },
+                usage: {
+                  status: "active" as const,
+                  sourceType: "local" as const,
+                  source: "/tmp/opencode-usage",
+                  providerCount: 2,
                 },
               },
             ],
@@ -55,8 +60,12 @@ describe("OpenCode settings", () => {
     );
     mountedSlots.push(slot);
 
-    expect(await slot.findByText(/Ready · OpenCode 2\.2\.5/)).toBeTruthy();
-    expect(slot.getByText(/OpenCode 2\.2\.6 is available/)).toBeTruthy();
+    expect(
+      await slot.findByText(/OpenCode 2\.2\.5 · 2\.2\.6 available/),
+    ).toBeTruthy();
+    expect(slot.getByText("Ready")).toBeTruthy();
+    expect(slot.getByText(/opencode-usage · local · 2 providers/)).toBeTruthy();
+    expect(slot.getByText("Active")).toBeTruthy();
 
     // Provider groups start collapsed; expanding shows the models.
     const group = await slot.findByRole("button", { name: /openai/ });

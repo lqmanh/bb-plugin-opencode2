@@ -4,10 +4,10 @@ import { SettingsSection } from "./app/settings-section.tsx";
 
 export default definePluginApp((app) => {
   app.slots.settingsSection({
-    id: "models",
+    id: "settings",
     title: "OpenCode v2",
     description:
-      "Check OpenCode on your hosts and choose how BB runs it and which models it offers.",
+      "Check OpenCode on each host and choose which models BB can use.",
     component: SettingsSection,
   });
 });

@@ -11,6 +11,7 @@ import {
   getProviderUsage,
   listProviderUsage,
   providerUsageAggregate,
+  usageSourceStatus,
 } from "../src/host/opencode-usage.ts";
 import {
   parseUsageResourceId,
@@ -44,12 +45,29 @@ const providers = [
   { providerID: "openai", providerName: "OpenAI", accountKey: null },
 ];
 
-function fakeApi(options: { output?: unknown; rpcError?: boolean }): {
+const usagePlugin = {
+  id: "opencode-usage",
+  source: { type: "package", target: "opencode-usage", version: "1.2.3" },
+};
+
+function fakeApi(options: {
+  plugins?: unknown[];
+  output?: unknown;
+  rpcError?: boolean;
+}): {
   api: () => Promise<OpenCodeClient>;
+  pluginCalls: unknown[];
   rpcCalls: RpcCall[];
 } {
+  const pluginCalls: unknown[] = [];
   const rpcCalls: RpcCall[] = [];
   const client = {
+    plugin: {
+      list: async (input: unknown) => {
+        pluginCalls.push(input);
+        return { data: options.plugins ?? [] };
+      },
+    },
     rpc: {
       call: async (input: RpcCall) => {
         rpcCalls.push(input);
@@ -58,7 +76,7 @@ function fakeApi(options: { output?: unknown; rpcError?: boolean }): {
       },
     },
   } as unknown as OpenCodeClient;
-  return { api: async () => client, rpcCalls };
+  return { api: async () => client, pluginCalls, rpcCalls };
 }
 
 function snapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
@@ -110,6 +128,57 @@ test("lists providers without fetching quota and reports unusable plugins", asyn
   assert.equal(result.available, false);
   assert.deepEqual(result.providers, []);
   assert.match(result.error ?? "", /invalid response/);
+});
+
+test("reports the opencode-usage source status", async () => {
+  const active = fakeApi({ plugins: [usagePlugin], output: { providers } });
+  assert.deepEqual(await usageSourceStatus(active.api, "/repo"), {
+    status: "active",
+    sourceType: "package",
+    source: "opencode-usage",
+    version: "1.2.3",
+    providerCount: 2,
+  });
+  assert.deepEqual(active.pluginCalls, [{ location: { directory: "/repo" } }]);
+
+  const empty = fakeApi({ plugins: [usagePlugin], output: { providers: [] } });
+  assert.deepEqual(await usageSourceStatus(empty.api, "/repo"), {
+    status: "no_accounts",
+    sourceType: "package",
+    source: "opencode-usage",
+    version: "1.2.3",
+    providerCount: 0,
+  });
+
+  const local = fakeApi({
+    plugins: [
+      {
+        ...usagePlugin,
+        source: { type: "local", path: "/tmp/opencode-usage" },
+      },
+    ],
+    output: { providers },
+  });
+  assert.deepEqual(await usageSourceStatus(local.api, "/repo"), {
+    status: "active",
+    sourceType: "local",
+    source: "/tmp/opencode-usage",
+    providerCount: 2,
+  });
+
+  const missing = fakeApi({ rpcError: true });
+  assert.deepEqual(await usageSourceStatus(missing.api, "/repo"), {
+    status: "not_installed",
+    providerCount: 0,
+  });
+
+  const unavailable = fakeApi({ plugins: [usagePlugin], rpcError: true });
+  const failed = await usageSourceStatus(unavailable.api, "/repo");
+  assert.equal(failed.status, "unavailable");
+  assert.equal(failed.sourceType, "package");
+  assert.equal(failed.version, "1.2.3");
+  assert.equal(failed.providerCount, 0);
+  assert.match(failed.error ?? "", /rpc unavailable/);
 });
 
 test("gets one snapshot, propagates bypassCache, and rejects unusable responses", async () => {
@@ -363,14 +432,36 @@ async function loadProvider(
   return { harness: fake.harness, hostCalls };
 }
 
-test("serves source usage resources through the registered RPC", async () => {
+test("serves usage through the registered RPCs", async () => {
+  const status = {
+    status: "ready" as const,
+    statusMessage: null,
+    installedVersion: "2.2.5",
+    latestVersion: "2.2.5",
+    minimumSupportedVersion: "2.2.5",
+    loginCommand: "opencode2 auth login",
+  };
+  const usage = {
+    status: "active" as const,
+    sourceType: "package" as const,
+    source: "opencode-usage",
+    version: "0.4.0",
+    providerCount: 2,
+  };
   const { harness, hostCalls } = await loadProvider((call) => {
     if (call.hostId === "host_missing") throw new Error("host is gone");
-    if (call.method === "usage/list") {
-      return { available: true, providers };
+    switch (call.method) {
+      case "usage/list":
+        return { available: true, providers };
+      case "usage/get":
+        return snapshot();
+      case "getStatus":
+        return status;
+      case "usage/status":
+        return usage;
+      default:
+        assert.fail(`Unexpected method ${call.method}`);
     }
-    assert.equal(call.method, "usage/get");
-    return snapshot();
   });
 
   assert.equal(
@@ -435,6 +526,17 @@ test("serves source usage resources through the registered RPC", async () => {
       return true;
     },
   );
+
+  assert.deepEqual(await harness.callRpc("getStatus", {}), {
+    hosts: [
+      {
+        hostId: "host_1",
+        hostName: "Host One",
+        status,
+        usage,
+      },
+    ],
+  });
 
   const unavailable = await loadProvider(() => ({
     available: false,

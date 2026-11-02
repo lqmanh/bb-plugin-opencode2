@@ -36,9 +36,28 @@ export const openCodeStatusSchema = z
     latestVersion: z.string().nullable(),
     minimumSupportedVersion: z.string(),
     loginCommand: z.string(),
-    modelCount: z.number().int().nonnegative(),
   })
   .strict();
+
+export const usageSourceStatusSchema = z
+  .object({
+    status: z.enum(["active", "no_accounts", "unavailable", "not_installed"]),
+    sourceType: z.enum(["package", "local", "builtin", "sdk"]).optional(),
+    source: z.string().min(1).optional(),
+    version: z.string().min(1).optional(),
+    providerCount: z.number().int().nonnegative(),
+    error: z.string().optional(),
+  })
+  .strict();
+
+export type UsageSourceStatus = z.infer<typeof usageSourceStatusSchema>;
+
+export function unavailableUsageStatus(
+  error: string,
+  metadata: Pick<UsageSourceStatus, "sourceType" | "source" | "version"> = {},
+): UsageSourceStatus {
+  return { status: "unavailable", ...metadata, providerCount: 0, error };
+}
 
 export const hostStatusSchema = z
   .object({
@@ -46,6 +65,7 @@ export const hostStatusSchema = z
     hostName: z.string(),
     status: openCodeStatusSchema.optional(),
     error: z.string().optional(),
+    usage: usageSourceStatusSchema,
   })
   .strict();
 
@@ -154,6 +174,10 @@ export const opencodeHostContract = defineRpcContract({
       })
       .strict(),
     output: usageSnapshotSchema,
+  },
+  "usage/status": {
+    input: z.object({}).strict(),
+    output: usageSourceStatusSchema,
   },
 });
 

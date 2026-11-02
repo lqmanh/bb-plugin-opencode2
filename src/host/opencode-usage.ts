@@ -1,11 +1,14 @@
+import type { OpenCodeClient } from "@opencode/client";
 import type { ProviderUsageResult } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
 import {
+  unavailableUsageStatus,
   usageProviderSchema,
   usageSnapshotSchema,
   usageStatusFromErrorCode,
   type UsageList,
   type UsageSnapshot,
+  type UsageSourceStatus,
 } from "../settings-contract.ts";
 import { errorMessage, type OpenCodeApi } from "./types.ts";
 
@@ -22,6 +25,54 @@ const usageRpcGetSchema = z
     providers: z.array(usageSnapshotSchema).max(10_000),
   })
   .strict();
+
+type PluginInfo = Awaited<
+  ReturnType<OpenCodeClient["plugin"]["list"]>
+>["data"][number];
+
+type UsagePluginMetadata = {
+  sourceType: "package" | "local" | "builtin" | "sdk";
+  source?: string;
+  version?: string;
+};
+
+type UsagePluginLookup =
+  | { status: "found"; metadata: UsagePluginMetadata }
+  | { status: "missing" }
+  | { status: "failed" };
+
+function pluginMetadata(plugin: PluginInfo): UsagePluginMetadata {
+  switch (plugin.source.type) {
+    case "package":
+      return {
+        sourceType: "package",
+        source: plugin.source.target,
+        ...(plugin.source.version ? { version: plugin.source.version } : {}),
+      };
+    case "local":
+      return { sourceType: "local", source: plugin.source.path };
+    case "builtin":
+      return { sourceType: "builtin" };
+    case "sdk":
+      return { sourceType: "sdk" };
+  }
+}
+
+async function lookupUsagePlugin(
+  api: OpenCodeApi,
+  cwd: string,
+): Promise<UsagePluginLookup> {
+  try {
+    const client = await api();
+    const listed = await client.plugin.list({ location: { directory: cwd } });
+    const selected = listed.data.find((plugin) => plugin.id === USAGE_RPC_ID);
+    return selected
+      ? { status: "found", metadata: pluginMetadata(selected) }
+      : { status: "missing" };
+  } catch {
+    return { status: "failed" };
+  }
+}
 
 async function callUsageRpc(
   api: OpenCodeApi,
@@ -61,7 +112,7 @@ async function fetchUsageSnapshots(
   }
 }
 
-function unavailableUsage(error: string): UsageList {
+function unavailableUsageList(error: string): UsageList {
   return { available: false, providers: [], error };
 }
 
@@ -73,13 +124,42 @@ export async function listProviderUsage(
   try {
     output = await callUsageRpc(api, cwd, "list");
   } catch (error) {
-    return unavailableUsage(errorMessage(error));
+    return unavailableUsageList(errorMessage(error));
   }
   const parsed = usageRpcListSchema.safeParse(output);
   if (!parsed.success) {
-    return unavailableUsage("opencode-usage.list returned an invalid response");
+    return unavailableUsageList(
+      "opencode-usage.list returned an invalid response",
+    );
   }
   return { available: true, providers: parsed.data.providers };
+}
+
+export async function usageSourceStatus(
+  api: OpenCodeApi,
+  cwd = process.cwd(),
+): Promise<UsageSourceStatus> {
+  const [lookup, listed] = await Promise.all([
+    lookupUsagePlugin(api, cwd),
+    listProviderUsage(api, cwd),
+  ]);
+  const metadata = lookup.status === "found" ? lookup.metadata : {};
+
+  if (!listed.available) {
+    return lookup.status === "missing"
+      ? { status: "not_installed", providerCount: 0 }
+      : unavailableUsageStatus(
+          listed.error ?? "opencode-usage is unavailable",
+          metadata,
+        );
+  }
+
+  const providerCount = listed.providers.length;
+  return {
+    status: providerCount > 0 ? "active" : "no_accounts",
+    ...metadata,
+    providerCount,
+  };
 }
 
 export async function getProviderUsage(
