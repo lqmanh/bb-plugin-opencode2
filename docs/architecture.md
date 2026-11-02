@@ -59,8 +59,8 @@ Inside `src/host/`:
 
 ## Design decisions
 
-- **Native subagents are off by default** and enforced with a session `deny`
-  rule. When the user enables them, they render as BB delegation rows.
+- **Native subagents are enabled by default** and render as BB delegation rows.
+  The `subagentsDisabled` setting adds a session `deny` rule.
 - **Permission modes are session rulesets.** `auto` keeps OpenCode's agent rules
   and answers remaining asks with `once`; `full` adds `*` → allow;
   `accept-edits` allows reads, searches, edits, and selected non-mutating tools,

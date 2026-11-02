@@ -3,6 +3,13 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- The `allowSubagents` setting is now `subagentsDisabled` (inverted), matching
+  the built-in providers. Native subagents are now enabled by default.
+
 ## [1.4.0] - 2026-11-02
 
 ### Added

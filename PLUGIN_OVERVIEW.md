@@ -30,8 +30,8 @@ OpenCode has connected, and work in BB's usual interface.
 
 ## Good to know
 
-- Native OpenCode subagents are off by default. Turn them on in the plugin
-  settings to see nested delegation rows.
+- Native OpenCode subagents are enabled by default. Turn on **Disable provider
+  subagents** to delegate through BB instead.
 - The plugin keeps one deny rule in your global OpenCode config so BB threads'
   tools do not appear in OpenCode's own sessions. The rule stays after the
   plugin is disabled; it only matches this plugin's server names.

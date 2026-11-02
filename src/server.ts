@@ -31,12 +31,12 @@ const SETTINGS_KEY = "model-settings";
 
 export default async function plugin(bb: BbPluginApi) {
   const providerSettings = bb.settings.define({
-    allowSubagents: {
+    subagentsDisabled: {
       type: "boolean",
-      label: "Allow OpenCode subagents",
+      label: "Disable provider subagents",
       description:
-        "Let OpenCode delegate to its own subagents. When off, OpenCode hides its subagent tool and agents delegate through BB instead.",
-      default: DEFAULT_PROVIDER_SETTINGS.allowSubagents,
+        "Prevent OpenCode from starting native subagents so agents use BB for delegation.",
+      default: DEFAULT_PROVIDER_SETTINGS.subagentsDisabled,
     },
   });
 

@@ -51,7 +51,7 @@ the provider is enabled in BB's provider controls.
 | BB dynamic tools       | Exposed to OpenCode through a per-session local MCP server, rendered with the presentation BB supplies, and approved by BB rather than prompting twice.                                                                                                          |
 | OpenCode MCP Code Mode | Your MCP servers keep OpenCode's default Code Mode. Each `execute` call shows as a "Ran code" row titled with the MCP tools it calls; each of those calls is approved like any other tool.                                                                       |
 | BB CLI in shells       | OpenCode shells get BB's per-session environment and `bb` on `PATH`.                                                                                                                                                                                             |
-| Native subagents       | Off by default: OpenCode's `subagent` tool is denied and hidden, so agents delegate through BB. When allowed, each subagent is a BB delegation row with its work nested inside.                                                                                  |
+| Native subagents       | Enabled by default: each subagent is a BB delegation row with its work nested inside.                                                                                                                                                                            |
 | Skills                 | BB's `/` menu lists every skill OpenCode discovers for the workspace (`~/.agents/skills`, `~/.claude/skills`, project and config roots), and picking one activates it in OpenCode. BB's own skills that OpenCode does not know are attached as `SKILL.md` files. |
 | Timeline rows          | Reads, searches, directory listings, web search and fetch, commands with live output and exit codes, and edit/patch file changes built from OpenCode's own patches.                                                                                              |
 | Turn diff              | Each turn's file patches are reported as the turn diff.                                                                                                                                                                                                          |
@@ -81,8 +81,8 @@ Open the plugin settings page in BB (Settings → OpenCode v2).
   and `opencode-usage` source status. OpenCode problems include the command to
   run when something is missing; the usage-source row shows whether the plugin
   is active, missing, or unavailable, and how many providers it exposes.
-- **Allow OpenCode subagents** lets OpenCode use its native subagents (off by
-  default).
+- **Disable provider subagents** hides OpenCode's native subagent tool so agents
+  delegate through BB. Off by default.
 - **Models** controls the allowlist, grouped by OpenCode provider.
 
 Use BB's provider controls to hide or disable the provider. The plugin always

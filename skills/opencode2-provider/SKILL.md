@@ -9,8 +9,8 @@ description:
 
 Provider behavior is in the generated plugin settings:
 
-- `allowSubagents` (default `false`): when `false`, OpenCode's native `subagent`
-  tool is denied and hidden. Enable it to render OpenCode subagents as BB
+- `subagentsDisabled` (default `false`): when `true`, OpenCode's native
+  `subagent` tool is denied and hidden; when `false`, subagents render as BB
   delegation rows.
 
 Read with `bb plugin config opencode2`; change with

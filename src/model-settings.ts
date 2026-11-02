@@ -5,11 +5,11 @@ import {
 } from "./settings-contract.ts";
 
 export type ProviderSettingsValues = {
-  allowSubagents: boolean;
+  subagentsDisabled: boolean;
 };
 
 export const DEFAULT_PROVIDER_SETTINGS: ProviderSettingsValues = {
-  allowSubagents: false,
+  subagentsDisabled: false,
 };
 
 export const DEFAULT_MODEL_SETTINGS: ModelSettings = resolveModelSettings(
@@ -21,13 +21,13 @@ export function resolveModelSettings(
   values: Readonly<Record<string, unknown>>,
   enabledModels: string[] | null,
 ): ModelSettings {
-  const allowSubagents =
-    typeof values.allowSubagents === "boolean"
-      ? values.allowSubagents
-      : DEFAULT_PROVIDER_SETTINGS.allowSubagents;
+  const subagentsDisabled =
+    typeof values.subagentsDisabled === "boolean"
+      ? values.subagentsDisabled
+      : DEFAULT_PROVIDER_SETTINGS.subagentsDisabled;
   return {
     enabledModels,
-    disableSubagents: !allowSubagents,
+    disableSubagents: subagentsDisabled,
   };
 }
 
@@ -60,6 +60,6 @@ export function normalizeModelSettings(value: unknown): ModelSettings {
 
   return {
     enabledModels: enabledModels === null ? null : [...new Set(enabledModels)],
-    disableSubagents: candidate.disableSubagents !== false,
+    disableSubagents: candidate.disableSubagents === true,
   };
 }

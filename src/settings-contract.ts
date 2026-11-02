@@ -77,9 +77,8 @@ export const modelSettingsSchema = z
     // allowlist, including an empty array for "disable all".
     enabledModels: enabledModelsSchema,
     // Prevent OpenCode from starting native subagents (task tool) so agents
-    // use BB for delegation instead. Missing key defaults to true so older
-    // stored settings migrate to the safer default.
-    disableSubagents: z.boolean().default(true),
+    // use BB for delegation instead.
+    disableSubagents: z.boolean().default(false),
   })
   .strict();
 
