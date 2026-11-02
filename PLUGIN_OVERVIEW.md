@@ -16,6 +16,10 @@ OpenCode has connected, and work in BB's usual interface.
   agent changes made in OpenCode flow back. BB tools and OpenCode skills work
   inside the thread, and shells get the `bb` CLI on `PATH`. OpenCode's reported
   session cost appears in BB's context card.
+- **Provider usage.** When the
+  [opencode-usage](https://github.com/lqmanh/opencode-usage) OpenCode plugin is
+  installed, BB shows provider quota windows in its usage surfaces and reports
+  the source status on the plugin settings page.
 
 ## Requirements
 
@@ -34,5 +38,6 @@ OpenCode has connected, and work in BB's usual interface.
 - BB archive and unarchive are mirrored to the OpenCode session. If OpenCode
   archives, deletes, or moves the session externally, the next turn explains the
   problem instead of silently resuming it.
-- Thread goals, service tiers, and the full usage dashboard are not supported.
-  OpenCode reports session cost, but not rate-limit windows.
+- Thread goals and service tiers are not supported. Provider usage and
+  rate-limit windows come from that plugin when it is installed; OpenCode itself
+  reports session cost but not quota windows.

@@ -1,19 +1,19 @@
 {
   "name": "bb-plugin-opencode2",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "BB plugin that runs threads through an installed OpenCode v2 server.",
   "keywords": [
     "bb-plugin",
     "opencode",
     "provider"
   ],
-  "homepage": "https://github.com/iamEvanYT/bb-plugin-opencode2#readme",
+  "homepage": "https://github.com/lqmanh/bb-plugin-opencode2#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/iamEvanYT/bb-plugin-opencode2.git"
+    "url": "git+https://github.com/lqmanh/bb-plugin-opencode2.git"
   },
   "bugs": {
-    "url": "https://github.com/iamEvanYT/bb-plugin-opencode2/issues"
+    "url": "https://github.com/lqmanh/bb-plugin-opencode2/issues"
   },
   "author": {
     "name": "Evan",

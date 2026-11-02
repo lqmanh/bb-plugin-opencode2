@@ -18,7 +18,7 @@ between OpenCode's v2 API and events and BB's provider bridge protocol.
 From the BB plugin store, or from the command line:
 
 ```sh
-bb plugin install git:https://github.com/iamEvanYT/bb-plugin-opencode2.git
+bb plugin install git:https://github.com/lqmanh/bb-plugin-opencode2.git
 ```
 
 BB shows OpenCode v2 in the provider picker when `opencode2` is installed and
@@ -78,7 +78,9 @@ OpenCode v2 has no API for these, so the provider declares them unsupported.
 Open the plugin settings page in BB (Settings → OpenCode v2).
 
 - **Status** shows each connected host's OpenCode version, available updates,
-  and model count, with the command to run when something is missing.
+  and `opencode-usage` source status. OpenCode problems include the command to
+  run when something is missing; the usage-source row shows whether the plugin
+  is active, missing, or unavailable, and how many providers it exposes.
 - **Allow OpenCode subagents** lets OpenCode use its native subagents (off by
   default).
 - **Models** controls the allowlist, grouped by OpenCode provider.

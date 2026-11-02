@@ -42,7 +42,8 @@ problem and asks you to start a new thread or unarchive it.
 
 Settings apply from the next turn. Provider usage comes from
 [opencode-usage](https://github.com/lqmanh/opencode-usage) OpenCode plugin when
-it is installed; this plugin has no usage settings of its own.
+it is installed; the plugin settings page shows the per-host source status. This
+plugin has no usage settings of its own.
 
 If a turn appears stuck, the bridge reconciles with OpenCode every 30 seconds
 and after event-stream reconnects. Stale `bb_opencode2_*` MCP servers are
