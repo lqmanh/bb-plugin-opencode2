@@ -4,7 +4,7 @@ import {
   type HostStatus,
   type OpenCodeStatus,
   type UsageSourceStatus,
-} from "../settings-contract.ts";
+} from "../shared/settings-contract.ts";
 import {
   type ReactNode,
   useCallback,
@@ -12,8 +12,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Button } from "@/app/components/button";
+import { cn } from "@/app/lib/utils";
 
 function errorText(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);

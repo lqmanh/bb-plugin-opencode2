@@ -30,7 +30,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test --test-concurrency=1 tests/*.test.ts && vitest run tests/app.test.tsx",
+    "test": "npm run build && node --test --test-concurrency=1 \"tests/**/*.test.ts\" && vitest run tests/app/app.test.tsx",
     "check": "npm run format:check && npm run typecheck && npm test"
   },
   "bb": {
@@ -39,9 +39,9 @@
     "branding": {
       "icon": "./icons/opencode.svg"
     },
-    "server": "./src/server.ts",
-    "host": "./src/host.ts",
-    "app": "./src/app.tsx"
+    "server": "./src/server/index.ts",
+    "host": "./src/host/index.ts",
+    "app": "./src/app/index.tsx"
   },
   "dependencies": {
     "@opencode/client": "2.2.5",

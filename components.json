@@ -4,15 +4,15 @@
   "tsx": true,
   "tailwind": {
     "config": "",
-    "css": "src/app.css",
+    "css": "src/app/app.css",
     "baseColor": "neutral",
     "cssVariables": true
   },
   "aliases": {
-    "components": "@/components",
-    "ui": "@/components/ui",
-    "lib": "@/lib",
-    "utils": "@/lib/utils",
+    "components": "@/app/components",
+    "ui": "@/app/components",
+    "lib": "@/app/lib",
+    "utils": "@/app/lib/utils",
     "hooks": "@/hooks"
   },
   "registries": {

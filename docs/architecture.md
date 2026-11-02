@@ -23,13 +23,24 @@ directory first.
 
 ```text
 src/
-  server.ts            BB server entry: provider metadata, settings, and RPCs
-  host.ts              Host entry: host RPC, provider bridge, and public test helpers
-  app.tsx              Frontend entry: registers the settings slot
-  app/                 Settings page
-  components/, lib/    UI primitives used by the settings page
-  settings-contract.ts Settings and RPC shapes shared by server, host, and app
-  host/                Host implementation, described below
+  server/
+    index.ts           BB server entry: provider metadata, settings, and RPCs
+    provider-usage.ts  Provider usage RPCs
+  host/
+    index.ts           Host entry: host RPC, provider bridge, and public test helpers
+    types.ts           Shared host record and session types
+    bridge/            Provider bridge, dynamic tools, and runtime transport
+    opencode/          OpenCode service, config, requests, usage, and models
+    session/           Session setup, teardown, and persistence
+    timeline/          Event routing, timeline mapping, and tool mapping
+  app/
+    index.tsx          Frontend entry: registers the settings slot
+    settings-section.tsx
+    components/        UI primitives used by the settings page
+    lib/               UI helpers
+  shared/
+    settings-contract.ts Settings and RPC shapes shared by server, host, and app
+    errors.ts          Error message formatting shared across entries
 tests/                 Node tests, plus a jsdom test for the settings UI
 skills/                Agent skill shipped with the plugin
 docs/                  Developer documentation
@@ -37,24 +48,26 @@ docs/                  Developer documentation
 
 Inside `src/host/`:
 
-- `provider-bridge.ts` validates and dispatches provider protocol requests.
-- `opencode-server.ts` owns the service connection and version check, the
-  official `@opencode/client` instance, model catalog, persistence, event
+- `bridge/provider-bridge.ts` validates and dispatches provider protocol
+  requests.
+- `opencode/opencode-server.ts` owns the service connection and version check,
+  the official `@opencode/client` instance, model catalog, persistence, event
   stream, and turn reconciliation.
-- `opencode-event-router.ts` translates OpenCode events into BB deltas,
+- `timeline/opencode-event-router.ts` translates OpenCode events into BB deltas,
   including live shell output and subagent nesting.
-- `session-manager.ts` owns session setup, per-turn preparation (settings,
-  permissions, agent, model), MCP registration, and shutdown.
-- `maintenance.ts` implements health, install, and update.
-- `opencode-version.ts` defines the minimum supported OpenCode version.
-- `dynamic-tools-mcp.ts` and `bridge-runtime.ts` expose BB dynamic tools to
-  OpenCode and route their calls back.
-- `opencode-config.ts` maintains the global deny rule that keeps BB's tools out
-  of OpenCode's own sessions.
-- `opencode-requests.ts` holds permission rules, checkpoint math, environment
-  filtering, and skill roots.
-- `timeline.ts`, `tool-mapping.ts`, `prompt.ts`, and `models.ts` contain the
-  testable protocol mappings.
+- `session/session-manager.ts` owns session setup, per-turn preparation
+  (settings, permissions, agent, model), MCP registration, and shutdown.
+- `session/persistence.ts` writes host data atomically.
+- `opencode/maintenance.ts` implements health, install, and update.
+- `opencode/opencode-version.ts` defines the minimum supported OpenCode version.
+- `bridge/dynamic-tools-mcp.ts` and `bridge/bridge-runtime.ts` expose BB dynamic
+  tools to OpenCode and route their calls back.
+- `opencode/opencode-config.ts` maintains the global deny rule that keeps BB's
+  tools out of OpenCode's own sessions.
+- `opencode/opencode-requests.ts` holds permission rules, checkpoint math,
+  environment filtering, and skill roots.
+- `timeline/timeline.ts`, `timeline/tool-mapping.ts`, `opencode/prompt.ts`, and
+  `opencode/models.ts` contain the testable protocol mappings.
 
 ## Design decisions
 
