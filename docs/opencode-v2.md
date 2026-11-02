@@ -102,9 +102,18 @@ so full permission mode cannot override the plan agent's edit restriction.
 
 ## Usage and cost
 
-`session.usage.updated` carries cumulative session totals and `cost` in USD
-(`MoneyUSD`). The bridge forwards the cost on the `contextWindow` delta.
-`session.step.ended` and `.failed` carry the latest request's tokens.
+`session.usage.updated` carries cumulative totals for one session and `cost` in
+USD (`MoneyUSD`). A native subagent runs in its own child session, so the
+parent's usage event excludes it. The bridge keeps a child-session registry,
+adds child totals to `usage.total` and child cost to `contextWindow.cost`, and
+leaves the parent's `usage.last`, `contextWindow.used`, and context size alone.
+The registry is retained after a turn ends so late child usage still reaches the
+parent. After a reconnect or resume, the bridge rebuilds it from
+`session.list({parentID})` with a bounded recent-window scan; replayed and
+hydrated totals merge monotonically.
+
+`session.step.ended` and `.failed` carry the latest request's tokens. Only the
+parent step supplies `usage.last` and the live context estimate.
 
 ## Archive and lifecycle
 

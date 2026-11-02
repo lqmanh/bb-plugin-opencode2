@@ -687,6 +687,8 @@ async function handle(request: RecordValue) {
     case "thread/discard": {
       openCodeServer.clearThreadBroken(String(params.threadId));
       const session = sessions.get(params.threadId);
+      const providerThreadId =
+        session?.providerThreadId ?? stringValue(params.providerThreadId);
       if (session) {
         session.closing = true;
         const api = await openCodeServer.api().catch(() => undefined);
@@ -697,34 +699,29 @@ async function handle(request: RecordValue) {
               session.closing = false;
             });
         await releaseDynamicTools(session, "The BB thread was discarded");
-      } else if (
-        typeof params.providerThreadId === "string" &&
-        params.providerThreadId
-      ) {
+      } else if (providerThreadId) {
         // No local session (another host worker owns the thread, or this
         // worker restarted since setup): still remove the per-session MCP
         // bridge so OpenCode does not keep a dead server entry behind.
-        const orphan = await openCodeServer.lookupMcpRegistration(
-          params.providerThreadId,
-        );
+        const orphan =
+          await openCodeServer.lookupMcpRegistration(providerThreadId);
         const api = await openCodeServer.api().catch(() => undefined);
         if (orphan && api) {
           try {
             await removeMcpServer(api, orphan);
-            await openCodeServer.forgetMcpRegistration(params.providerThreadId);
+            await openCodeServer.forgetMcpRegistration(providerThreadId);
           } catch {
             // Keep the registry entry so a later discard can retry.
           }
         }
         if (api)
           await api.session
-            .remove({ sessionID: params.providerThreadId })
+            .remove({ sessionID: providerThreadId })
             .catch(() => {});
       }
+      if (providerThreadId) openCodeServer.clearChildSessions(providerThreadId);
       sessions.delete(params.threadId);
-      if (session) sessionsByProviderId.delete(session.providerThreadId);
-      else if (typeof params.providerThreadId === "string")
-        sessionsByProviderId.delete(params.providerThreadId);
+      if (providerThreadId) sessionsByProviderId.delete(providerThreadId);
       // Drop the persisted mapping so a later thread/fork for this BB thread
       // ID cannot mistake a new session for an in-place rewind target.
       await openCodeServer

@@ -43,9 +43,11 @@ import {
   parseInputText,
   stringValue,
   type ActiveTurn,
+  type ChildSessionRecord,
   type OpenCodeApi,
   type OpenCodeRecord,
   type SessionState,
+  type UsageTotals,
 } from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
@@ -54,6 +56,10 @@ const SHELL_OUTPUT_POLL_MS = 400;
 const SHELL_OUTPUT_CHUNK_BYTES = 32 * 1024;
 const TURN_DIFF_CONTEXT_LINES = 3;
 const TURN_DIFF_TIMEOUT_MS = 2_000;
+const CHILD_RECONCILE_PAGE_SIZE = 100;
+const CHILD_RECONCILE_MAX_PAGES = 5;
+const CHILD_RECONCILE_MAX_CHILDREN = 500;
+const CHILD_RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * OpenCode v2 reports a shell tool's exit status as `metadata.exit` on
@@ -87,67 +93,138 @@ function tokenCount(value: unknown) {
     : 0;
 }
 
-/** OpenCode reports session cost in USD; ignore malformed values. */
-function usageCost(value: unknown) {
+export function usageCostAmount(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? { amount: value, currency: "USD" }
+    ? value
     : undefined;
 }
 
-function tokenBreakdown(raw: unknown) {
-  const tokens = inputRecord(raw);
-  const cache = inputRecord(tokens.cache);
-  const breakdown = {
-    inputTokens: tokenCount(tokens.input),
-    outputTokens: tokenCount(tokens.output),
-    reasoningOutputTokens: tokenCount(tokens.reasoning),
-    cachedInputTokens: tokenCount(cache.read),
-  };
-  const cacheWrite = tokenCount(cache.write);
+/** OpenCode reports session cost in USD; ignore malformed values. */
+function usageCost(value: number | undefined) {
+  return value === undefined ? undefined : { amount: value, currency: "USD" };
+}
+
+function zeroUsage(): UsageTotals {
   return {
-    breakdown: {
-      ...breakdown,
-      totalTokens:
-        breakdown.inputTokens +
-        breakdown.outputTokens +
-        breakdown.reasoningOutputTokens +
-        breakdown.cachedInputTokens +
-        cacheWrite,
-    },
-    cacheWrite,
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
   };
 }
 
-/**
- * `session.usage.updated` carries OpenCode's cumulative session totals, so it
- * stays correct across resumes and workers. The latest step's tokens are the
- * last request's usage and approximate the live context size.
- */
-export function usageDeltas(
-  session: SessionState,
-  active: ActiveTurn,
-  totals: unknown,
-  cost?: unknown,
-): RecordValue[] {
-  const total = tokenBreakdown(totals);
-  const last = tokenBreakdown(active.lastStepTokens ?? {});
-  session.usage = {
-    input: total.breakdown.inputTokens,
-    output: total.breakdown.outputTokens,
-    reasoning: total.breakdown.reasoningOutputTokens,
-    cacheRead: total.breakdown.cachedInputTokens,
-    cacheWrite: total.cacheWrite,
+function totalTokens(totals: UsageTotals) {
+  return (
+    totals.input +
+    totals.output +
+    totals.reasoning +
+    totals.cacheRead +
+    totals.cacheWrite
+  );
+}
+
+function breakdownFromTotals(totals: UsageTotals) {
+  return {
+    inputTokens: totals.input,
+    outputTokens: totals.output,
+    reasoningOutputTokens: totals.reasoning,
+    cachedInputTokens: totals.cacheRead,
+    totalTokens: totalTokens(totals),
   };
+}
+
+export function usageTotals(raw: unknown): UsageTotals {
+  const tokens = inputRecord(raw);
+  const cache = inputRecord(tokens.cache);
+  return {
+    input: tokenCount(tokens.input),
+    output: tokenCount(tokens.output),
+    reasoning: tokenCount(tokens.reasoning),
+    cacheRead: tokenCount(cache.read),
+    cacheWrite: tokenCount(cache.write),
+  };
+}
+
+function addUsage(totals: UsageTotals, add: UsageTotals): UsageTotals {
+  return {
+    input: totals.input + add.input,
+    output: totals.output + add.output,
+    reasoning: totals.reasoning + add.reasoning,
+    cacheRead: totals.cacheRead + add.cacheRead,
+    cacheWrite: totals.cacheWrite + add.cacheWrite,
+  };
+}
+
+function maxUsage(current: UsageTotals, next: UsageTotals): UsageTotals {
+  return {
+    input: Math.max(current.input, next.input),
+    output: Math.max(current.output, next.output),
+    reasoning: Math.max(current.reasoning, next.reasoning),
+    cacheRead: Math.max(current.cacheRead, next.cacheRead),
+    cacheWrite: Math.max(current.cacheWrite, next.cacheWrite),
+  };
+}
+
+export function mergeUsageTotals(
+  current: UsageTotals,
+  next: UsageTotals,
+): UsageTotals {
+  return maxUsage(current, next);
+}
+
+function sameUsage(left: UsageTotals, right: UsageTotals) {
+  return (
+    left.input === right.input &&
+    left.output === right.output &&
+    left.reasoning === right.reasoning &&
+    left.cacheRead === right.cacheRead &&
+    left.cacheWrite === right.cacheWrite
+  );
+}
+
+function childUsage(children: Iterable<ChildSessionRecord>) {
+  let totals = zeroUsage();
+  let cost: number | undefined;
+  for (const child of children) {
+    if (!child.usage) continue;
+    totals = addUsage(totals, child.usage.tokens);
+    if (child.usage.cost !== undefined) cost = (cost ?? 0) + child.usage.cost;
+  }
+  return { totals, cost };
+}
+
+function usageSnapshotDeltas(
+  session: SessionState,
+  active: ActiveTurn | undefined,
+  parent: UsageTotals,
+  children: Iterable<ChildSessionRecord>,
+): RecordValue[] {
+  const child = childUsage(children);
+  const total = addUsage(parent, child.totals);
+  const last = active
+    ? usageTotals(active.lastStepTokens ?? {})
+    : (session.lastUsage?.tokens ?? zeroUsage());
   const size = session.contextWindow ?? null;
-  const used = active.lastStepTokens ? last.breakdown.totalTokens : null;
-  const sessionCost = usageCost(cost);
+  const used = active
+    ? active.lastStepTokens
+      ? totalTokens(last)
+      : null
+    : (session.lastUsage?.used ?? null);
+  const totalCost =
+    session.usageCost === undefined
+      ? child.cost
+      : session.usageCost + (child.cost ?? 0);
+  // BB applies a usage delta without providerTurnId to the current or last
+  // turn, so late child usage does not need a synthetic turn ID.
+  const providerTurnId = active?.providerTurnId;
   return [
     {
       kind: "usage",
-      total: total.breakdown,
-      last: last.breakdown,
+      total: breakdownFromTotals(total),
+      last: breakdownFromTotals(last),
       modelContextWindow: size,
-      providerTurnId: active.providerTurnId,
+      ...(providerTurnId ? { providerTurnId } : {}),
     },
     ...(used !== null
       ? [
@@ -157,12 +234,69 @@ export function usageDeltas(
             size,
             estimated: false,
             attach: "currentOrLast",
-            ...(sessionCost ? { cost: sessionCost } : {}),
-            providerTurnId: active.providerTurnId,
+            ...(totalCost !== undefined ? { cost: usageCost(totalCost) } : {}),
+            ...(providerTurnId ? { providerTurnId } : {}),
           },
         ]
       : []),
   ];
+}
+
+/**
+ * `session.usage.updated` carries OpenCode's cumulative session totals, so it
+ * stays correct across resumes and workers. The latest step's tokens are the
+ * last request's usage and approximate the live context size. Only the parent
+ * session updates `session.usage`; child totals are added to the emitted total.
+ */
+export function usageDeltas(
+  session: SessionState,
+  active: ActiveTurn | undefined,
+  totals: unknown,
+  cost?: unknown,
+  children: Iterable<ChildSessionRecord> = [],
+): RecordValue[] {
+  const parent = usageTotals(totals);
+  session.usage = parent;
+  const parentCost = usageCostAmount(cost);
+  if (parentCost !== undefined) session.usageCost = parentCost;
+  if (active?.lastStepTokens) {
+    const last = usageTotals(active.lastStepTokens);
+    session.lastUsage = { tokens: last, used: totalTokens(last) };
+  }
+  return usageSnapshotDeltas(session, active, parent, children);
+}
+
+function childUsageDeltas(
+  session: SessionState,
+  active: ActiveTurn | undefined,
+  children: Iterable<ChildSessionRecord>,
+): RecordValue[] {
+  return usageSnapshotDeltas(session, active, session.usage, children);
+}
+
+export function mergeChildUsage(
+  record: ChildSessionRecord,
+  tokens: UsageTotals,
+  cost?: number,
+): boolean {
+  const nextTokens = record.usage
+    ? maxUsage(record.usage.tokens, tokens)
+    : tokens;
+  const nextCost =
+    cost === undefined
+      ? record.usage?.cost
+      : Math.max(record.usage?.cost ?? 0, cost);
+  if (
+    record.usage &&
+    sameUsage(record.usage.tokens, nextTokens) &&
+    record.usage.cost === nextCost
+  )
+    return false;
+  record.usage = {
+    tokens: nextTokens,
+    ...(nextCost !== undefined ? { cost: nextCost } : {}),
+  };
+  return true;
 }
 
 function retryErrorCategory(error: RecordValue) {
@@ -202,11 +336,10 @@ export class OpenCodeEventRouter {
   private readonly api: OpenCodeApi;
   private readonly onSessionGone?: OpenCodeEventRouterHooks["onSessionGone"];
   private readonly sendNotification: typeof notify;
-  /** Native subagent sessions, routed into their parent BB turn. */
-  private readonly childSessions = new Map<
-    string,
-    { parent: SessionState; callId: string }
-  >();
+  /** Native subagent sessions, shared with background-task support. */
+  private readonly childSessions = new Map<string, ChildSessionRecord>();
+  /** Child IDs by parent provider session, an index over the registry. */
+  private readonly childIdsByParent = new Map<string, Set<string>>();
   /** Provider item ID -> the delegation call it is nested under. */
   private readonly parentRefs = new Map<string, string>();
   /** Set while handling a child-session event. */
@@ -228,6 +361,175 @@ export class OpenCodeEventRouter {
     this.sessionLookup = sessionLookup;
     this.onSessionGone = hooks.onSessionGone;
     this.sendNotification = hooks.notify ?? notify;
+  }
+
+  private registerChildSession(
+    childId: string,
+    parent: SessionState,
+    callId: string,
+    options: { terminal?: boolean; updateCallId?: boolean } = {},
+  ): ChildSessionRecord {
+    const existing = this.childSessions.get(childId);
+    if (existing) {
+      if (existing.parentProviderThreadId !== parent.providerThreadId) {
+        this.childIdsByParent
+          .get(existing.parentProviderThreadId)
+          ?.delete(childId);
+        this.addChildIndex(parent.providerThreadId, childId);
+      }
+      existing.parentThreadId = parent.bbThreadId;
+      existing.parentProviderThreadId = parent.providerThreadId;
+      if (options.updateCallId && callId) existing.callId = callId;
+      else if (!existing.callId && callId) existing.callId = callId;
+      if (options.terminal !== undefined) existing.terminal = options.terminal;
+      return existing;
+    }
+    const record: ChildSessionRecord = {
+      parentThreadId: parent.bbThreadId,
+      parentProviderThreadId: parent.providerThreadId,
+      callId,
+      terminal: options.terminal ?? false,
+    };
+    this.childSessions.set(childId, record);
+    this.addChildIndex(parent.providerThreadId, childId);
+    return record;
+  }
+
+  private addChildIndex(parentProviderThreadId: string, childId: string) {
+    let ids = this.childIdsByParent.get(parentProviderThreadId);
+    if (!ids) {
+      ids = new Set();
+      this.childIdsByParent.set(parentProviderThreadId, ids);
+    }
+    ids.add(childId);
+  }
+
+  private childRecords(parent: SessionState): ChildSessionRecord[] {
+    const ids = this.childIdsByParent.get(parent.providerThreadId);
+    if (!ids) return [];
+    const records: ChildSessionRecord[] = [];
+    for (const childId of ids) {
+      const child = this.childSessions.get(childId);
+      if (child) records.push(child);
+    }
+    return records;
+  }
+
+  private parentForChild(record: ChildSessionRecord) {
+    const parent = this.sessionLookup.get(record.parentProviderThreadId);
+    return parent?.bbThreadId === record.parentThreadId ? parent : undefined;
+  }
+
+  private handleChildUsage(record: ChildSessionRecord, data: RecordValue) {
+    const parent = this.parentForChild(record);
+    if (!parent) return;
+    if (data.tokens === undefined) return;
+    if (
+      !mergeChildUsage(
+        record,
+        usageTotals(data.tokens),
+        usageCostAmount(data.cost),
+      )
+    )
+      return;
+    this.emit(
+      parent.bbThreadId,
+      childUsageDeltas(parent, parent.active, this.childRecords(parent)),
+    );
+  }
+
+  /**
+   * Rebuild child usage from OpenCode after a reconnect or resume. The event
+   * stream does not replay, so this is the only way to recover usage that
+   * arrived while the bridge was disconnected. The scan is bounded by age,
+   * pages, and total children, and merges monotonically.
+   */
+  async reconcileChildSessions(session: SessionState): Promise<void> {
+    const api = await this.api();
+    const cutoff = Date.now() - CHILD_RECONCILE_WINDOW_MS;
+    const queue = [session.providerThreadId];
+    const visited = new Set(queue);
+    let queueIndex = 0;
+    let discovered = 0;
+    let usageChanged = false;
+    while (
+      queueIndex < queue.length &&
+      discovered < CHILD_RECONCILE_MAX_CHILDREN
+    ) {
+      const parentId = queue[queueIndex++];
+      let cursor: string | undefined;
+      for (
+        let page = 0;
+        page < CHILD_RECONCILE_MAX_PAGES &&
+        discovered < CHILD_RECONCILE_MAX_CHILDREN;
+        page++
+      ) {
+        const result = inputRecord(
+          await api.session.list({
+            parentID: parentId,
+            limit: CHILD_RECONCILE_PAGE_SIZE,
+            ...(cursor ? { cursor } : { order: "desc" as const }),
+          }),
+        );
+        const rows = Array.isArray(result.data)
+          ? result.data.map(inputRecord)
+          : [];
+        if (rows.length === 0) break;
+        let reachedOld = false;
+        for (const info of rows) {
+          const updated = inputRecord(info.time).updated;
+          if (typeof updated === "number" && updated < cutoff) {
+            reachedOld = true;
+            break;
+          }
+          const childId = stringValue(info.id);
+          if (!childId || visited.has(childId)) continue;
+          visited.add(childId);
+          queue.push(childId);
+          discovered++;
+          const time = inputRecord(info.time);
+          const busy = typeof time.busy === "number" ? time.busy : undefined;
+          const idle = typeof time.idle === "number" ? time.idle : undefined;
+          const running =
+            busy !== undefined && (idle === undefined || busy > idle);
+          const existing = this.childSessions.get(childId);
+          const callId = existing?.callId ?? "";
+          const record = this.registerChildSession(childId, session, callId, {
+            terminal: !callId || (!running && info.outcome !== undefined),
+          });
+          if (
+            mergeChildUsage(
+              record,
+              usageTotals(info.tokens),
+              usageCostAmount(info.cost),
+            )
+          )
+            usageChanged = true;
+          if (discovered >= CHILD_RECONCILE_MAX_CHILDREN) break;
+        }
+        if (reachedOld || discovered >= CHILD_RECONCILE_MAX_CHILDREN) break;
+        const next = stringValue(inputRecord(result.cursor).next);
+        if (!next || next === cursor) break;
+        cursor = next;
+      }
+    }
+    if (usageChanged && (session.active || session.lastUsage))
+      this.emit(
+        session.bbThreadId,
+        childUsageDeltas(session, session.active, this.childRecords(session)),
+      );
+  }
+
+  clearChildSessions(parentProviderThreadId?: string): void {
+    if (parentProviderThreadId === undefined) {
+      this.childSessions.clear();
+      this.childIdsByParent.clear();
+      return;
+    }
+    const ids = this.childIdsByParent.get(parentProviderThreadId);
+    if (!ids) return;
+    for (const childId of ids) this.childSessions.delete(childId);
+    this.childIdsByParent.delete(parentProviderThreadId);
   }
 
   /**
@@ -279,13 +581,18 @@ export class OpenCodeEventRouter {
     }
     if (session) return this.handleSessionEvent(session, event, data);
     const child = this.childSessions.get(sessionId);
+    if (!child) return;
     const type = stringValue(event.type) ?? "";
-    // A subagent's own lifecycle, usage, and compaction belong to the child
-    // session; only its visible work joins the parent turn.
-    if (!child || !CHILD_EVENT_PATTERN.test(type)) return;
+    if (type === "session.usage.updated") {
+      this.handleChildUsage(child, data);
+      return;
+    }
+    if (child.terminal || !CHILD_EVENT_PATTERN.test(type)) return;
+    const parent = this.parentForChild(child);
+    if (!parent) return;
     this.childParentRef = child.callId;
     try {
-      await this.handleSessionEvent(child.parent, event, data);
+      await this.handleSessionEvent(parent, event, data);
     } finally {
       this.childParentRef = undefined;
     }
@@ -297,6 +604,26 @@ export class OpenCodeEventRouter {
     data: RecordValue,
   ): Promise<void> {
     const active = session.active;
+    const eventId = stringValue(data.id) ?? "";
+    const eventType = stringValue(event.type) ?? "";
+    const metadata = inputRecord(data.metadata);
+    const childId = stringValue(metadata.sessionID);
+    if (
+      childId &&
+      (eventType === "session.tool.progress" ||
+        eventType === "session.tool.success" ||
+        eventType === "session.tool.failed")
+    ) {
+      const live = active !== undefined;
+      this.registerChildSession(childId, session, eventId, {
+        terminal:
+          !live ||
+          eventType === "session.tool.failed" ||
+          (eventType === "session.tool.success" &&
+            stringValue(metadata.status) !== "running"),
+        updateCallId: live && eventType === "session.tool.progress",
+      });
+    }
     if (event.type === "permission.asked") {
       void this.interactions.handlePermission(session, data);
       return;
@@ -326,8 +653,6 @@ export class OpenCodeEventRouter {
       return;
     }
     if (!active) return;
-    const eventId = stringValue(data.id) ?? "";
-    const eventType = stringValue(event.type) ?? "";
     if (eventType.startsWith("session.tool.") && !eventId) return;
     if (this.handleCompactionEvent(session, active, event.type, data)) return;
     const assistantMessageId = stringValue(data.assistantMessageID);
@@ -499,14 +824,10 @@ export class OpenCodeEventRouter {
       }
     }
     if (event.type === "session.tool.progress") {
-      const childId = stringValue(inputRecord(data.metadata).sessionID);
       const opened = active.opened.get(eventId);
-      if (childId && opened?.type === "delegation") {
-        opened.childRef = childId;
-        this.childSessions.set(childId, { parent: session, callId: eventId });
-      }
-      const shellId = stringValue(inputRecord(data.metadata).shellID);
-      if (shellId && active.opened.get(eventId)?.type === "command")
+      if (childId && opened?.type === "delegation") opened.childRef = childId;
+      const shellId = stringValue(metadata.shellID);
+      if (shellId && opened?.type === "command")
         this.streamShellOutput(session, active, eventId, shellId);
     }
     if (
@@ -564,7 +885,6 @@ export class OpenCodeEventRouter {
                 stringValue(inputRecord(data.error).message),
               );
         if (!item.summary) delete item.summary;
-        const childId = stringValue(inputRecord(data.metadata).sessionID);
         if (childId) item.childRef = childId;
       } else if (item.type === "tool") {
         if (event.type === "session.tool.success") item.result = output;
@@ -639,7 +959,13 @@ export class OpenCodeEventRouter {
     if (event.type === "session.usage.updated") {
       this.emit(
         session.bbThreadId,
-        usageDeltas(session, active, data.tokens, data.cost),
+        usageDeltas(
+          session,
+          active,
+          data.tokens,
+          data.cost,
+          this.childRecords(session),
+        ),
       );
     }
     if (event.type === "session.retry.scheduled") {
@@ -702,6 +1028,7 @@ export class OpenCodeEventRouter {
   }
 
   private async detachSession(session: SessionState, reason: string) {
+    this.clearChildSessions(session.providerThreadId);
     await releaseSessionTools(session, reason, () => this.api());
     if (this.sessionLookup.get(session.providerThreadId) === session) {
       (this.sessionLookup as Map<string, SessionState>).delete(
@@ -1053,6 +1380,7 @@ export class OpenCodeEventRouter {
     if (!active || active.finishing) return;
     active.finishing = true;
     active.abortController.abort();
+    for (const child of this.childRecords(session)) child.terminal = true;
     if (active.manualCompaction) {
       this.emit(
         session.bbThreadId,
@@ -1066,8 +1394,6 @@ export class OpenCodeEventRouter {
       session.active = undefined;
       return;
     }
-    for (const [childId, child] of this.childSessions)
-      if (child.parent === session) this.childSessions.delete(childId);
     for (const poll of active.shellPolls?.values() ?? []) poll.stopped = true;
     active.shellPolls?.clear();
     dynamicToolCallRouter.resolve(

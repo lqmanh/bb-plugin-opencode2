@@ -1,5 +1,5 @@
-import type { OpenCodeClient } from "@opencode/client";
 import type { DynamicTool } from "@get-bb/plugin-sdk/provider-bridge";
+import type { OpenCodeClient } from "@opencode/client";
 import type { DynamicToolsMcpProxy } from "./bridge/dynamic-tools-mcp.ts";
 
 export type OpenCodeApi = () => Promise<OpenCodeClient>;
@@ -26,6 +26,28 @@ export type ModelRef = {
   providerID: string;
   id: string;
   variant?: string;
+};
+
+export type UsageTotals = {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+};
+
+/** A native subagent session, shared with background-task support. */
+export type ChildSessionRecord = {
+  parentThreadId: string;
+  parentProviderThreadId: string;
+  callId: string;
+  usage?: {
+    tokens: UsageTotals;
+    cost?: number;
+  };
+  terminal: boolean;
+  backgroundTaskId?: string;
+  background?: OpenCodeRecord;
 };
 
 export type ActiveTurn = {
@@ -133,13 +155,11 @@ export type SessionState = {
   terminalKind?: SessionTerminalKind;
   /** True while BB itself is removing the OpenCode session. */
   closing?: boolean;
-  usage: {
-    input: number;
-    output: number;
-    reasoning: number;
-    cacheRead: number;
-    cacheWrite: number;
-  };
+  usage: UsageTotals;
+  /** Parent session cost in USD. Child cost is kept in the router registry. */
+  usageCost?: number;
+  /** Parent-only last step, used for late child usage after a turn closes. */
+  lastUsage?: { tokens: UsageTotals; used: number };
 };
 
 export function isSubagentTool(name: string): boolean {

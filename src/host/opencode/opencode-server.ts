@@ -15,7 +15,11 @@ import {
   revertTargetRetainingThrough,
   type CheckpointMessage,
 } from "./opencode-requests.ts";
-import { OpenCodeEventRouter } from "../timeline/opencode-event-router.ts";
+import {
+  OpenCodeEventRouter,
+  usageCostAmount,
+  usageTotals,
+} from "../timeline/opencode-event-router.ts";
 import {
   MIN_OPENCODE_VERSION,
   isSupportedVersion,
@@ -28,6 +32,7 @@ import {
   stringValue,
   type OpenCodeRecord,
   type SessionState,
+  type UsageTotals,
 } from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
@@ -97,13 +102,7 @@ type CatalogCache<T> = Map<string, { at: number; result: Promise<T> }>;
 export type SessionBridgeRegistration = {
   providerThreadId: string;
   cwd: string;
-  usage: {
-    input: number;
-    output: number;
-    reasoning: number;
-    cacheRead: number;
-    cacheWrite: number;
-  };
+  usage: UsageTotals;
 };
 
 export function parseOpenCodeServiceUrl(output: string): string {
@@ -599,14 +598,27 @@ export class OpenCodeServer {
   async sessionState(sessionId: string): Promise<{
     agent?: string;
     archived: boolean;
+    usage: UsageTotals;
+    cost?: number;
   }> {
     const api = await this.api();
     const info = inputRecord(await api.session.get({ sessionID: sessionId }));
     const agent = stringValue(info.agent);
+    const cost = usageCostAmount(info.cost);
     return {
       ...(agent ? { agent } : {}),
       archived: typeof inputRecord(info.time).archived === "number",
+      usage: usageTotals(info.tokens),
+      ...(cost !== undefined ? { cost } : {}),
     };
+  }
+
+  async reconcileChildSessions(session: SessionState): Promise<void> {
+    await this.eventRouter.reconcileChildSessions(session);
+  }
+
+  clearChildSessions(providerThreadId?: string): void {
+    this.eventRouter.clearChildSessions(providerThreadId);
   }
 
   private readonly expectedArchiveEvents = new Map<
@@ -917,8 +929,11 @@ export class OpenCodeServer {
       try {
         const api = await this.api();
         // The stream does not replay: anything that happened while it was
-        // down is gone, including the end of a turn.
-        if (connectedBefore) void this.reconcileActiveTurns();
+        // down is gone, including the end of a turn and child usage.
+        if (connectedBefore) {
+          void this.reconcileActiveTurns();
+          void this.reconcileChildSessionsForSessions();
+        }
         connectedBefore = true;
         for await (const event of api.event.subscribe({ signal })) {
           try {
@@ -933,6 +948,14 @@ export class OpenCodeServer {
         }
       }
     }
+  }
+
+  private async reconcileChildSessionsForSessions(): Promise<void> {
+    await Promise.allSettled(
+      [...sessions.values()].map((session) =>
+        this.reconcileChildSessions(session),
+      ),
+    );
   }
 
   private reconciling = false;
@@ -1036,6 +1059,7 @@ export class OpenCodeServer {
     // The background service is shared with the OpenCode app/CLI; never stop
     // it here. Just drop our reference so the event loop exits.
     this.connectionGeneration += 1;
+    this.clearChildSessions();
     this.client = undefined;
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = undefined;

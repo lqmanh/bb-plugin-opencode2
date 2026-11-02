@@ -73,6 +73,12 @@ Inside `src/host/`:
 
 - **Native subagents are enabled by default** and render as BB delegation rows.
   The `subagentsDisabled` setting adds a session `deny` rule.
+- **Child-session usage belongs to one shared registry.** The event router keeps
+  a `ChildSessionRecord` per child session. Child token totals and cost are
+  added to the parent usage snapshot, while the parent's last-step tokens and
+  context meter stay parent-only. Observed usage survives the parent turn and is
+  rebuilt monotonically from OpenCode after a reconnect or resume. Background
+  tasks extend this registry rather than adding another child map.
 - **Permission modes are session rulesets.** `auto` keeps OpenCode's agent rules
   and answers remaining asks with `once`; `full` adds `*` → allow;
   `accept-edits` allows reads, searches, edits, and selected non-mutating tools,

@@ -39,9 +39,12 @@ export {
   parseOpenCodeServiceUrl,
 } from "./opencode/opencode-server.ts";
 export {
+  mergeChildUsage,
+  mergeUsageTotals,
   OpenCodeEventRouter,
   shellExitCode,
   usageDeltas,
+  usageTotals,
 } from "./timeline/opencode-event-router.ts";
 export {
   forkBoundaryRetainingThrough,

@@ -26,6 +26,7 @@ import {
   sessionPermissionRules,
 } from "../opencode/opencode-requests.ts";
 import { openCodeServer } from "../opencode/opencode-server.ts";
+import { mergeUsageTotals } from "../timeline/opencode-event-router.ts";
 import { enabledDynamicTools, sameDynamicTools } from "../opencode/prompt.ts";
 import {
   releaseSessionTools,
@@ -260,12 +261,25 @@ async function installSessionEnvironment(session: SessionState) {
 
 export async function registerSession(session: SessionState) {
   const previous = sessions.get(session.bbThreadId);
-  if (!session.agent && previous?.providerThreadId === session.providerThreadId)
+  const sameProvider = previous?.providerThreadId === session.providerThreadId;
+  if (sameProvider && previous) {
+    session.usage = previous.usage;
+    session.usageCost = previous.usageCost;
+    session.lastUsage = previous.lastUsage;
+  } else if (previous) {
+    openCodeServer.clearChildSessions(previous.providerThreadId);
+  }
+  if (!session.agent && sameProvider && previous)
     session.agent = previous.agent;
   const state = await openCodeServer
     .sessionState(session.providerThreadId)
     .catch(() => undefined);
   session.agent ??= state?.agent;
+  if (state) {
+    session.usage = mergeUsageTotals(session.usage, state.usage);
+    if (state.cost !== undefined)
+      session.usageCost = Math.max(session.usageCost ?? 0, state.cost);
+  }
   if (state?.archived) {
     session.terminalError = ARCHIVED_SESSION_MESSAGE;
     session.terminalKind = "archived";
@@ -320,6 +334,11 @@ export async function registerSession(session: SessionState) {
         `[opencode2] Could not persist OpenCode session mapping: ${errorMessage(error)}\n`,
       );
     });
+  await openCodeServer.reconcileChildSessions(session).catch((error) => {
+    process.stderr.write(
+      `[opencode2] Could not reconcile OpenCode child usage: ${errorMessage(error)}\n`,
+    );
+  });
 }
 
 export async function unregisterSession(
@@ -327,6 +346,7 @@ export async function unregisterSession(
   reason: string,
 ): Promise<void> {
   removeSessionEntries(session);
+  openCodeServer.clearChildSessions(session.providerThreadId);
   session.active?.abortController.abort();
   await releaseDynamicTools(session, reason);
   await openCodeServer
@@ -364,6 +384,7 @@ export async function shutdownSessions(reason: string): Promise<void> {
   const currentSessions = [...sessions.values()];
   sessions.clear();
   sessionsByProviderId.clear();
+  openCodeServer.clearChildSessions();
 
   const removals = currentSessions.flatMap((session) => {
     session.active?.abortController.abort();

@@ -15,6 +15,11 @@ All notable changes to this plugin are documented here. The format follows
 - The model allowlist in the settings page and the `sync-model-settings`
   background service.
 
+### Fixed
+
+- Native subagent tokens and cost now count toward the parent thread's usage,
+  while the parent context meter stays parent-only.
+
 ## [1.4.0] - 2026-11-02
 
 ### Added
