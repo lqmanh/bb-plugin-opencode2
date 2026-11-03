@@ -1,12 +1,12 @@
-import { createServer, createConnection, type Socket } from "node:net";
-import { randomBytes } from "node:crypto";
-import { createInterface } from "node:readline";
-import type { ExperimentalMcpAddInput } from "@opencode/client";
 import {
-  dynamicToolSchema,
   experimental_buildBridgeToolCallContent as buildBridgeToolCallContent,
+  dynamicToolSchema,
   type DynamicTool,
 } from "@get-bb/plugin-sdk/provider-bridge";
+import type { ExperimentalMcpAddInput } from "@opencode/client";
+import { randomBytes } from "node:crypto";
+import { createConnection, createServer, type Socket } from "node:net";
+import { createInterface } from "node:readline";
 import { errorMessage } from "../../shared/errors.ts";
 
 export const DYNAMIC_TOOLS_MCP_ARG = "--opencode2-bb-tools-mcp";
@@ -17,7 +17,9 @@ const ENV_TOOLS = "BB_OPENCODE2_MCP_TOOLS";
 const ENV_SESSION_ID = "BB_OPENCODE2_MCP_SESSION_ID";
 const LOOPBACK_HOST = "127.0.0.1";
 const MAX_PROXY_MESSAGE_BYTES = 1024 * 1024;
-const PROXY_CALL_TIMEOUT_MS = 610_000;
+// Only guard receiving the request on the local proxy. Execution is bounded by
+// OpenCode's MCP timeout and the turn's abort signal, not by a second timer.
+const PROXY_HANDSHAKE_TIMEOUT_MS = 30_000;
 const MAX_DYNAMIC_TOOLS = 256;
 
 type RecordValue = Record<string, unknown>;
@@ -123,9 +125,6 @@ export async function startDynamicToolsMcpProxy(args: {
           },
           disabled: false,
           codemode: false,
-          // OpenCode's local-MCP schema expects named positive timeout fields,
-          // not a single numeric timeout value.
-          timeout: { execution: 600_000 },
         },
         close,
       });
@@ -141,7 +140,7 @@ function handleProxySocket(
   let buffer = "";
   let handled = false;
   socket.setEncoding("utf8");
-  socket.setTimeout(PROXY_CALL_TIMEOUT_MS, () => socket.destroy());
+  socket.setTimeout(PROXY_HANDSHAKE_TIMEOUT_MS, () => socket.destroy());
   socket.on("data", (chunk: string) => {
     if (handled) return;
     buffer += chunk;
@@ -175,6 +174,8 @@ function handleProxySocket(
       respond(socket, { ok: false, error: "Invalid dynamic tool request" });
       return;
     }
+    // The request is validated; execution may legitimately outlive the handshake guard.
+    socket.setTimeout(0);
     const call: DynamicToolCall = {
       sessionId: request.sessionId,
       toolName: request.toolName,
@@ -364,10 +365,6 @@ function callProxy(
     };
     let buffer = "";
     socket.setEncoding("utf8");
-    socket.setTimeout(PROXY_CALL_TIMEOUT_MS, () => {
-      socket.destroy();
-      reject(new Error("OpenCode dynamic-tools MCP proxy timed out"));
-    });
     socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk: string) => {
       buffer += chunk;

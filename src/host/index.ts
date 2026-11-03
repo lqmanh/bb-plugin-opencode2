@@ -19,7 +19,11 @@ import { MIN_OPENCODE_VERSION } from "./opencode/opencode-version.ts";
 import { shutdownBridge } from "./bridge/provider-bridge.ts";
 import { nativeSkillRoots } from "./opencode/opencode-requests.ts";
 
-export { createDynamicToolCallRouter } from "./bridge/bridge-runtime.ts";
+export {
+  createDynamicToolCallRouter,
+  handleRuntimeResponse,
+  requestRuntime,
+} from "./bridge/bridge-runtime.ts";
 export {
   DYNAMIC_TOOLS_MCP_ARG,
   handleDynamicToolsMcpRequest,

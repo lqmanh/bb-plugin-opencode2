@@ -1,7 +1,7 @@
+import type { BridgeToolCallRequest } from "@get-bb/plugin-sdk/provider-bridge";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import type { BridgeToolCallRequest } from "@get-bb/plugin-sdk/provider-bridge";
 import { fileURLToPath } from "node:url";
 import {
   createDynamicToolCallRouter,
@@ -294,8 +294,9 @@ test("the stdio MCP child round trips a tool call through the loopback bridge", 
     string,
     string
   >;
-  // Mcp.LocalConfig requires a timeout object whose named values are positive.
-  assert.deepEqual(proxy.config.timeout, { execution: 600_000 });
+  // OpenCode owns the MCP execution timeout; a second wall-clock cap here
+  // would shorten long-running BB tools.
+  assert.equal(proxy.config.timeout, undefined);
   const child = spawn(
     process.execPath,
     [

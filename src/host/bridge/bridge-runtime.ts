@@ -9,7 +9,6 @@ import { timelineDeltasForEmission } from "../timeline/timeline.ts";
 import type { OpenCodeRecord } from "../types.ts";
 
 const io = createBridgeIo();
-const RUNTIME_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const pendingRuntimeRequests = new Map<
   string | number,
   (response: OpenCodeRecord) => void
@@ -48,33 +47,28 @@ export function emit(threadId: string, deltas: OpenCodeRecord[]): void {
   });
 }
 
+// Interactive requests have no wall-clock timeout.
+// The turn's abort signal and bridge shutdown cancel them instead.
 export function requestRuntime<T = OpenCodeRecord>(
   method: string,
   params: OpenCodeRecord,
-  options: { signal?: AbortSignal } = {},
+  options: { signal: AbortSignal },
 ): Promise<T> {
   const id = ++nextRuntimeRequestId;
   return new Promise((resolve, reject) => {
     const cleanup = () => {
-      clearTimeout(timeout);
-      options.signal?.removeEventListener("abort", handleAbort);
+      options.signal.removeEventListener("abort", handleAbort);
     };
     const handleAbort = () => {
       pendingRuntimeRequests.delete(id);
       cleanup();
       reject(new Error(`BB runtime request cancelled: ${method}`));
     };
-    const timeout = setTimeout(() => {
-      pendingRuntimeRequests.delete(id);
-      cleanup();
-      reject(new Error(`BB runtime request timed out: ${method}`));
-    }, RUNTIME_REQUEST_TIMEOUT_MS);
-    timeout.unref();
-    if (options.signal?.aborted) {
+    if (options.signal.aborted) {
       handleAbort();
       return;
     }
-    options.signal?.addEventListener("abort", handleAbort, { once: true });
+    options.signal.addEventListener("abort", handleAbort, { once: true });
     pendingRuntimeRequests.set(id, (response) => {
       cleanup();
       const error = response.error as OpenCodeRecord | undefined;

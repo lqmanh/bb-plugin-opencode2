@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import {
   OpenCode,
   isConflictError,
@@ -7,7 +5,23 @@ import {
   type OpenCodeClient,
 } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { errorMessage } from "../../shared/errors.ts";
+import { writeJsonFileAtomic } from "../session/persistence.ts";
+import { sessions, sessionsByProviderId } from "../session/session-teardown.ts";
+import {
+  OpenCodeEventRouter,
+  usageCostAmount,
+  usageTotals,
+} from "../timeline/opencode-event-router.ts";
+import {
+  inputRecord,
+  stringValue,
+  type OpenCodeRecord,
+  type SessionState,
+  type UsageTotals,
+} from "../types.ts";
 import { modelCatalogEntry, type ModelCatalogEntry } from "./models.ts";
 import { ensureBbToolsRule } from "./opencode-config.ts";
 import {
@@ -16,24 +30,10 @@ import {
   type CheckpointMessage,
 } from "./opencode-requests.ts";
 import {
-  OpenCodeEventRouter,
-  usageCostAmount,
-  usageTotals,
-} from "../timeline/opencode-event-router.ts";
-import {
   MIN_OPENCODE_VERSION,
   isSupportedVersion,
   resetLatestVersionCache,
 } from "./opencode-version.ts";
-import { writeJsonFileAtomic } from "../session/persistence.ts";
-import { sessions, sessionsByProviderId } from "../session/session-teardown.ts";
-import {
-  inputRecord,
-  stringValue,
-  type OpenCodeRecord,
-  type SessionState,
-  type UsageTotals,
-} from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
 
@@ -45,7 +45,8 @@ const CATALOG_COLD_RETRIES = 10;
 const CATALOG_COLD_RETRY_MS = 300;
 const COMMAND_CATALOG_MAX = 500;
 const ARCHIVE_EVENT_TTL_MS = 30_000;
-const MCP_CONNECT_TIMEOUT_MS = 10_000;
+// OpenCode abandons MCP startup after 30s; this is only a last-resort guard for a missed status event.
+const MCP_CONNECT_TIMEOUT_MS = 35_000;
 const MCP_SETTLE_MS = 1_000;
 const CONFIG_RELOAD_RETRY_MS = 30_000;
 // Give up after a day of continuous activity; a service restart applies it.

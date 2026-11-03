@@ -28,8 +28,10 @@ All notable changes to this plugin are documented here. The format follows
 
 - Native subagent tokens and cost now count toward the parent thread's usage,
   while the parent context meter stays parent-only.
-- OpenCode question answers, including free text, now reach the tool instead of
-  being dismissed. Interactive permission decisions use the same fix.
+- Interactive questions and permissions now reach the tools instead of being
+  dismissed, and no longer time out after 10 minutes.
+- BB dynamic tools now use OpenCode's MCP execution timeout instead of a
+  plugin-side 10-minute cap; the local proxy only guards its handshake.
 
 ## [1.4.0] - 2026-11-02
 
