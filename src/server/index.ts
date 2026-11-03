@@ -10,9 +10,11 @@ import {
   OPENCODE_PROVIDER_ID,
   opencodeHostContract,
   opencodeSettingsRpcContract,
+  opencodeThreadRpcContract,
   unavailableUsageStatus,
   type HostStatus,
 } from "../shared/settings-contract.ts";
+import { registerBackgroundCompletionNotifications } from "./background-notifications.ts";
 import {
   parseUsageResourceId,
   providerUsageRpcContract,
@@ -78,6 +80,37 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(opencodeSettingsRpcContract, { getStatus });
+
+  bb.rpc.register(opencodeThreadRpcContract, {
+    async backgroundThread({ threadId }) {
+      const [thread] = await bb.sdk.threads.list({ threadIds: [threadId] });
+      if (!thread || thread.providerId !== OPENCODE_PROVIDER_ID) {
+        throw new experimental_PluginRpcRefusal({
+          code: "not_found",
+          message: "This thread does not use OpenCode v2.",
+        });
+      }
+      if (!thread.environmentHostId) {
+        throw new experimental_PluginRpcRefusal({
+          code: "conflict",
+          message: "This thread has no connected host.",
+        });
+      }
+      try {
+        await host.call(
+          "backgroundSession",
+          { threadId },
+          { hostId: thread.environmentHostId },
+        );
+      } catch (error) {
+        throw new experimental_PluginRpcRefusal({
+          code: "conflict",
+          message: errorMessage(error),
+        });
+      }
+      return { ok: true as const };
+    },
+  });
 
   bb.rpc.register(
     providerUsageRpcContract,
@@ -178,6 +211,8 @@ export default function plugin(bb: BbPluginApi) {
       disableSubagents: settings.subagentsDisabled === true,
     }),
   });
+
+  registerBackgroundCompletionNotifications(bb);
 
   bb.log.info("registered OpenCode v2 provider");
 }

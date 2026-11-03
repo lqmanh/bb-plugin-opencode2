@@ -1,25 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { OpenCodeClient } from "@opencode/client";
 import {
   releaseSessionTools,
   removeMcpServers,
 } from "../../support/host-api.js";
+import { createFakeOpenCodeClient } from "../../support/opencode-client.fixture.ts";
+import { createTestSession } from "../../support/session.fixture.ts";
 import type { OpenCodeRecord, SessionState } from "../../../src/host/types.ts";
 
 function fakeSession(id: string): SessionState {
-  return {
+  return createTestSession({
     bbThreadId: `thr_${id}`,
     providerThreadId: id,
     cwd: `/repo/${id}`,
-    disableSubagents: true,
-    dynamicTools: [],
-    disallowedTools: new Set(),
-    instructions: "",
-    bridgeEnvVars: {},
-    dynamicToolScope: {},
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-  };
+  });
 }
 
 function fakeProxy(serverName: string, close: () => void) {
@@ -33,7 +27,7 @@ test("releaseSessionTools swallows a failed removal", async () => {
 
   const removed = await releaseSessionTools(session, "replaced", async () => {
     events.push("api");
-    return {
+    return createFakeOpenCodeClient({
       experimental: {
         mcp: {
           remove: async () => {
@@ -42,7 +36,7 @@ test("releaseSessionTools swallows a failed removal", async () => {
           },
         },
       },
-    } as unknown as OpenCodeClient;
+    });
   });
 
   assert.equal(removed, false);
@@ -61,7 +55,7 @@ test("removeMcpServers runs removals in parallel and keeps only successful IDs",
     serverName: `bb_${providerThreadId}`,
     cwd: "/repo",
   }));
-  const client = {
+  const client = createFakeOpenCodeClient({
     experimental: {
       mcp: {
         remove: async (
@@ -75,7 +69,7 @@ test("removeMcpServers runs removals in parallel and keeps only successful IDs",
         },
       },
     },
-  } as unknown as OpenCodeClient;
+  });
 
   const removing = removeMcpServers(client, servers);
 

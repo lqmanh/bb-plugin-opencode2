@@ -3,13 +3,20 @@ import test from "node:test";
 import {
   approvalPermissionReply,
   automaticPermissionReply,
+  backgroundTaskDescription,
+  backgroundTaskItem,
+  backgroundTaskKey,
+  backgroundTaskTaskType,
+  backgroundTaskUsage,
   forkBoundaryRetainingThrough,
   isManualCompactionTurn,
   itemKeyForOpenItem,
+  LOCAL_AGENT_TASK_TYPE,
   manualCompactionOutcomeDeltas,
   manualCompactionStartDeltas,
   MAX_TIMELINE_DELTA_BYTES,
   nextMessageIdAfterCheckpoint,
+  parseBackgroundCompletion,
   promptBody,
   providerFailureDeltas,
   revertTargetRetainingThrough,
@@ -355,4 +362,111 @@ test("confirms steered input so BB clears Steer pending", () => {
     clientRequestId: "client_1",
     providerTurnId: "turn_1",
   });
+});
+
+test("maps background shells and subagents to visible task rows", () => {
+  const shell = backgroundTaskItem({
+    familyId: backgroundTaskKey("call_shell"),
+    taskType: backgroundTaskTaskType("bash"),
+    description: backgroundTaskDescription("bash", { command: "npm test" }),
+    outputFile: "/tmp/shell.out",
+  });
+  assert.deepEqual(shell, {
+    type: "backgroundTask",
+    familyId: "bg:call_shell",
+    taskType: "local_bash",
+    description: "npm test",
+    status: "pending",
+    taskStatus: "running",
+    skipTranscript: false,
+    foreground: false,
+    outputFile: "/tmp/shell.out",
+  });
+
+  const agent = backgroundTaskItem({
+    familyId: backgroundTaskKey("call_agent"),
+    taskType: backgroundTaskTaskType("subagent"),
+    description: backgroundTaskDescription("subagent", {
+      agent: "explore",
+      description: "List files",
+    }),
+  });
+  assert.equal(agent.taskType, LOCAL_AGENT_TASK_TYPE);
+  assert.equal(agent.description, "explore: List files");
+  assert.equal(agent.skipTranscript, false);
+  assert.equal(agent.foreground, false);
+  assert.equal("outputFile" in agent, false);
+});
+
+test("parses shell and subagent completion synthetics with tag fallbacks", () => {
+  assert.deepEqual(
+    parseBackgroundCompletion({
+      text: '<shell id="job_1" state="completed" command="npm test">\nok\n</shell>',
+      metadata: {
+        source: "shell",
+        shellID: "shell_1",
+        jobID: "job_1",
+        state: "completed",
+        exit: 0,
+      },
+    }),
+    {
+      kind: "shell",
+      id: "job_1",
+      shellId: "shell_1",
+      jobId: "job_1",
+      state: "completed",
+      text: "ok",
+      exit: 0,
+    },
+  );
+
+  assert.deepEqual(
+    parseBackgroundCompletion({
+      text: '<subagent sessionID="ses_child" state="error" description="List files">\nboom\n</subagent>',
+      metadata: { source: "subagent" },
+    }),
+    {
+      kind: "subagent",
+      id: "ses_child",
+      state: "error",
+      text: "boom",
+    },
+  );
+
+  assert.deepEqual(
+    parseBackgroundCompletion({
+      text: "<task_result>done</task_result>",
+      metadata: { childID: "ses_child" },
+    }),
+    {
+      kind: "subagent",
+      id: "ses_child",
+      childId: "ses_child",
+      state: "completed",
+      text: "<task_result>done</task_result>",
+    },
+  );
+
+  assert.equal(parseBackgroundCompletion({ text: "plain" }), undefined);
+});
+
+test("emits backgroundTask usage only when all three fields are available", () => {
+  assert.equal(backgroundTaskUsage(undefined, 100, 200), undefined);
+  assert.deepEqual(
+    backgroundTaskUsage(
+      { input: 1, output: 2, reasoning: 3, cacheRead: 4, cacheWrite: 5 },
+      100,
+      250,
+    ),
+    { totalTokens: 15, toolUses: 0, durationMs: 150 },
+  );
+  assert.deepEqual(
+    backgroundTaskUsage(
+      { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      250,
+      100,
+    ),
+    { totalTokens: 1, toolUses: 0, durationMs: 0 },
+  );
 });

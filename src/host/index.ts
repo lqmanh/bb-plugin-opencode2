@@ -77,7 +77,10 @@ export {
   addBbToolsRule,
   ensureBbToolsRule,
 } from "./opencode/opencode-config.ts";
-export { experimental_providerBridge } from "./bridge/provider-bridge.ts";
+export {
+  experimental_providerBridge,
+  stopSessionForIntent,
+} from "./bridge/provider-bridge.ts";
 export {
   agentOptionChoice,
   planAgentTransition,
@@ -103,8 +106,15 @@ export {
   timelineDeltasForEmission,
 } from "./timeline/timeline.ts";
 export {
+  backgroundTaskDescription,
+  backgroundTaskItem,
+  backgroundTaskKey,
+  backgroundTaskTaskType,
+  backgroundTaskUsage,
   dynamicToolRow,
+  LOCAL_AGENT_TASK_TYPE,
   metadataFileChanges,
+  parseBackgroundCompletion,
   toolRow,
   touchedPaths,
   workspacePath,
@@ -130,6 +140,10 @@ export default experimental_defineHostEntry({
           warn: (message) => process.stderr.write(`[opencode2] ${message}\n`),
         },
       ).answer;
+    },
+    async backgroundSession(input, context) {
+      openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      return openCodeServer.backgroundSession(input.threadId);
     },
     async getStatus(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);

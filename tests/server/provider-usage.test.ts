@@ -6,6 +6,8 @@ import {
   makeHostResponse,
   type ExperimentalFakeHostRpcCall,
 } from "@get-bb/plugin-sdk/testing";
+import { createFakeOpenCodeClient } from "../support/opencode-client.fixture.ts";
+import plugin from "../../src/server/index.ts";
 import {
   aggregateUsageSnapshots,
   getProviderUsage,
@@ -21,7 +23,6 @@ import {
   usageResources,
   type ProviderUsageResourcePayload,
 } from "../../src/server/provider-usage.ts";
-import plugin from "../../src/server/index.ts";
 import {
   OPENCODE_PROVIDER_ID,
   type UsageErrorCode,
@@ -61,7 +62,7 @@ function fakeApi(options: {
 } {
   const pluginCalls: unknown[] = [];
   const rpcCalls: RpcCall[] = [];
-  const client = {
+  const client = createFakeOpenCodeClient({
     plugin: {
       list: async (input: unknown) => {
         pluginCalls.push(input);
@@ -75,7 +76,7 @@ function fakeApi(options: {
         return { output: options.output };
       },
     },
-  } as unknown as OpenCodeClient;
+  });
   return { api: async () => client, pluginCalls, rpcCalls };
 }
 

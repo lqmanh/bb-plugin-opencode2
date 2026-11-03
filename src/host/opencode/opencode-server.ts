@@ -617,8 +617,48 @@ export class OpenCodeServer {
     await this.eventRouter.reconcileChildSessions(session);
   }
 
+  async reconcileBackgroundTasks(session: SessionState): Promise<void> {
+    await this.eventRouter.reconcileBackgroundTasks(session);
+  }
+
   clearChildSessions(providerThreadId?: string): void {
     this.eventRouter.clearChildSessions(providerThreadId);
+  }
+
+  clearBackgroundTasks(session: SessionState): void {
+    this.eventRouter.clearBackgroundTasks(session);
+  }
+
+  async backgroundSession(threadId: string): Promise<{ ok: true }> {
+    const providerThreadId =
+      sessions.get(threadId)?.providerThreadId ??
+      (await this.lookupSessionRegistration(threadId))?.providerThreadId;
+    if (!providerThreadId)
+      throw new Error("No OpenCode session is registered for this thread");
+    const api = await this.api();
+    await api.session.background({ sessionID: providerThreadId });
+    return { ok: true };
+  }
+
+  async stopBackgroundTasks(session: SessionState): Promise<void> {
+    const tasks = [...(session.backgroundTasks?.values() ?? [])].filter(
+      (task) => !task.settled,
+    );
+    if (tasks.length === 0) return;
+    const api = await this.api().catch(() => undefined);
+    await Promise.allSettled(
+      tasks.map(async (task) => {
+        if (!api) return;
+        if (task.shellId)
+          await api.shell.remove({
+            id: task.shellId,
+            location: { directory: session.cwd },
+          });
+        else if (task.childSessionId)
+          await api.session.interrupt({ sessionID: task.childSessionId });
+      }),
+    );
+    this.eventRouter.interruptBackgroundTasks(session, "Thread stopped");
   }
 
   private readonly expectedArchiveEvents = new Map<
@@ -952,9 +992,10 @@ export class OpenCodeServer {
 
   private async reconcileChildSessionsForSessions(): Promise<void> {
     await Promise.allSettled(
-      [...sessions.values()].map((session) =>
+      [...sessions.values()].flatMap((session) => [
         this.reconcileChildSessions(session),
-      ),
+        this.reconcileBackgroundTasks(session),
+      ]),
     );
   }
 

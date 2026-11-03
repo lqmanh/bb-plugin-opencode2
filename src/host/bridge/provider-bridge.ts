@@ -51,7 +51,10 @@ import {
   installationStatus,
   providerHealth,
 } from "../opencode/maintenance.ts";
-import { openCodeServer } from "../opencode/opencode-server.ts";
+import {
+  openCodeServer,
+  type OpenCodeServer,
+} from "../opencode/opencode-server.ts";
 import { providerUsageAggregate } from "../opencode/opencode-usage.ts";
 import {
   hasCommandMention,
@@ -87,6 +90,37 @@ import {
 } from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
+
+type StopSessionClient = Pick<
+  OpenCodeServer,
+  "stopBackgroundTasks" | "finish" | "clearBackgroundTasks"
+> & {
+  api(): Promise<{
+    session: {
+      interrupt(input: { sessionID: string }): Promise<unknown>;
+    };
+  }>;
+};
+
+/** `release` leaves OpenCode work alone; `interrupt` stops it, background included. */
+export async function stopSessionForIntent(
+  session: SessionState | undefined,
+  intent: "interrupt" | "release",
+  client: StopSessionClient = openCodeServer,
+) {
+  if (!session) return;
+  if (intent === "release") {
+    client.clearBackgroundTasks(session);
+    return;
+  }
+  await client.stopBackgroundTasks(session);
+  const api = await client.api().catch(() => undefined);
+  if (api)
+    await api.session
+      .interrupt({ sessionID: session.providerThreadId })
+      .catch(() => {});
+  await client.finish(session, "interrupted");
+}
 
 let configuredSkillFiles: Map<string, string> | undefined;
 let configuredSkillNames: Set<string> | undefined;
@@ -672,15 +706,10 @@ async function handle(request: RecordValue) {
       }
     }
     case "thread/stop": {
-      const session = sessions.get(params.threadId);
-      if (session) {
-        const api = await openCodeServer.api().catch(() => undefined);
-        if (api)
-          await api.session
-            .interrupt({ sessionID: session.providerThreadId })
-            .catch(() => {});
-        await openCodeServer.finish(session, "interrupted");
-      }
+      // Release leaves OpenCode work and its task rows alone. BB core settles
+      // dangling rows after the host releases the thread; clearing local
+      // tracking here avoids a duplicate close on late completion.
+      await stopSessionForIntent(sessions.get(params.threadId), params.intent);
       sendResult(request.id, { ok: true });
       return;
     }
@@ -720,6 +749,7 @@ async function handle(request: RecordValue) {
             .catch(() => {});
       }
       if (providerThreadId) openCodeServer.clearChildSessions(providerThreadId);
+      if (session) openCodeServer.clearBackgroundTasks(session);
       sessions.delete(params.threadId);
       if (providerThreadId) sessionsByProviderId.delete(providerThreadId);
       // Drop the persisted mapping so a later thread/fork for this BB thread

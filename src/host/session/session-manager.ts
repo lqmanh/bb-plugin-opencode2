@@ -104,6 +104,9 @@ export function sessionFromParams(
     model,
     agentChoice: nativeAgentChoice(options),
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    backgroundTasks: new Map(),
+    pendingBackgroundCompletions: new Map(),
+    shellOutputFiles: new Map(),
   };
 }
 
@@ -266,8 +269,13 @@ export async function registerSession(session: SessionState) {
     session.usage = previous.usage;
     session.usageCost = previous.usageCost;
     session.lastUsage = previous.lastUsage;
+    session.backgroundTasks = previous.backgroundTasks;
+    session.pendingBackgroundCompletions =
+      previous.pendingBackgroundCompletions;
+    session.shellOutputFiles = previous.shellOutputFiles;
   } else if (previous) {
     openCodeServer.clearChildSessions(previous.providerThreadId);
+    openCodeServer.clearBackgroundTasks(previous);
   }
   if (!session.agent && sameProvider && previous)
     session.agent = previous.agent;
@@ -334,11 +342,18 @@ export async function registerSession(session: SessionState) {
         `[opencode2] Could not persist OpenCode session mapping: ${errorMessage(error)}\n`,
       );
     });
-  await openCodeServer.reconcileChildSessions(session).catch((error) => {
-    process.stderr.write(
-      `[opencode2] Could not reconcile OpenCode child usage: ${errorMessage(error)}\n`,
-    );
-  });
+  await Promise.all([
+    openCodeServer.reconcileChildSessions(session).catch((error) => {
+      process.stderr.write(
+        `[opencode2] Could not reconcile OpenCode child usage: ${errorMessage(error)}\n`,
+      );
+    }),
+    openCodeServer.reconcileBackgroundTasks(session).catch((error) => {
+      process.stderr.write(
+        `[opencode2] Could not reconcile OpenCode background tasks: ${errorMessage(error)}\n`,
+      );
+    }),
+  ]);
 }
 
 export async function unregisterSession(
@@ -347,6 +362,7 @@ export async function unregisterSession(
 ): Promise<void> {
   removeSessionEntries(session);
   openCodeServer.clearChildSessions(session.providerThreadId);
+  openCodeServer.clearBackgroundTasks(session);
   session.active?.abortController.abort();
   await releaseDynamicTools(session, reason);
   await openCodeServer
@@ -388,6 +404,7 @@ export async function shutdownSessions(reason: string): Promise<void> {
 
   const removals = currentSessions.flatMap((session) => {
     session.active?.abortController.abort();
+    openCodeServer.clearBackgroundTasks(session);
     const server = stopDynamicTools(session, reason);
     return server ? [server] : [];
   });

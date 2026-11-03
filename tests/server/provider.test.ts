@@ -3,13 +3,20 @@ import test from "node:test";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "../../src/server/index.ts";
 
-test("registers OpenCode v2 as an installed checkpoint-capable provider with every BB permission mode", async () => {
-  const { bb, harness } = createFakePluginHost({
+async function loadProvider(
+  options: Parameters<typeof createFakePluginHost>[0] = {},
+) {
+  const fake = createFakePluginHost({
     pluginId: "opencode2",
     experimental_hostEntry: true,
+    ...options,
   });
+  await plugin(fake.bb);
+  return fake;
+}
 
-  await plugin(bb);
+test("registers OpenCode v2 as an installed checkpoint-capable provider with every BB permission mode", async () => {
+  const { harness } = await loadProvider();
 
   const provider = harness.inspection.registrations.providerRegistrations.find(
     (registration) => registration.id === "opencode2",
@@ -45,12 +52,7 @@ test("registers OpenCode v2 as an installed checkpoint-capable provider with eve
 });
 
 test("derives provider options from the subagent setting", async () => {
-  const { bb, harness } = createFakePluginHost({
-    pluginId: "opencode2",
-    experimental_hostEntry: true,
-  });
-
-  await plugin(bb);
+  const { harness } = await loadProvider();
 
   const provider = harness.inspection.registrations.providerRegistrations.find(
     (registration) => registration.id === "opencode2",
@@ -65,5 +67,42 @@ test("derives provider options from the subagent setting", async () => {
       settings: { subagentsDisabled: true },
     }),
     { disableSubagents: true },
+  );
+});
+
+test("registers the background action RPC and routes it to the thread host", async () => {
+  const { harness } = await loadProvider({
+    sdk: {
+      threads: {
+        list: (async () => [
+          {
+            id: "thr_1",
+            providerId: "opencode2",
+            environmentHostId: "host_1",
+          },
+        ]) as never,
+      },
+    },
+    experimental_callHostRpc: () => ({ ok: true }),
+  });
+
+  assert.ok(
+    harness.inspection.registrations.rpcMethods.includes("backgroundThread"),
+  );
+  assert.deepEqual(
+    await harness.behavior.callRpc("backgroundThread", { threadId: "thr_1" }),
+    { ok: true },
+  );
+  assert.equal(harness.inspection.experimental_hostRpcCalls.length, 1);
+  assert.equal(
+    harness.inspection.experimental_hostRpcCalls[0].method,
+    "backgroundSession",
+  );
+  assert.deepEqual(harness.inspection.experimental_hostRpcCalls[0].input, {
+    threadId: "thr_1",
+  });
+  assert.equal(
+    harness.inspection.experimental_hostRpcCalls[0].hostId,
+    "host_1",
   );
 });

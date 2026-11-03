@@ -11,6 +11,7 @@ import {
   inputRecord,
   stringValue,
   type ActiveTurn,
+  type InteractionContext,
   type OpenCodeApi,
   type OpenCodePermissionReply,
   type OpenCodeRecord,
@@ -329,6 +330,57 @@ export function answerFormFields(
   return { answer, summary };
 }
 
+export function interactiveTurn(
+  session: SessionState,
+  active: ActiveTurn,
+): InteractionContext {
+  return {
+    providerTurnId: active.providerTurnId,
+    formSessionId: session.providerThreadId,
+    background: false,
+    abortController: active.abortController,
+    opened: active.opened,
+    openQuestions: active.openQuestions,
+    settledTools: active.settledTools,
+    questionWaiters: active.questionWaiters,
+    earlyQuestionForms: active.earlyQuestionForms,
+    settledForms: active.settledForms,
+    ownForms: active.ownForms,
+    settledPermissions: active.settledPermissions,
+    ownPermissionReplies: active.ownPermissionReplies,
+  };
+}
+
+function activeInteraction(session: SessionState) {
+  return session.active ? interactiveTurn(session, session.active) : undefined;
+}
+
+export function backgroundInteraction(
+  formSessionId: string,
+): InteractionContext {
+  return {
+    providerTurnId: null,
+    formSessionId,
+    background: true,
+    abortController: new AbortController(),
+    opened: new Map(),
+    openQuestions: new Map(),
+    settledTools: new Set(),
+    questionWaiters: new Map(),
+    earlyQuestionForms: new Map(),
+    settledForms: new Map(),
+    ownForms: new Set(),
+    settledPermissions: new Set(),
+    ownPermissionReplies: new Set(),
+  };
+}
+
+function turnId(context: InteractionContext) {
+  return context.providerTurnId
+    ? { providerTurnId: context.providerTurnId }
+    : {};
+}
+
 export class OpenCodeInteractions {
   private readonly interactions: InteractionRequest;
 
@@ -352,9 +404,14 @@ export class OpenCodeInteractions {
    * elsewhere (another client, or OpenCode cancelled it), and an unhandled
    * rejection would take the whole bridge process down.
    */
-  async handlePermission(session: SessionState, data: RecordValue) {
+  async handlePermission(
+    session: SessionState,
+    data: RecordValue,
+    context: InteractionContext | undefined = activeInteraction(session),
+  ) {
+    if (!context || context.abortController.signal.aborted) return;
     try {
-      await this.resolvePermission(session, data);
+      await this.resolvePermission(session, data, context);
     } catch (error) {
       process.stderr.write(
         `[opencode2] Could not answer an OpenCode permission request: ${errorMessage(error)}\n`,
@@ -367,18 +424,22 @@ export class OpenCodeInteractions {
    * The provider bridge cannot cancel a provider interaction, so keep the
    * settled request here and skip a stale reply when BB answers later.
    */
-  handlePermissionReplied(session: SessionState, data: RecordValue) {
+  handlePermissionReplied(
+    session: SessionState,
+    data: RecordValue,
+    context: InteractionContext | undefined = activeInteraction(session),
+  ) {
     const requestId = stringValue(data.requestID);
     const reply = stringValue(data.reply);
     if (
       !requestId ||
-      (reply !== "once" && reply !== "always" && reply !== "reject")
+      (reply !== "once" && reply !== "always" && reply !== "reject") ||
+      !context ||
+      context.abortController.signal.aborted
     )
       return;
-    const active = session.active;
-    if (!active || active.finishing) return;
-    if (active.ownPermissionReplies.delete(requestId)) return;
-    active.settledPermissions.add(requestId);
+    if (context.ownPermissionReplies.delete(requestId)) return;
+    context.settledPermissions.add(requestId);
   }
 
   /**
@@ -390,25 +451,26 @@ export class OpenCodeInteractions {
     session: SessionState,
     type: "form.replied" | "form.cancelled",
     data: RecordValue,
+    context: InteractionContext | undefined = activeInteraction(session),
   ) {
     const formId = stringValue(data.id);
-    if (!formId) return;
-    const active = session.active;
-    if (!active || active.finishing) return;
-    if (active.ownForms.delete(formId)) return;
-    active.settledForms.set(
+    if (!formId || !context || context.abortController.signal.aborted) return;
+    if (context.ownForms.delete(formId)) return;
+    context.settledForms.set(
       formId,
       type === "form.replied" ? "answered" : "cancelled",
     );
   }
 
-  private async resolvePermission(session: SessionState, data: RecordValue) {
-    const active = session.active;
-    if (!active) return;
+  private async resolvePermission(
+    session: SessionState,
+    data: RecordValue,
+    context: InteractionContext,
+  ) {
     const sessionId = stringValue(data.sessionID);
     const requestId = stringValue(data.id);
     if (!sessionId || !requestId) return;
-    if (active.settledPermissions.delete(requestId)) return;
+    if (context.settledPermissions.delete(requestId)) return;
     const action = stringValue(data.action) ?? "";
     const automaticReply = automaticPermissionReply(
       session.permissionMode,
@@ -416,7 +478,7 @@ export class OpenCodeInteractions {
       action,
     );
     if (automaticReply) {
-      await this.replyPermission(active, sessionId, requestId, automaticReply);
+      await this.replyPermission(context, sessionId, requestId, automaticReply);
       return;
     }
     const tool = action || "OpenCode permission";
@@ -449,33 +511,32 @@ export class OpenCodeInteractions {
         {
           providerThreadId: session.providerThreadId,
           threadId: session.bbThreadId,
-          turnId: active.providerTurnId,
+          turnId: context.providerTurnId,
           payload,
         },
-        { signal: active.abortController.signal },
+        { signal: context.abortController.signal },
       );
       const decision = result?.decision;
-      if (active.settledPermissions.delete(requestId)) return;
-      const reply =
-        session.active === active
-          ? approvalPermissionReply(decision)
-          : "reject";
-      await this.replyPermission(active, sessionId, requestId, reply);
+      if (context.settledPermissions.delete(requestId)) return;
+      const reply = context.abortController.signal.aborted
+        ? "reject"
+        : approvalPermissionReply(decision);
+      await this.replyPermission(context, sessionId, requestId, reply);
     } catch {
-      if (active.settledPermissions.delete(requestId)) return;
-      await this.replyPermission(active, sessionId, requestId, "reject").catch(
+      if (context.settledPermissions.delete(requestId)) return;
+      await this.replyPermission(context, sessionId, requestId, "reject").catch(
         () => {},
       );
     }
   }
 
   private async replyPermission(
-    active: ActiveTurn,
+    context: InteractionContext,
     sessionId: string,
     requestId: string,
     decision: OpenCodePermissionReply,
   ) {
-    active.ownPermissionReplies.add(requestId);
+    context.ownPermissionReplies.add(requestId);
     try {
       const api = await this.api();
       await api.permission.reply({
@@ -484,69 +545,75 @@ export class OpenCodeInteractions {
         ...permissionReplyBody(decision),
       });
     } catch (error) {
-      active.ownPermissionReplies.delete(requestId);
+      context.ownPermissionReplies.delete(requestId);
       throw error;
     }
   }
 
   /** Route a `form.created` event to the question tool that raised it. */
-  handleCreatedForm(session: SessionState, form: RecordValue) {
-    const active = session.active;
-    if (!active) return;
+  handleCreatedForm(
+    session: SessionState,
+    form: RecordValue,
+    context: InteractionContext | undefined = activeInteraction(session),
+  ) {
+    if (!context || context.abortController.signal.aborted) return;
     const callId = this.questionCallId(form);
     if (callId) {
-      const waiter = active.questionWaiters.get(callId);
+      const waiter = context.questionWaiters.get(callId);
       if (waiter) {
-        active.questionWaiters.delete(callId);
+        context.questionWaiters.delete(callId);
         waiter.resolve(form);
         return;
       }
-      if (inputRecord(form.metadata).kind === "question") {
-        active.earlyQuestionForms.set(callId, form);
+      if (
+        !context.background &&
+        inputRecord(form.metadata).kind === "question"
+      ) {
+        context.earlyQuestionForms.set(callId, form);
         return;
       }
     }
     const formId = stringValue(form.id);
     if (!formId) return;
     const key = `form:${formId}`;
-    if (active.openQuestions.has(key) || active.settledTools.has(key)) return;
-    if (!active.opened.has(key)) {
+    if (context.openQuestions.has(key) || context.settledTools.has(key)) return;
+    if (!context.opened.has(key)) {
       const item = { type: "tool", tool: "question", args: {} };
-      active.opened.set(key, item);
+      context.opened.set(key, item);
       this.emitTimeline(session.bbThreadId, [
         {
           kind: "item.open",
           key: itemKey(key, "tool"),
           item,
-          providerTurnId: active.providerTurnId,
+          ...turnId(context),
         },
       ]);
     }
-    void this.answerQuestionForm(session, active, key, form).catch(() => {});
+    void this.answerQuestionForm(session, context, key, form).catch(() => {});
   }
 
-  cancelQuestionWaiters(active: ActiveTurn) {
-    for (const waiter of active.questionWaiters.values())
+  cancelQuestionWaiters(context: InteractionContext) {
+    for (const waiter of context.questionWaiters.values())
       waiter.resolve(undefined);
-    active.questionWaiters.clear();
-    active.earlyQuestionForms.clear();
+    context.questionWaiters.clear();
+    context.earlyQuestionForms.clear();
   }
 
   private waitForQuestionForm(
-    active: ActiveTurn,
+    context: InteractionContext,
     callId: string,
   ): Promise<RecordValue | undefined> {
-    const early = active.earlyQuestionForms.get(callId);
+    const early = context.earlyQuestionForms.get(callId);
     if (early) {
-      active.earlyQuestionForms.delete(callId);
+      context.earlyQuestionForms.delete(callId);
       return Promise.resolve(early);
     }
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
-        active.questionWaiters.delete(callId);
+        context.questionWaiters.delete(callId);
         resolve(undefined);
       }, QUESTION_WAIT_TIMEOUT_MS);
-      active.questionWaiters.set(callId, {
+      context.questionWaiters.set(callId, {
         resolve(form) {
           clearTimeout(timeout);
           resolve(form);
@@ -556,42 +623,41 @@ export class OpenCodeInteractions {
   }
 
   async cancelQuestionForm(
-    session: SessionState,
-    active: ActiveTurn,
+    context: InteractionContext,
     formId: string,
     message?: string,
   ) {
-    active.ownForms.add(formId);
+    context.ownForms.add(formId);
     await this.api()
       .then((api) =>
         api.session.form.cancel({
-          sessionID: session.providerThreadId,
+          sessionID: context.formSessionId,
           formID: formId,
           ...(message ? { message } : {}),
         }),
       )
       .catch(() => {
-        active.ownForms.delete(formId);
+        context.ownForms.delete(formId);
       });
   }
 
   private closeQuestion(
     session: SessionState,
-    active: ActiveTurn,
+    context: InteractionContext,
     callId: string,
     status: "completed" | "failed",
     text: string,
   ) {
-    const item = active.opened.get(callId) ?? {
+    const item = context.opened.get(callId) ?? {
       type: "tool",
       tool: "question",
       args: {},
     };
     if (status === "completed") item.result = text;
     else item.error = text;
-    active.opened.delete(callId);
-    active.openQuestions.delete(callId);
-    active.settledTools.add(callId);
+    context.opened.delete(callId);
+    context.openQuestions.delete(callId);
+    context.settledTools.add(callId);
     this.emitTimeline(session.bbThreadId, [
       {
         kind: "item.close",
@@ -599,22 +665,22 @@ export class OpenCodeInteractions {
         status,
         ...(status === "completed" ? { resultText: text } : {}),
         item,
-        providerTurnId: active.providerTurnId,
+        ...turnId(context),
       },
     ]);
   }
 
   private closeExternalForm(
     session: SessionState,
-    active: ActiveTurn,
+    context: InteractionContext,
     callId: string,
     formId: string,
     result: "answered" | "cancelled",
   ) {
-    active.settledForms.delete(formId);
+    context.settledForms.delete(formId);
     this.closeQuestion(
       session,
-      active,
+      context,
       callId,
       result === "answered" ? "completed" : "failed",
       result === "answered" ? "Answered in OpenCode" : "Cancelled in OpenCode",
@@ -626,36 +692,37 @@ export class OpenCodeInteractions {
     active: ActiveTurn,
     callId: string,
   ) {
-    const form = await this.waitForQuestionForm(active, callId);
-    if (session.active !== active || !active.opened.has(callId)) return;
+    const context = interactiveTurn(session, active);
+    const form = await this.waitForQuestionForm(context, callId);
+    if (session.active !== active || !context.opened.has(callId)) return;
     if (!form) {
       this.closeQuestion(
         session,
-        active,
+        context,
         callId,
         "failed",
         "OpenCode question went unanswered (no prompt received)",
       );
       return;
     }
-    await this.answerQuestionForm(session, active, callId, form);
+    await this.answerQuestionForm(session, context, callId, form);
   }
 
   private async failQuestion(
     session: SessionState,
-    active: ActiveTurn,
+    context: InteractionContext,
     callId: string,
     formId: string,
     message: string,
     cancelMessage?: string,
   ) {
-    await this.cancelQuestionForm(session, active, formId, cancelMessage);
-    this.closeQuestion(session, active, callId, "failed", message);
+    await this.cancelQuestionForm(context, formId, cancelMessage);
+    this.closeQuestion(session, context, callId, "failed", message);
   }
 
   private async answerQuestionForm(
     session: SessionState,
-    active: ActiveTurn,
+    context: InteractionContext,
     callId: string,
     form: RecordValue,
   ) {
@@ -663,24 +730,24 @@ export class OpenCodeInteractions {
     if (!formId) {
       this.closeQuestion(
         session,
-        active,
+        context,
         callId,
         "failed",
         "OpenCode question did not include a form ID",
       );
       return;
     }
-    active.openQuestions.set(callId, formId);
-    const settled = active.settledForms.get(formId);
+    context.openQuestions.set(callId, formId);
+    const settled = context.settledForms.get(formId);
     if (settled) {
-      this.closeExternalForm(session, active, callId, formId, settled);
+      this.closeExternalForm(session, context, callId, formId, settled);
       return;
     }
     const plan = planFormQuestions(form);
     if ("error" in plan) {
       await this.failQuestion(
         session,
-        active,
+        context,
         callId,
         formId,
         plan.error,
@@ -695,19 +762,20 @@ export class OpenCodeInteractions {
         {
           providerThreadId: session.providerThreadId,
           threadId: session.bbThreadId,
-          turnId: active.providerTurnId,
+          turnId: context.providerTurnId,
           payload: { kind: "user_question", questions: plan.questions },
         },
-        { signal: active.abortController.signal },
+        { signal: context.abortController.signal },
       );
       resolution = result;
     } catch {
       resolution = undefined;
     }
-    if (session.active !== active || !active.opened.has(callId)) return;
-    const external = active.settledForms.get(formId);
+    if (context.abortController.signal.aborted || !context.opened.has(callId))
+      return;
+    const external = context.settledForms.get(formId);
     if (external) {
-      this.closeExternalForm(session, active, callId, formId, external);
+      this.closeExternalForm(session, context, callId, formId, external);
       return;
     }
     const answers: RecordValue | undefined =
@@ -715,7 +783,7 @@ export class OpenCodeInteractions {
     if (!answers) {
       await this.failQuestion(
         session,
-        active,
+        context,
         callId,
         formId,
         "Question dismissed",
@@ -726,7 +794,7 @@ export class OpenCodeInteractions {
     if ("error" in mapped) {
       await this.failQuestion(
         session,
-        active,
+        context,
         callId,
         formId,
         mapped.error,
@@ -736,23 +804,23 @@ export class OpenCodeInteractions {
     }
     try {
       const api = await this.api();
-      active.ownForms.add(formId);
+      context.ownForms.add(formId);
       await api.session.form.reply({
-        sessionID: session.providerThreadId,
+        sessionID: context.formSessionId,
         formID: formId,
         answer: mapped.answer,
       });
     } catch (error) {
-      active.ownForms.delete(formId);
-      const late = active.settledForms.get(formId);
+      context.ownForms.delete(formId);
+      const late = context.settledForms.get(formId);
       if (late) {
-        this.closeExternalForm(session, active, callId, formId, late);
+        this.closeExternalForm(session, context, callId, formId, late);
         return;
       }
       const message = errorMessage(error);
       await this.failQuestion(
         session,
-        active,
+        context,
         callId,
         formId,
         message,
@@ -762,7 +830,7 @@ export class OpenCodeInteractions {
     }
     this.closeQuestion(
       session,
-      active,
+      context,
       callId,
       "completed",
       mapped.summary.join("\n"),

@@ -13,8 +13,9 @@ rule winning. `session.update` replaces the session ruleset.
 Permission actions are tool names. MCP tools use `<server>_<tool>`, which is how
 `bb_opencode2_*` rules hide the per-thread BB servers.
 
-The bridge only answers `permission.asked` while a turn is active; otherwise it
-ignores the request.
+The bridge answers `permission.asked` for the active turn and for background
+children after their parent turn; foreground children without an active turn are
+ignored.
 
 ## Events
 
@@ -46,6 +47,43 @@ get the new status.
 
 Compaction also accepts legacy `session.next.compaction.*` names and
 `session.message.updated` with a compaction message.
+
+## Background tasks
+
+A shell with `background: true` succeeds with `metadata.status: "running"` and
+`metadata.shellID`; the command is still running. `session.shell.started` and
+`shell.created` carry its output file in `shell.file`. Completion is a
+`session.synthetic` with `<shell id="…" state="…" command="…">…</shell>` and
+metadata `{source:"shell", shellID, jobID?, state, exit?, signal?, timeout?}`,
+or `session.shell.ended`/`shell.exited`.
+
+A subagent with `background: true` succeeds with `metadata.status: "running"`
+and the child `metadata.sessionID`. Completion is a parent `session.synthetic`
+with `<subagent sessionID="…" state="…" description="…">…</subagent>` and
+metadata `{source:"subagent", childID, agent, state}`. The child stays in the
+shared `ChildSessionRecord` registry, so its usage, permissions, and forms
+survive the spawning turn.
+
+Both render as thread-scoped `backgroundTask` rows (`local_bash`, `local_agent`)
+with `skipTranscript: false` and `foreground: false`. Rows open with the
+spawning turn and close at thread scope, so an idle completion still lands. A
+foreground command or delegation that OpenCode backgrounds is closed as
+completed and replaced by one task row. Fast completions are buffered until the
+tool success supplies the shell or child ID; duplicate and late completions are
+ignored. `subagentsDisabled` still denies subagents, while background shells
+keep working; a denied subagent stays a failed delegation row.
+
+`POST /api/session/:id/background` (`session.background`) backgrounds every
+active foreground backgroundable tool. It is all-or-nothing, returns no count,
+and is a no-op when nothing is blocking. The plugin exposes it as a thread menu
+action and never calls it automatically.
+
+`thread/stop` with `intent:"interrupt"` stops background shells and child
+sessions before the parent; `release` leaves OpenCode work alone and BB settles
+dangling rows. On reconnect, the bridge reads recent `session.synthetic`
+messages and closes missed completions. A worker restart is different: BB
+settles open rows and the plugin does not recreate them, so later completions
+are ignored.
 
 ## Diffs
 
@@ -114,6 +152,12 @@ hydrated totals merge monotonically.
 
 `session.step.ended` and `.failed` carry the latest request's tokens. Only the
 parent step supplies `usage.last` and the live context estimate.
+
+When a background subagent completes, its task row carries
+`usage: {totalTokens, toolUses, durationMs}` from the child registry. It is
+all-or-nothing: omitted when the child has no recorded usage. `totalTokens` sums
+input, output, reasoning, cached read, and cache write; `toolUses` is `0` until
+tracked; `durationMs` is the non-negative task duration.
 
 ## Archive and lifecycle
 

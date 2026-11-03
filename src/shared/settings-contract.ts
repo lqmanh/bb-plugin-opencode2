@@ -118,10 +118,19 @@ export const usageListSchema = z
   })
   .strict();
 
+const backgroundThreadRequestSchema = z
+  .object({ threadId: z.string().min(1) })
+  .strict();
+const backgroundThreadResultSchema = z.object({ ok: z.literal(true) }).strict();
+
 export const opencodeHostContract = defineRpcContract({
   getStatus: {
     input: z.object({}).strict(),
     output: openCodeStatusSchema,
+  },
+  backgroundSession: {
+    input: backgroundThreadRequestSchema,
+    output: backgroundThreadResultSchema,
   },
   "usage/list": {
     input: z.object({}).strict(),
@@ -146,6 +155,13 @@ export const opencodeSettingsRpcContract = defineRpcContract({
   getStatus: {
     input: z.object({}).strict(),
     output: z.object({ hosts: z.array(hostStatusSchema).max(1_000) }).strict(),
+  },
+});
+
+export const opencodeThreadRpcContract = defineRpcContract({
+  backgroundThread: {
+    input: backgroundThreadRequestSchema,
+    output: backgroundThreadResultSchema,
   },
 });
 

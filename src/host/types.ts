@@ -36,6 +36,45 @@ export type UsageTotals = {
   cacheWrite: number;
 };
 
+export function usageTotal(totals: UsageTotals) {
+  return (
+    totals.input +
+    totals.output +
+    totals.reasoning +
+    totals.cacheRead +
+    totals.cacheWrite
+  );
+}
+
+export type InteractionContext = {
+  providerTurnId: string | null;
+  formSessionId: string;
+  background: boolean;
+  abortController: AbortController;
+  opened: Map<string, OpenCodeRecord>;
+  openQuestions: Map<string, string>;
+  settledTools: Set<string>;
+  questionWaiters: Map<string, { resolve(form?: OpenCodeRecord): void }>;
+  earlyQuestionForms: Map<string, OpenCodeRecord>;
+  settledForms: Map<string, "answered" | "cancelled">;
+  ownForms: Set<string>;
+  settledPermissions: Set<string>;
+  ownPermissionReplies: Set<string>;
+};
+
+export type BackgroundTaskRecord = {
+  id: string;
+  callId: string;
+  kind: "shell" | "subagent";
+  startedAt: number;
+  settled: boolean;
+  item: OpenCodeRecord;
+  interaction: InteractionContext;
+  shellId?: string;
+  childSessionId?: string;
+  outputFile?: string;
+};
+
 /** A native subagent session, shared with background-task support. */
 export type ChildSessionRecord = {
   parentThreadId: string;
@@ -47,7 +86,7 @@ export type ChildSessionRecord = {
   };
   terminal: boolean;
   backgroundTaskId?: string;
-  background?: OpenCodeRecord;
+  background?: boolean;
 };
 
 export type ActiveTurn = {
@@ -160,6 +199,12 @@ export type SessionState = {
   usageCost?: number;
   /** Parent-only last step, used for late child usage after a turn closes. */
   lastUsage?: { tokens: UsageTotals; used: number };
+  /** OpenCode background shells and subagents shown as BB task rows. */
+  backgroundTasks?: Map<string, BackgroundTaskRecord>;
+  /** Completions that arrived before their task row was registered. */
+  pendingBackgroundCompletions?: Map<string, OpenCodeRecord>;
+  /** Full output files for OpenCode shells, keyed by shell ID. */
+  shellOutputFiles?: Map<string, string>;
 };
 
 export function isSubagentTool(name: string): boolean {

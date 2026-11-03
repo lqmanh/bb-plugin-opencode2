@@ -26,6 +26,7 @@ src/
   server/
     index.ts           BB server entry: provider metadata, settings, and RPCs
     provider-usage.ts  Provider usage RPCs
+    background-notifications.ts  Idle background completion unread notices
   host/
     index.ts           Host entry: host RPC, provider bridge, and public test helpers
     types.ts           Shared host record and session types
@@ -79,6 +80,20 @@ Inside `src/host/`:
   context meter stay parent-only. Observed usage survives the parent turn and is
   rebuilt monotonically from OpenCode after a reconnect or resume. Background
   tasks extend this registry rather than adding another child map.
+- **Native background work uses `backgroundTask` rows.** Explicit background
+  shells and subagents, and foreground tools that OpenCode backgrounds later,
+  become one thread-scoped `local_bash` or `local_agent` row. Foreground shells
+  and subagents keep their command and delegation rows. Completion, output file,
+  summary, and all-or-nothing child usage are carried on the task row.
+- **`session.background` is a user action.** OpenCode's API is session-wide and
+  all-or-nothing, and BB has no per-row action, so a thread menu action
+  backgrounds every active foreground backgroundable tool. It returns no count,
+  is a no-op when nothing is blocking, and is never called automatically.
+- **Idle background completion marks the thread unread, not the transcript.** BB
+  only marks attention on `active -> idle`/`error` and has no system-message
+  delta, so a server watcher marks a root OpenCode thread unread when its last
+  background task completes while idle and the completion is unread. A real
+  system message needs a core change.
 - **Permission modes are session rulesets.** `auto` keeps OpenCode's agent rules
   and answers remaining asks with `once`; `full` adds `*` → allow;
   `accept-edits` allows reads, searches, edits, and selected non-mutating tools,
@@ -118,8 +133,13 @@ Inside `src/host/`:
 
 - Command turns adopt the first inbox message as their checkpoint. A command
   that creates no inbox message has no rewind checkpoint.
-- Child-session questions: a subagent's question closes without its `parentRef`.
-  Cosmetic and rare.
+- Background task rows do not survive a worker restart: BB settles open rows as
+  interrupted and the plugin does not recreate rows for jobs still running.
+  Release also lets BB settle rows while OpenCode continues.
+- Idle completion can only mark the thread unread; a transcript message needs BB
+  core support, and the plugin does not fake a turn.
+- Foreground subagent forms are only handled while the parent turn is active;
+  background children keep a task-scoped context after it ends.
 - Turn reconciliation is covered by unit tests only; a dropped event stream was
   never reproduced against a live service.
 - Unknown OpenCode events are dropped rather than forwarded as diagnostics.

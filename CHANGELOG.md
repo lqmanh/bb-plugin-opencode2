@@ -5,6 +5,15 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Background shells and subagents now map to BB `backgroundTask` rows, including
+  foreground tools OpenCode moves to the background.
+- A thread menu action backgrounds all active foreground backgroundable tools in
+  an OpenCode session.
+- Idle background completions mark the thread unread, since BB does not create a
+  completion system message.
+
 ### Changed
 
 - The `allowSubagents` setting is now `subagentsDisabled` (inverted), matching

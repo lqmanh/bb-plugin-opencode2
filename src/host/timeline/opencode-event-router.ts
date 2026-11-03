@@ -1,4 +1,7 @@
-import { experimental_COMPACTION_PRESENTATION as compactionPresentation } from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  backgroundTaskItemStatus,
+  experimental_COMPACTION_PRESENTATION as compactionPresentation,
+} from "@get-bb/plugin-sdk/provider-bridge";
 import {
   AGENT_OPTION_ID,
   SESSION_OPTIONS_STATE_KIND,
@@ -10,7 +13,11 @@ import {
   notify,
 } from "../bridge/bridge-runtime.ts";
 import { withSelectedAgent } from "../opencode/models.ts";
-import { OpenCodeInteractions } from "../opencode/opencode-interactions.ts";
+import {
+  backgroundInteraction,
+  interactiveTurn,
+  OpenCodeInteractions,
+} from "../opencode/opencode-interactions.ts";
 import { toolFailureError } from "../opencode/prompt.ts";
 import { dynamicMcpServerName } from "../opencode/opencode-requests.ts";
 import {
@@ -25,29 +32,43 @@ import {
   manualCompactionOutcomeDeltas,
   providerFailureDeltas,
 } from "./timeline.ts";
+import { rememberBounded } from "../../shared/collections.ts";
 import { errorMessage } from "../../shared/errors.ts";
 import {
+  backgroundRunMetadata,
+  backgroundTaskDescription,
+  backgroundTaskItem,
+  backgroundTaskKey,
+  backgroundTaskTaskType,
+  backgroundTaskUsage,
   contentText,
   diffFileChanges,
   dynamicToolRow,
+  isBackgroundToolInput,
   metadataFileChanges,
+  parseBackgroundCompletion,
   toolRow,
   touchedPaths,
   workspacePath,
+  type BackgroundCompletion,
 } from "./tool-mapping.ts";
 import {
   ARCHIVED_SESSION_MESSAGE,
   DELETED_SESSION_MESSAGE,
   MOVED_SESSION_MESSAGE,
   inputRecord,
+  isSubagentTool,
   parseInputText,
   stringValue,
   type ActiveTurn,
+  type BackgroundTaskRecord,
   type ChildSessionRecord,
+  type InteractionContext,
   type OpenCodeApi,
   type OpenCodeRecord,
   type SessionState,
   type UsageTotals,
+  usageTotal,
 } from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
@@ -114,23 +135,13 @@ function zeroUsage(): UsageTotals {
   };
 }
 
-function totalTokens(totals: UsageTotals) {
-  return (
-    totals.input +
-    totals.output +
-    totals.reasoning +
-    totals.cacheRead +
-    totals.cacheWrite
-  );
-}
-
 function breakdownFromTotals(totals: UsageTotals) {
   return {
     inputTokens: totals.input,
     outputTokens: totals.output,
     reasoningOutputTokens: totals.reasoning,
     cachedInputTokens: totals.cacheRead,
-    totalTokens: totalTokens(totals),
+    totalTokens: usageTotal(totals),
   };
 }
 
@@ -183,6 +194,69 @@ function sameUsage(left: UsageTotals, right: UsageTotals) {
   );
 }
 
+function backgroundTasks(session: SessionState) {
+  return (session.backgroundTasks ??= new Map());
+}
+
+function pendingCompletions(session: SessionState) {
+  return (session.pendingBackgroundCompletions ??= new Map());
+}
+
+function shellOutputFiles(session: SessionState) {
+  return (session.shellOutputFiles ??= new Map());
+}
+
+function shellCompletionKey(shellId: string) {
+  return `shell:${shellId}`;
+}
+
+function childCompletionKey(childId: string) {
+  return `child:${childId}`;
+}
+
+function completionKey(completion: BackgroundCompletion) {
+  return completion.kind === "shell"
+    ? shellCompletionKey(completion.shellId ?? completion.id)
+    : childCompletionKey(completion.childId ?? completion.id);
+}
+
+function taskCompletion(
+  task: BackgroundTaskRecord,
+  state: BackgroundCompletion["state"],
+  text: string,
+): BackgroundCompletion {
+  return {
+    kind: task.kind,
+    id: task.shellId ?? task.childSessionId ?? task.id,
+    ...(task.shellId ? { shellId: task.shellId } : {}),
+    ...(task.childSessionId ? { childId: task.childSessionId } : {}),
+    state,
+    text,
+  };
+}
+
+function shellCompletion(
+  shellId: string,
+  status: string,
+  exit: number | undefined,
+  text: string,
+): BackgroundCompletion {
+  return {
+    kind: "shell",
+    id: shellId,
+    shellId,
+    state:
+      status === "killed"
+        ? "cancelled"
+        : status === "timeout"
+          ? "error"
+          : "completed",
+    text,
+    ...(exit !== undefined ? { exit } : {}),
+    ...(status === "timeout" ? { timeout: true } : {}),
+  };
+}
+
 function childUsage(children: Iterable<ChildSessionRecord>) {
   let totals = zeroUsage();
   let cost: number | undefined;
@@ -208,7 +282,7 @@ function usageSnapshotDeltas(
   const size = session.contextWindow ?? null;
   const used = active
     ? active.lastStepTokens
-      ? totalTokens(last)
+      ? usageTotal(last)
       : null
     : (session.lastUsage?.used ?? null);
   const totalCost =
@@ -261,7 +335,7 @@ export function usageDeltas(
   if (parentCost !== undefined) session.usageCost = parentCost;
   if (active?.lastStepTokens) {
     const last = usageTotals(active.lastStepTokens);
-    session.lastUsage = { tokens: last, used: totalTokens(last) };
+    session.lastUsage = { tokens: last, used: usageTotal(last) };
   }
   return usageSnapshotDeltas(session, active, parent, children);
 }
@@ -340,6 +414,11 @@ export class OpenCodeEventRouter {
   private readonly childSessions = new Map<string, ChildSessionRecord>();
   /** Child IDs by parent provider session, an index over the registry. */
   private readonly childIdsByParent = new Map<string, Set<string>>();
+  /** Shell ID -> the session and task showing it, for global shell events. */
+  private readonly shellTaskOwners = new Map<
+    string,
+    { session: SessionState; taskId: string }
+  >();
   /** Provider item ID -> the delegation call it is nested under. */
   private readonly parentRefs = new Map<string, string>();
   /** Set while handling a child-session event. */
@@ -418,6 +497,399 @@ export class OpenCodeEventRouter {
   private parentForChild(record: ChildSessionRecord) {
     const parent = this.sessionLookup.get(record.parentProviderThreadId);
     return parent?.bbThreadId === record.parentThreadId ? parent : undefined;
+  }
+
+  private backgroundTaskForCall(session: SessionState, callId: string) {
+    return backgroundTasks(session).get(backgroundTaskKey(callId));
+  }
+
+  private backgroundTaskForShell(session: SessionState, shellId: string) {
+    const owner = this.shellTaskOwners.get(shellId);
+    if (owner?.session === session) {
+      const task = backgroundTasks(session).get(owner.taskId);
+      if (task) return task;
+    }
+    for (const task of backgroundTasks(session).values())
+      if (task.shellId === shellId) return task;
+    return undefined;
+  }
+
+  private backgroundTaskForChild(session: SessionState, childId: string) {
+    const taskId = this.childSessions.get(childId)?.backgroundTaskId;
+    if (taskId) {
+      const task = backgroundTasks(session).get(taskId);
+      if (task) return task;
+    }
+    for (const task of backgroundTasks(session).values())
+      if (task.childSessionId === childId) return task;
+    return undefined;
+  }
+
+  private markBackgroundChild(
+    session: SessionState,
+    childId: string,
+    callId: string,
+    task: BackgroundTaskRecord,
+    terminal = false,
+  ) {
+    const record = this.registerChildSession(childId, session, callId, {
+      terminal,
+      updateCallId: true,
+    });
+    record.background = true;
+    record.backgroundTaskId = task.id;
+    task.childSessionId = childId;
+    task.interaction.formSessionId = childId;
+    return record;
+  }
+
+  private openBackgroundTask(
+    session: SessionState,
+    callId: string,
+    name: string,
+    input: unknown,
+    providerTurnId?: string,
+  ) {
+    const existing = this.backgroundTaskForCall(session, callId);
+    if (existing) return existing;
+    const kind = isSubagentTool(name) ? "subagent" : "shell";
+    const description = backgroundTaskDescription(name, input);
+    const item = backgroundTaskItem({
+      familyId: backgroundTaskKey(callId),
+      taskType: backgroundTaskTaskType(name),
+      description,
+    });
+    const task: BackgroundTaskRecord = {
+      id: backgroundTaskKey(callId),
+      callId,
+      kind,
+      startedAt: Date.now(),
+      settled: false,
+      item,
+      interaction: backgroundInteraction(""),
+    };
+    backgroundTasks(session).set(task.id, task);
+    this.emit(session.bbThreadId, [
+      {
+        kind: "item.open",
+        key: itemKey(task.id, "tool"),
+        item,
+        ...(providerTurnId ? { providerTurnId } : {}),
+      },
+    ]);
+    this.applyPendingBackgroundCompletion(session, task);
+    return task;
+  }
+
+  private emitBackgroundProgress(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+  ) {
+    this.emit(session.bbThreadId, [
+      {
+        kind: "item.progress",
+        key: itemKey(task.id, "tool"),
+        snapshot: task.item,
+      },
+    ]);
+  }
+
+  private updateBackgroundTask(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+    metadata: unknown,
+  ) {
+    const raw = inputRecord(metadata);
+    if (task.kind === "shell") {
+      const shellId = stringValue(raw.shellID);
+      if (!shellId) return;
+      task.shellId = shellId;
+      this.shellTaskOwners.set(shellId, {
+        session,
+        taskId: task.id,
+      });
+      const file = shellOutputFiles(session).get(shellId);
+      if (file) {
+        task.outputFile = file;
+        task.item.outputFile = file;
+      }
+    } else {
+      const childId = stringValue(raw.sessionID);
+      if (!childId) return;
+      this.markBackgroundChild(session, childId, task.callId, task);
+    }
+    this.emitBackgroundProgress(session, task);
+    this.applyPendingBackgroundCompletion(session, task);
+  }
+
+  private bufferBackgroundCompletion(
+    session: SessionState,
+    completion: BackgroundCompletion,
+  ) {
+    rememberBounded(
+      pendingCompletions(session),
+      completionKey(completion),
+      completion as OpenCodeRecord,
+      100,
+    );
+  }
+
+  private applyPendingBackgroundCompletion(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+  ) {
+    if (task.settled) return;
+    const map = pendingCompletions(session);
+    const keys = [
+      task.shellId ? shellCompletionKey(task.shellId) : undefined,
+      task.childSessionId ? childCompletionKey(task.childSessionId) : undefined,
+    ].filter((key): key is string => key !== undefined);
+    for (const key of keys) {
+      const completion = map.get(key) as BackgroundCompletion | undefined;
+      if (!completion) continue;
+      map.delete(key);
+      this.settleBackgroundTask(session, task, completion);
+      return;
+    }
+  }
+
+  private backgroundChildContext(
+    session: SessionState,
+    record: ChildSessionRecord,
+  ) {
+    const task = record.backgroundTaskId
+      ? backgroundTasks(session).get(record.backgroundTaskId)
+      : undefined;
+    return task?.interaction;
+  }
+
+  private closeInteractionContext(
+    session: SessionState,
+    context: InteractionContext,
+    status: "completed" | "interrupted" | "failed",
+    providerTurnId?: string,
+  ) {
+    context.abortController.abort();
+    for (const [, formId] of context.openQuestions)
+      void this.interactions
+        .cancelQuestionForm(context, formId)
+        .catch(() => {});
+    context.openQuestions.clear();
+    this.interactions.cancelQuestionWaiters(context);
+    for (const [id, item] of context.opened) {
+      this.emit(session.bbThreadId, [
+        {
+          kind: "item.close",
+          key: itemKeyForOpenItem(id, item),
+          status,
+          item,
+          ...(providerTurnId ? { providerTurnId } : {}),
+        },
+      ]);
+      this.parentRefs.delete(id);
+    }
+    context.opened.clear();
+  }
+
+  private settleBackgroundTask(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+    completion: BackgroundCompletion,
+  ) {
+    if (task.settled) return;
+    task.settled = true;
+    if (task.shellId) this.shellTaskOwners.delete(task.shellId);
+    this.closeInteractionContext(
+      session,
+      task.interaction,
+      completion.state === "cancelled" ? "interrupted" : "failed",
+    );
+    const completedAt = Date.now();
+    const failed =
+      completion.state !== "completed" ||
+      (completion.kind === "shell" &&
+        (completion.timeout === true ||
+          (completion.exit !== undefined && completion.exit !== 0)));
+    const interrupted = completion.state === "cancelled";
+    const taskStatus = interrupted
+      ? ("stopped" as const)
+      : failed
+        ? ("failed" as const)
+        : ("completed" as const);
+    const status = backgroundTaskItemStatus(taskStatus);
+    const summary = completion.text
+      ? boundedTimelineText(completion.text, 16 * 1024)
+      : undefined;
+    const error = failed
+      ? completion.timeout
+        ? "Command timed out"
+        : completion.exit !== undefined && completion.exit !== 0
+          ? `Exited with code ${completion.exit}`
+          : completion.text || "Background task failed"
+      : undefined;
+    const item: RecordValue = {
+      ...task.item,
+      status,
+      taskStatus,
+      ...(summary ? { summary } : {}),
+      ...(error ? { error } : {}),
+      ...(task.outputFile ? { outputFile: task.outputFile } : {}),
+    };
+    if (task.kind === "subagent" && task.childSessionId) {
+      const child = this.childSessions.get(task.childSessionId);
+      if (child) {
+        child.terminal = true;
+        const usage = backgroundTaskUsage(
+          child.usage?.tokens,
+          task.startedAt,
+          completedAt,
+        );
+        if (usage) item.usage = usage;
+      }
+    }
+    this.emit(session.bbThreadId, [
+      {
+        kind: "item.close",
+        key: itemKey(task.id, "tool"),
+        status,
+        item,
+      },
+    ]);
+  }
+
+  interruptBackgroundTasks(session: SessionState, reason?: string) {
+    for (const task of backgroundTasks(session).values()) {
+      if (task.settled) continue;
+      this.settleBackgroundTask(
+        session,
+        task,
+        taskCompletion(task, "cancelled", reason ?? "Task interrupted"),
+      );
+    }
+  }
+
+  clearBackgroundTasks(session: SessionState) {
+    for (const task of session.backgroundTasks?.values() ?? []) {
+      if (task.shellId) this.shellTaskOwners.delete(task.shellId);
+      for (const id of task.interaction.opened.keys())
+        this.parentRefs.delete(id);
+    }
+    session.backgroundTasks?.clear();
+    session.pendingBackgroundCompletions?.clear();
+    session.shellOutputFiles?.clear();
+  }
+
+  private handleSynthetic(session: SessionState, data: RecordValue) {
+    const completion = parseBackgroundCompletion(data);
+    if (!completion) return;
+    const task =
+      completion.kind === "shell"
+        ? ((completion.shellId
+            ? this.backgroundTaskForShell(session, completion.shellId)
+            : undefined) ??
+          (completion.jobId
+            ? this.backgroundTaskForShell(session, completion.jobId)
+            : undefined))
+        : this.backgroundTaskForChild(
+            session,
+            completion.childId ?? completion.id,
+          );
+    if (task) this.settleBackgroundTask(session, task, completion);
+    else this.bufferBackgroundCompletion(session, completion);
+  }
+
+  private rememberShellOutput(
+    session: SessionState,
+    shellId: string,
+    file: string,
+  ) {
+    rememberBounded(shellOutputFiles(session), shellId, file, 200);
+    for (const task of backgroundTasks(session).values())
+      if (task.shellId === shellId && !task.settled) {
+        task.outputFile = file;
+        task.item.outputFile = file;
+      }
+  }
+
+  private handleShellStarted(session: SessionState, data: RecordValue) {
+    const shell = inputRecord(data.shell ?? data.info);
+    const shellId = stringValue(shell.id);
+    const file = stringValue(shell.file);
+    if (shellId && file) this.rememberShellOutput(session, shellId, file);
+  }
+
+  private handleShellEnded(session: SessionState, data: RecordValue) {
+    const shell = inputRecord(data.shell);
+    const shellId = stringValue(shell.id);
+    if (!shellId) return;
+    const task = this.backgroundTaskForShell(session, shellId);
+    if (!task || task.settled) return;
+    const status = stringValue(shell.status) ?? "exited";
+    const exit =
+      typeof shell.exit === "number" && Number.isFinite(shell.exit)
+        ? shell.exit
+        : undefined;
+    this.settleBackgroundTask(
+      session,
+      task,
+      shellCompletion(
+        shellId,
+        status,
+        exit,
+        stringValue(data.output) ??
+          stringValue(inputRecord(data.output).output) ??
+          "",
+      ),
+    );
+  }
+
+  private handleShellExited(data: RecordValue) {
+    const shellId = stringValue(data.id);
+    if (!shellId) return;
+    const status = stringValue(data.status) ?? "exited";
+    const exit =
+      typeof data.exit === "number" && Number.isFinite(data.exit)
+        ? data.exit
+        : undefined;
+    const text =
+      status === "timeout"
+        ? "Command timed out"
+        : status === "killed"
+          ? "Command cancelled"
+          : exit !== undefined && exit !== 0
+            ? `Exited with code ${exit}`
+            : "";
+    const owner = this.shellTaskOwners.get(shellId);
+    if (owner) {
+      const task = backgroundTasks(owner.session).get(owner.taskId);
+      if (task && !task.settled)
+        this.settleBackgroundTask(
+          owner.session,
+          task,
+          shellCompletion(shellId, status, exit, text),
+        );
+      return;
+    }
+    for (const session of this.sessionLookup.values()) {
+      if (!session.backgroundTasks?.size) continue;
+      const task = this.backgroundTaskForShell(session, shellId);
+      if (!task || task.settled) continue;
+      this.settleBackgroundTask(
+        session,
+        task,
+        shellCompletion(shellId, status, exit, text),
+      );
+    }
+  }
+
+  private handleShellCreated(data: RecordValue) {
+    const info = inputRecord(data.info);
+    const shellId = stringValue(info.id);
+    const file = stringValue(info.file);
+    const sessionId = stringValue(inputRecord(info.metadata).sessionID);
+    if (!shellId || !file) return;
+    const session = sessionId ? this.sessionLookup.get(sessionId) : undefined;
+    if (session) this.rememberShellOutput(session, shellId, file);
   }
 
   private handleChildUsage(record: ChildSessionRecord, data: RecordValue) {
@@ -520,10 +992,33 @@ export class OpenCodeEventRouter {
       );
   }
 
+  /**
+   * Settle background tasks whose completion synthetic arrived while the
+   * event stream was down. The stream is live-only; the same synthetic is
+   * also durable in the session's message history.
+   */
+  async reconcileBackgroundTasks(session: SessionState): Promise<void> {
+    if (![...backgroundTasks(session).values()].some((task) => !task.settled))
+      return;
+    const api = await this.api();
+    const result = await api.message.list({
+      sessionID: session.providerThreadId,
+      limit: 50,
+      order: "desc" as const,
+    });
+    const messages = Array.isArray(result.data) ? result.data : [];
+    for (const value of messages) {
+      const message = inputRecord(value);
+      if (stringValue(message.type) !== "synthetic") continue;
+      this.handleSynthetic(session, message);
+    }
+  }
+
   clearChildSessions(parentProviderThreadId?: string): void {
     if (parentProviderThreadId === undefined) {
       this.childSessions.clear();
       this.childIdsByParent.clear();
+      this.shellTaskOwners.clear();
       return;
     }
     const ids = this.childIdsByParent.get(parentProviderThreadId);
@@ -559,36 +1054,71 @@ export class OpenCodeEventRouter {
 
   async handleEvent(event: RecordValue): Promise<void> {
     const data = inputRecord(event.data);
+    const eventType = stringValue(event.type) ?? "";
+    if (eventType === "shell.created") {
+      this.handleShellCreated(data);
+      return;
+    }
+    if (eventType === "shell.exited") {
+      this.handleShellExited(data);
+      return;
+    }
     const form =
-      event.type === "form.created" ? inputRecord(data.form) : undefined;
+      eventType === "form.created" ? inputRecord(data.form) : undefined;
     const sessionId =
       stringValue(data.sessionID) ??
       (form ? stringValue(form.sessionID) : undefined);
     if (!sessionId) return;
     const session = this.sessionLookup.get(sessionId);
-    if (event.type === "form.created") {
-      if (session?.active)
+    const child = session ? undefined : this.childSessions.get(sessionId);
+    const parent = child ? this.parentForChild(child) : undefined;
+    const childContext =
+      child && parent ? this.backgroundChildContext(parent, child) : undefined;
+    if (eventType === "form.created") {
+      if (session?.active) {
         this.interactions.handleCreatedForm(session, form ?? {});
+      } else if (childContext && child && parent) {
+        this.childParentRef = child.backgroundTaskId;
+        try {
+          this.interactions.handleCreatedForm(parent, form ?? {}, childContext);
+        } finally {
+          this.childParentRef = undefined;
+        }
+      }
       return;
     }
-    if (event.type === "permission.replied") {
+    if (eventType === "permission.replied") {
       if (session) this.interactions.handlePermissionReplied(session, data);
+      else if (childContext && parent)
+        this.interactions.handlePermissionReplied(parent, data, childContext);
       return;
     }
-    if (event.type === "form.replied" || event.type === "form.cancelled") {
-      if (session) this.interactions.handleFormEvent(session, event.type, data);
+    if (eventType === "form.replied" || eventType === "form.cancelled") {
+      if (session) this.interactions.handleFormEvent(session, eventType, data);
+      else if (childContext && parent)
+        this.interactions.handleFormEvent(
+          parent,
+          eventType,
+          data,
+          childContext,
+        );
       return;
     }
     if (session) return this.handleSessionEvent(session, event, data);
-    const child = this.childSessions.get(sessionId);
     if (!child) return;
-    const type = stringValue(event.type) ?? "";
-    if (type === "session.usage.updated") {
+    if (eventType === "session.usage.updated") {
       this.handleChildUsage(child, data);
       return;
     }
-    if (child.terminal || !CHILD_EVENT_PATTERN.test(type)) return;
-    const parent = this.parentForChild(child);
+    if (child.backgroundTaskId) {
+      if (eventType === "permission.asked" && parent && childContext) {
+        void this.interactions.handlePermission(parent, data, childContext);
+      } else if (eventType.startsWith("session.execution.")) {
+        child.terminal = true;
+      }
+      return;
+    }
+    if (child.terminal || !CHILD_EVENT_PATTERN.test(eventType)) return;
     if (!parent) return;
     this.childParentRef = child.callId;
     try {
@@ -608,6 +1138,9 @@ export class OpenCodeEventRouter {
     const eventType = stringValue(event.type) ?? "";
     const metadata = inputRecord(data.metadata);
     const childId = stringValue(metadata.sessionID);
+    const task = eventId
+      ? this.backgroundTaskForCall(session, eventId)
+      : undefined;
     if (
       childId &&
       (eventType === "session.tool.progress" ||
@@ -615,14 +1148,19 @@ export class OpenCodeEventRouter {
         eventType === "session.tool.failed")
     ) {
       const live = active !== undefined;
-      this.registerChildSession(childId, session, eventId, {
-        terminal:
-          !live ||
-          eventType === "session.tool.failed" ||
-          (eventType === "session.tool.success" &&
-            stringValue(metadata.status) !== "running"),
-        updateCallId: live && eventType === "session.tool.progress",
-      });
+      const terminal =
+        !live ||
+        eventType === "session.tool.failed" ||
+        (eventType === "session.tool.success" &&
+          stringValue(metadata.status) !== "running");
+      if (task) {
+        this.markBackgroundChild(session, childId, eventId, task, terminal);
+      } else {
+        this.registerChildSession(childId, session, eventId, {
+          terminal,
+          updateCallId: live && eventType === "session.tool.progress",
+        });
+      }
     }
     if (event.type === "permission.asked") {
       void this.interactions.handlePermission(session, data);
@@ -650,6 +1188,18 @@ export class OpenCodeEventRouter {
     }
     if (event.type === "session.unarchived") {
       this.handleSessionUnarchived(session);
+      return;
+    }
+    if (eventType === "session.synthetic") {
+      this.handleSynthetic(session, data);
+      return;
+    }
+    if (eventType === "session.shell.started") {
+      this.handleShellStarted(session, data);
+      return;
+    }
+    if (eventType === "session.shell.ended") {
+      this.handleShellEnded(session, data);
       return;
     }
     if (!active) return;
@@ -793,42 +1343,59 @@ export class OpenCodeEventRouter {
         const input = inputRecord(
           data.input ?? parseInputText(active.pendingInput.get(eventId)),
         );
-        const row = sessionToolRow(session, name, input);
-        if (row.item.type === "delegation")
-          (row.item as RecordValue).childRef = eventId;
-        active.opened.set(eventId, row.item);
-        const touched = touchedPaths(name, input);
-        if (touched.length) active.touchedFiles.set(eventId, touched);
+        if (
+          isBackgroundToolInput(name, input) &&
+          !(isSubagentTool(name) && session.disableSubagents)
+        ) {
+          this.openBackgroundTask(
+            session,
+            eventId,
+            name,
+            input,
+            active.providerTurnId,
+          );
+        } else {
+          const row = sessionToolRow(session, name, input);
+          if (row.item.type === "delegation")
+            (row.item as RecordValue).childRef = eventId;
+          active.opened.set(eventId, row.item);
+          const touched = touchedPaths(name, input);
+          if (touched.length) active.touchedFiles.set(eventId, touched);
+          this.emit(session.bbThreadId, [
+            {
+              kind: "item.open",
+              key: itemKey(eventId, "tool"),
+              item: row.item,
+              presentation: row.presentation,
+              providerTurnId: active.providerTurnId,
+            },
+          ]);
+          // OpenCode's question tool blocks forever waiting on an interactive
+          // form that no TUI will answer in a BB thread. Relay it to BB's
+          // native question UI instead (see handleQuestion).
+          if (name.toLowerCase() === "question") {
+            void this.interactions
+              .handleQuestion(session, active, eventId)
+              .catch(() => {});
+          }
+        }
         active.pendingTools.delete(eventId);
         active.pendingInput.delete(eventId);
-        this.emit(session.bbThreadId, [
-          {
-            kind: "item.open",
-            key: itemKey(eventId, "tool"),
-            item: row.item,
-            presentation: row.presentation,
-            providerTurnId: active.providerTurnId,
-          },
-        ]);
-        // OpenCode's question tool blocks forever waiting on an interactive
-        // form that no TUI will answer in a BB thread. Relay it to BB's
-        // native question UI instead (see handleQuestion).
-        if (name.toLowerCase() === "question") {
-          void this.interactions
-            .handleQuestion(session, active, eventId)
-            .catch(() => {});
-        }
       } else {
         const item = active.opened.get(eventId);
         if (item) item.args = data.input;
       }
     }
     if (event.type === "session.tool.progress") {
-      const opened = active.opened.get(eventId);
-      if (childId && opened?.type === "delegation") opened.childRef = childId;
-      const shellId = stringValue(metadata.shellID);
-      if (shellId && opened?.type === "command")
-        this.streamShellOutput(session, active, eventId, shellId);
+      if (task) {
+        this.updateBackgroundTask(session, task, metadata);
+      } else {
+        const opened = active.opened.get(eventId);
+        if (childId && opened?.type === "delegation") opened.childRef = childId;
+        const shellId = stringValue(metadata.shellID);
+        if (shellId && opened?.type === "command")
+          this.streamShellOutput(session, active, eventId, shellId);
+      }
     }
     if (
       event.type === "session.tool.success" ||
@@ -853,6 +1420,80 @@ export class OpenCodeEventRouter {
       const input = inputRecord(
         data.input ?? parseInputText(active.pendingInput.get(eventId)),
       );
+      const output = contentText(data.content);
+      const error = inputRecord(data.error);
+      if (task) {
+        active.touchedFiles.delete(eventId);
+        active.pendingInput.delete(eventId);
+        active.pendingTools.delete(eventId);
+        if (event.type === "session.tool.failed") {
+          this.settleBackgroundTask(
+            session,
+            task,
+            taskCompletion(
+              task,
+              "error",
+              toolFailureError(
+                name,
+                session.disableSubagents,
+                stringValue(error.message),
+              ),
+            ),
+          );
+        } else if (stringValue(metadata.status) !== "running") {
+          this.settleBackgroundTask(
+            session,
+            task,
+            taskCompletion(task, "completed", output),
+          );
+        } else {
+          this.updateBackgroundTask(session, task, metadata);
+        }
+        return;
+      }
+      const foreground = active.opened.get(eventId);
+      const toolName =
+        foreground?.type === "command"
+          ? "bash"
+          : foreground?.type === "delegation"
+            ? "subagent"
+            : name;
+      const run =
+        event.type === "session.tool.success"
+          ? backgroundRunMetadata(toolName, metadata)
+          : undefined;
+      if (run) {
+        if (foreground) {
+          if (foreground.type === "command")
+            foreground.aggregatedOutput = "Moved to background";
+          else if (foreground.type === "delegation") {
+            foreground.summary = "Moved to background";
+            if (childId) foreground.childRef = childId;
+          }
+          active.opened.delete(eventId);
+          this.emit(session.bbThreadId, [
+            {
+              kind: "item.close",
+              key: itemKey(eventId, "tool"),
+              status: "completed",
+              item: foreground,
+              providerTurnId: active.providerTurnId,
+            },
+          ]);
+        }
+        active.touchedFiles.delete(eventId);
+        active.pendingInput.delete(eventId);
+        active.pendingTools.delete(eventId);
+        const opened = this.openBackgroundTask(
+          session,
+          eventId,
+          toolName,
+          input,
+          active.providerTurnId,
+        );
+        this.updateBackgroundTask(session, opened, metadata);
+        return;
+      }
       let item = active.opened.get(eventId);
       if (!item) {
         const row = sessionToolRow(session, name, input);
@@ -874,22 +1515,20 @@ export class OpenCodeEventRouter {
           },
         ]);
       }
-      const output = contentText(data.content);
       if (item.type === "delegation") {
         item.summary =
           event.type === "session.tool.success"
             ? subagentSummary(output)
             : toolFailureError(
-                name,
+                isSubagentTool(name) ? name : "subagent",
                 session.disableSubagents,
-                stringValue(inputRecord(data.error).message),
+                stringValue(error.message),
               );
         if (!item.summary) delete item.summary;
         if (childId) item.childRef = childId;
       } else if (item.type === "tool") {
         if (event.type === "session.tool.success") item.result = output;
         else {
-          const error = inputRecord(data.error);
           item.error = toolFailureError(
             name,
             session.disableSubagents,
@@ -897,7 +1536,6 @@ export class OpenCodeEventRouter {
           );
         }
       } else if (item.type === "command") {
-        const error = inputRecord(data.error);
         item.aggregatedOutput =
           event.type === "session.tool.success"
             ? output
@@ -1028,6 +1666,8 @@ export class OpenCodeEventRouter {
   }
 
   private async detachSession(session: SessionState, reason: string) {
+    this.interruptBackgroundTasks(session, reason);
+    this.clearBackgroundTasks(session);
     this.clearChildSessions(session.providerThreadId);
     await releaseSessionTools(session, reason, () => this.api());
     if (this.sessionLookup.get(session.providerThreadId) === session) {
@@ -1058,6 +1698,8 @@ export class OpenCodeEventRouter {
     session.terminalError = message;
     session.terminalKind = "moved";
     if (session.active) await this.finish(session, "failed", message);
+    this.interruptBackgroundTasks(session, message);
+    this.clearBackgroundTasks(session);
     this.notifyRecovery(session, "restartRecommended", message);
   }
 
@@ -1380,7 +2022,9 @@ export class OpenCodeEventRouter {
     if (!active || active.finishing) return;
     active.finishing = true;
     active.abortController.abort();
-    for (const child of this.childRecords(session)) child.terminal = true;
+    const context = interactiveTurn(session, active);
+    for (const child of this.childRecords(session))
+      if (!child.backgroundTaskId) child.terminal = true;
     if (active.manualCompaction) {
       this.emit(
         session.bbThreadId,
@@ -1400,23 +2044,12 @@ export class OpenCodeEventRouter {
       session.dynamicToolScope,
       "OpenCode turn ended before the BB tool returned",
     );
-    for (const [, formId] of active.openQuestions)
-      void this.interactions.cancelQuestionForm(session, active, formId);
-    this.interactions.cancelQuestionWaiters(active);
-    for (const [id, item] of active.opened) {
-      this.emit(session.bbThreadId, [
-        {
-          kind: "item.close",
-          key: itemKeyForOpenItem(id, item),
-          status,
-          item,
-          providerTurnId: active.providerTurnId,
-        },
-      ]);
-    }
-    for (const id of active.opened.keys()) this.parentRefs.delete(id);
-    active.opened.clear();
-    active.openQuestions.clear();
+    this.closeInteractionContext(
+      session,
+      context,
+      status,
+      active.providerTurnId,
+    );
     active.settledTools.clear();
     active.pendingTools.clear();
     active.pendingInput.clear();

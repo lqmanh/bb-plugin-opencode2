@@ -59,4 +59,49 @@ describe("OpenCode settings", () => {
       expect(getStatus).toHaveBeenCalledTimes(2);
     });
   });
+
+  it("registers a menu action that backgrounds active OpenCode tools", async () => {
+    const app = await loadPluginApp(() => import("../../src/app/index.tsx"));
+    const registration = app.threadActions.find(
+      (action) => action.id === "background-active-tools",
+    );
+    expect(registration).toBeTruthy();
+    expect(registration?.placement).toBe("menu");
+    expect(registration?.group).toBe("1_state");
+
+    const backgroundThread = vi.fn(async () => {});
+    const data = {
+      opencodeThreads: new Set(["thr_1"]),
+      backgroundThread,
+    };
+    const thread = {
+      id: "thr_1",
+      projectId: "proj_1",
+      parentThreadId: null,
+      parentNotifications: "auto" as const,
+      archivedAt: null,
+      pinnedAt: null,
+      sectionId: null,
+      isUnread: false,
+      status: "active" as const,
+      environment: null,
+    };
+    const actionFor = (target: unknown) =>
+      registration?.item({
+        thread: target,
+        data,
+        sdk: {},
+        navigate: {},
+        experimental_panel: {},
+      } as never);
+    const action = actionFor(thread);
+    expect(action?.label).toBe("Background active tools");
+    await action?.run({ requestRename: vi.fn() });
+    expect(backgroundThread).toHaveBeenCalledWith("thr_1");
+
+    expect(actionFor({ ...thread, id: "thr_2" })).toBeNull();
+    expect(actionFor({ ...thread, parentThreadId: "thr_parent" })).toBeNull();
+    expect(actionFor({ ...thread, status: "idle" })).toBeNull();
+    expect(actionFor({ ...thread, archivedAt: 1 })).toBeNull();
+  });
 });

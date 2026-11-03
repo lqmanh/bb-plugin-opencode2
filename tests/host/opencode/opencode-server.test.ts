@@ -5,10 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   OpenCodeServer,
+  sessions,
   sessionsByProviderId,
 } from "../../support/host-api.js";
+import { createFakeOpenCodeApi } from "../../support/opencode-client.fixture.ts";
+import { createTestSession } from "../../support/session.fixture.ts";
 import {
   ARCHIVED_SESSION_MESSAGE,
+  type BackgroundTaskRecord,
   type SessionState,
 } from "../../../src/host/types.ts";
 
@@ -16,7 +20,7 @@ test("follows checkpoint cursors even when a page is shorter than the requested 
   const inputs: { limit?: number; order?: string; cursor?: string }[] = [];
   const server = new OpenCodeServer();
   Object.assign(server, {
-    api: async () => ({
+    api: createFakeOpenCodeApi({
       message: {
         list: async (input: {
           limit?: number;
@@ -51,7 +55,7 @@ test("rewinds with the SDK session revert methods", async () => {
   const calls: string[] = [];
   const server = new OpenCodeServer();
   Object.assign(server, {
-    api: async () => ({
+    api: createFakeOpenCodeApi({
       message: {
         list: async () => ({
           data: [
@@ -126,7 +130,7 @@ test("resolves an MCP startup wait from mcp.status.changed", async () => {
   let listCalls = 0;
   const server = new OpenCodeServer();
   Object.assign(server, {
-    api: async () => ({
+    api: createFakeOpenCodeApi({
       mcp: {
         list: async () => {
           listCalls += 1;
@@ -201,7 +205,7 @@ test("caches the command catalog until a command.updated event", async () => {
   let calls = 0;
   const server = new OpenCodeServer();
   Object.assign(server, {
-    api: async () => ({
+    api: createFakeOpenCodeApi({
       command: {
         list: async () => {
           calls += 1;
@@ -232,7 +236,7 @@ test("forwards archive state and consumes its own archive event", async () => {
   const updates: Record<string, unknown>[] = [];
   const server = new OpenCodeServer();
   Object.assign(server, {
-    api: async () => ({
+    api: createFakeOpenCodeApi({
       session: {
         update: async (input: Record<string, unknown>) => {
           updates.push(input);
@@ -240,18 +244,10 @@ test("forwards archive state and consumes its own archive event", async () => {
       },
     }),
   });
-  const session = {
+  const session = createTestSession({
     bbThreadId: "bb-archive",
     providerThreadId: "ses_archive",
-    cwd: "/repo",
-    disableSubagents: true,
-    dynamicTools: [],
-    disallowedTools: new Set(),
-    instructions: "",
-    bridgeEnvVars: {},
-    dynamicToolScope: {},
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-  } as SessionState;
+  });
   sessionsByProviderId.set(session.providerThreadId, session);
   try {
     await server.setSessionArchived(session.providerThreadId, true);
@@ -274,4 +270,114 @@ test("forwards archive state and consumes its own archive event", async () => {
   } finally {
     sessionsByProviderId.delete(session.providerThreadId);
   }
+});
+
+test("backgrounds the OpenCode session for a live or persisted thread", async () => {
+  const calls: string[] = [];
+  const server = new OpenCodeServer();
+  Object.assign(server, {
+    api: createFakeOpenCodeApi({
+      session: {
+        background: async ({ sessionID }: { sessionID: string }) => {
+          calls.push(sessionID);
+        },
+      },
+    }),
+  });
+  sessions.clear();
+  sessions.set(
+    "thr_live",
+    createTestSession({ bbThreadId: "thr_live", providerThreadId: "ses_live" }),
+  );
+  try {
+    assert.deepEqual(await server.backgroundSession("thr_live"), { ok: true });
+  } finally {
+    sessions.clear();
+  }
+  assert.deepEqual(calls, ["ses_live"]);
+});
+
+test("stops running background shells and child sessions once", async () => {
+  const removed: string[] = [];
+  const interrupted: string[] = [];
+  const closed: string[] = [];
+  const server = new OpenCodeServer();
+  const tasks = new Map([
+    [
+      "bg:shell",
+      {
+        id: "bg:shell",
+        kind: "shell",
+        shellId: "shell_1",
+        settled: false,
+      },
+    ],
+    [
+      "bg:child",
+      {
+        id: "bg:child",
+        kind: "subagent",
+        childSessionId: "ses_child",
+        settled: false,
+      },
+    ],
+  ]);
+  const session = createTestSession({
+    providerThreadId: "ses_parent",
+    backgroundTasks: tasks as unknown as Map<string, BackgroundTaskRecord>,
+  });
+  Object.assign(server, {
+    api: createFakeOpenCodeApi({
+      shell: {
+        remove: async ({ id }: { id: string }) => {
+          removed.push(id);
+        },
+      },
+      session: {
+        interrupt: async ({ sessionID }: { sessionID: string }) => {
+          interrupted.push(sessionID);
+        },
+      },
+    }),
+    eventRouter: {
+      interruptBackgroundTasks: (_session: SessionState, reason: string) => {
+        closed.push(reason);
+        for (const task of tasks.values()) task.settled = true;
+      },
+    },
+  });
+
+  await server.stopBackgroundTasks(session);
+  await server.stopBackgroundTasks(session);
+
+  assert.deepEqual(removed, ["shell_1"]);
+  assert.deepEqual(interrupted, ["ses_child"]);
+  assert.deepEqual(closed, ["Thread stopped"]);
+});
+
+test("backgrounds a thread from the persisted session registry", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "opencode2-background-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const calls: string[] = [];
+  const server = new OpenCodeServer();
+  server.setDataDir(dataDir);
+  await server.rememberSessionRegistration("thr_persisted", {
+    providerThreadId: "ses_persisted",
+    cwd: "/repo",
+    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+  });
+  Object.assign(server, {
+    api: createFakeOpenCodeApi({
+      session: {
+        background: async ({ sessionID }: { sessionID: string }) => {
+          calls.push(sessionID);
+        },
+      },
+    }),
+  });
+
+  assert.deepEqual(await server.backgroundSession("thr_persisted"), {
+    ok: true,
+  });
+  assert.deepEqual(calls, ["ses_persisted"]);
 });

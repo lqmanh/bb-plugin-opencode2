@@ -8,6 +8,7 @@ import {
   experimental_toolPresentation as toolPresentation,
   experimental_webFetchPresentation as webFetchPresentation,
   experimental_webSearchPresentation as webSearchPresentation,
+  LOCAL_BASH_TASK_TYPE,
   type DynamicTool,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import {
@@ -15,12 +16,220 @@ import {
   inputRecord,
   isSubagentTool,
   stringValue,
+  usageTotal,
   type OpenCodeRecord,
+  type UsageTotals,
 } from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
 
 const MAX_TOUCHED_PATHS = 16;
+
+export const LOCAL_AGENT_TASK_TYPE = "local_agent";
+export const BACKGROUND_TASK_PREFIX = "bg:";
+
+function isShellTool(name: string) {
+  return ["bash", "shell", "exec", "run", "command"].includes(
+    name.toLowerCase(),
+  );
+}
+
+function shellCommand(input: OpenCodeRecord) {
+  return firstInputString(input, ["command", "cmd", "script"]) ?? "";
+}
+
+function delegationLabel(input: OpenCodeRecord) {
+  const agent = firstInputString(input, ["agent", "subagent_type"]);
+  const description = firstInputString(input, [
+    "description",
+    "prompt",
+    "task",
+  ]);
+  return [agent, description].filter(Boolean).join(": ") || "OpenCode subagent";
+}
+
+export function backgroundTaskKey(callId: string) {
+  return `${BACKGROUND_TASK_PREFIX}${callId}`;
+}
+
+export function backgroundTaskDescription(name: string, rawInput: unknown) {
+  const input = inputRecord(rawInput);
+  if (isShellTool(name)) return shellCommand(input) || "Shell command";
+  return delegationLabel(input);
+}
+
+export function backgroundTaskItem(args: {
+  familyId: string;
+  taskType: string;
+  description: string;
+  outputFile?: string;
+}) {
+  return {
+    type: "backgroundTask" as const,
+    familyId: args.familyId,
+    taskType: args.taskType,
+    description: args.description || "Background task",
+    status: "pending" as const,
+    taskStatus: "running" as const,
+    skipTranscript: false,
+    foreground: false,
+    ...(args.outputFile ? { outputFile: args.outputFile } : {}),
+  };
+}
+
+export function backgroundTaskTaskType(name: string) {
+  return isSubagentTool(name) ? LOCAL_AGENT_TASK_TYPE : LOCAL_BASH_TASK_TYPE;
+}
+
+export function isBackgroundToolInput(name: string, rawInput: unknown) {
+  return (
+    inputRecord(rawInput).background === true &&
+    (isShellTool(name) || isSubagentTool(name))
+  );
+}
+
+/** The shell/child IDs a running tool success exposes for its task row. */
+export function backgroundRunMetadata(name: string, rawMetadata: unknown) {
+  const metadata = inputRecord(rawMetadata);
+  if (stringValue(metadata.status) !== "running") return undefined;
+  if (isShellTool(name)) {
+    const shellId = stringValue(metadata.shellID);
+    return shellId ? { shellId } : undefined;
+  }
+  if (isSubagentTool(name)) {
+    const childId = stringValue(metadata.sessionID);
+    return childId ? { childId } : undefined;
+  }
+  return undefined;
+}
+
+export type BackgroundCompletion = {
+  kind: "shell" | "subagent";
+  id: string;
+  shellId?: string;
+  jobId?: string;
+  childId?: string;
+  state: "completed" | "error" | "cancelled";
+  text: string;
+  exit?: number;
+  timeout?: boolean;
+};
+
+function tagAttribute(attributes: string, name: string) {
+  const match = attributes.match(new RegExp(`${name}="([^"]*)"`));
+  return match?.[1];
+}
+
+function completionState(value: unknown): BackgroundCompletion["state"] {
+  switch (stringValue(value)?.toLowerCase()) {
+    case "completed":
+    case "succeeded":
+      return "completed";
+    case "error":
+    case "failed":
+      return "error";
+    case "cancelled":
+    case "canceled":
+    case "killed":
+    case "interrupted":
+      return "cancelled";
+    default:
+      return "completed";
+  }
+}
+
+/**
+ * OpenCode reports background completion through `session.synthetic`: a
+ * `<shell>` or `<subagent>` wrapper plus `metadata.source`. Parse both so a
+ * missing metadata field or a future wrapper change still settles the task.
+ */
+export function parseBackgroundCompletion(
+  rawData: unknown,
+): BackgroundCompletion | undefined {
+  const data = inputRecord(rawData);
+  const metadata = inputRecord(data.metadata);
+  const text = stringValue(data.text) ?? "";
+  const shellTag = text.match(/<shell\b([^>]*)>([\s\S]*?)<\/shell>/i);
+  const subagentTag = text.match(/<subagent\b([^>]*)>([\s\S]*?)<\/subagent>/i);
+  const source = stringValue(metadata.source);
+  const kind =
+    source === "shell" || source === "subagent"
+      ? source
+      : shellTag
+        ? "shell"
+        : subagentTag
+          ? "subagent"
+          : text.includes("<task_result>") || text.includes("<task_error>")
+            ? "subagent"
+            : undefined;
+  if (!kind) return undefined;
+  const tag = kind === "shell" ? shellTag : subagentTag;
+  const attributes = tag?.[1] ?? "";
+  const body = (tag?.[2] ?? text).trim();
+  const shellId = stringValue(metadata.shellID);
+  const jobId = stringValue(metadata.jobID);
+  const childId = stringValue(metadata.childID);
+  const taggedId = tagAttribute(
+    attributes,
+    kind === "shell" ? "id" : "sessionID",
+  );
+  const id =
+    kind === "shell" ? (jobId ?? shellId ?? taggedId) : (childId ?? taggedId);
+  if (!id) return undefined;
+  const state = text.includes("<task_error>")
+    ? "error"
+    : text.includes("<task_result>")
+      ? "completed"
+      : completionState(metadata.state ?? tagAttribute(attributes, "state"));
+  const exit =
+    typeof metadata.exit === "number" && Number.isFinite(metadata.exit)
+      ? metadata.exit
+      : undefined;
+  return {
+    kind,
+    id,
+    ...(shellId ? { shellId } : {}),
+    ...(jobId ? { jobId } : {}),
+    ...(childId ? { childId } : {}),
+    state,
+    text: body,
+    ...(exit !== undefined ? { exit } : {}),
+    ...(metadata.timeout === true ? { timeout: true } : {}),
+  };
+}
+
+/**
+ * `backgroundTask.usage` is all-or-nothing. Return undefined when OpenCode
+ * recorded nothing, otherwise always all three required fields. BB currently
+ * only reads `totalTokens`; tool counts are not tracked yet, so callers use 0.
+ */
+export function backgroundTaskUsage(
+  usage: UsageTotals | undefined,
+  startedAt: number,
+  completedAt: number,
+  toolUses = 0,
+) {
+  if (!usage) return undefined;
+  const count = (value: number) =>
+    Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  const totalTokens = usageTotal({
+    input: count(usage.input),
+    output: count(usage.output),
+    reasoning: count(usage.reasoning),
+    cacheRead: count(usage.cacheRead),
+    cacheWrite: count(usage.cacheWrite),
+  });
+  const durationMs =
+    Number.isFinite(startedAt) && Number.isFinite(completedAt)
+      ? Math.max(0, Math.floor(completedAt - startedAt))
+      : 0;
+  return {
+    totalTokens,
+    toolUses:
+      Number.isFinite(toolUses) && toolUses > 0 ? Math.floor(toolUses) : 0,
+    durationMs,
+  };
+}
 
 function realpathOr(path: string) {
   try {
@@ -291,8 +500,8 @@ export function toolRow(name: string, rawInput: unknown, cwd: string) {
     };
   }
 
-  if (["bash", "shell", "exec", "run", "command"].includes(tool)) {
-    const command = firstInputString(input, ["command", "cmd", "script"]) ?? "";
+  if (isShellTool(tool)) {
+    const command = shellCommand(input);
     return {
       item: {
         type: "command",
@@ -347,19 +556,11 @@ export function toolRow(name: string, rawInput: unknown, cwd: string) {
   if (isSubagentTool(name)) {
     // Rendered as BB's native delegation row. The router fills in the child
     // session once OpenCode reports it; until then the call ID stands in.
-    const agent = firstInputString(input, ["agent", "subagent_type"]);
-    const description = firstInputString(input, [
-      "description",
-      "prompt",
-      "task",
-    ]);
     return {
       item: {
         type: "delegation",
         childRef: "pending",
-        label:
-          [agent, description].filter(Boolean).join(": ") ||
-          "OpenCode subagent",
+        label: delegationLabel(input),
         background: false,
       },
     };
