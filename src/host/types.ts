@@ -163,7 +163,6 @@ export type SessionState = {
   /** Serialized ruleset last sent to OpenCode, to skip redundant PATCHes. */
   appliedPermissions?: string;
   disableSubagents: boolean;
-  nativeSkillNames?: Set<string>;
   dynamicTools: DynamicTool[];
   disallowedTools: Set<string>;
   instructions: string;

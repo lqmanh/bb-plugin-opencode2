@@ -24,12 +24,21 @@ import {
 import { errorMessage } from "../shared/errors.ts";
 
 export default function plugin(bb: BbPluginApi) {
-  bb.settings.define({
+  const settings = bb.settings.define({
     subagentsDisabled: {
       type: "boolean",
       label: "Disable provider subagents",
       description:
         "Prevent OpenCode from starting native subagents so agents use BB for delegation.",
+      default: false,
+    },
+    nativeSkills: {
+      type: "boolean",
+      label: "Register BB skills natively in OpenCode",
+      description:
+        "Install a small OpenCode plugin and add BB's skills to OpenCode's native skill registry for BB workspaces. " +
+        "Other OpenCode clients that open the same workspace will see those skills. " +
+        "OpenCode downloads the pinned plugin from GitHub on first use. Off by default.",
       default: false,
     },
   });
@@ -52,6 +61,40 @@ export default function plugin(bb: BbPluginApi) {
       result: results[index],
     }));
   }
+
+  async function syncNativeSkills(enabled: boolean) {
+    const hostIds = await connectedHostIds();
+    if (hostIds.length === 0) return;
+    const results = await settleHostCalls(hostIds, (hostId) =>
+      host.call("nativeSkills/configure", { enabled }, { hostId }),
+    );
+    for (const { hostId, result } of results) {
+      const error =
+        result.status === "rejected"
+          ? errorMessage(result.reason)
+          : result.value.error;
+      if (!error) continue;
+      bb.log.warn(
+        `Could not ${enabled ? "enable" : "disable"} native OpenCode skills on ${hostId}: ${error}`,
+      );
+    }
+  }
+
+  void settings
+    .get()
+    .then((values) => {
+      if (values.nativeSkills === true) void syncNativeSkills(true);
+    })
+    .catch((error) => {
+      bb.log.warn(
+        `Could not read the native OpenCode skills setting: ${errorMessage(error)}`,
+      );
+    });
+  settings.onChange((next, previous) => {
+    if (next.nativeSkills !== previous.nativeSkills) {
+      void syncNativeSkills(next.nativeSkills === true);
+    }
+  });
 
   async function getStatus() {
     const hosts = (await bb.sdk.hosts.list()).filter(
@@ -209,6 +252,7 @@ export default function plugin(bb: BbPluginApi) {
     // change applies from the next turn.
     deriveProviderOptions: ({ settings }) => ({
       disableSubagents: settings.subagentsDisabled === true,
+      nativeSkills: settings.nativeSkills === true,
     }),
   });
 

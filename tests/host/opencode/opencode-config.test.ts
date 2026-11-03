@@ -1,10 +1,26 @@
 // The OpenCode global-config edit must be minimal and idempotent.
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, statSync, chmodSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { addBbToolsRule, ensureBbToolsRule } from "../../support/host-api.js";
+import {
+  addBbToolsRule,
+  bbSkillsPluginPackage,
+  ensureBbToolsRule,
+  ensurePluginEntry,
+  isBbSkillsPluginPackage,
+  removePluginEntries,
+  removePluginEntriesFromConfig,
+  upsertPluginEntry,
+} from "../../support/host-api.js";
 
 const RULE =
   '{ "action": "bb_opencode2_*", "resource": "*", "effect": "deny" }';
@@ -80,4 +96,160 @@ test("writes only on change and keeps the file mode", async () => {
   assert.equal(await ensureBbToolsRule(path), "added");
   assert.equal(await ensureBbToolsRule(path), "unchanged");
   assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+const OLD_PACKAGE =
+  "github:lqmanh/bb-plugin-opencode2#v1.3.0::path:opencode-bb-skills";
+const PACKAGE = bbSkillsPluginPackage();
+const ENTRY = {
+  package: PACKAGE,
+  options: {
+    locationsDir: "/home/me/.bb/runtime/opencode-bb-skills/locations",
+  },
+};
+
+function jsoncValue(text: string): unknown {
+  return JSON.parse(
+    text
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "")
+      .replace(/,\s*([}\]])/g, "$1"),
+  );
+}
+
+test("adds a BB skills object without disturbing existing plugin entries", () => {
+  const original = `{
+  "plugins": ["user-plugin", { "package": "acme", "options": { "strict": true } }],
+  "theme": "dark"
+}
+`;
+  const added = upsertPluginEntry(original, isBbSkillsPluginPackage, ENTRY);
+  assert.ok(added);
+  const parsed = JSON.parse(added);
+  assert.deepEqual(parsed.plugins, [
+    "user-plugin",
+    { package: "acme", options: { strict: true } },
+    ENTRY,
+  ]);
+  assert.equal(
+    upsertPluginEntry(added, isBbSkillsPluginPackage, ENTRY),
+    undefined,
+    "idempotent",
+  );
+});
+
+test("adds a plugins key when the config has none", () => {
+  const added = upsertPluginEntry(
+    `{ "theme": "dark" }\n`,
+    isBbSkillsPluginPackage,
+    ENTRY,
+  );
+  assert.ok(added);
+  assert.deepEqual(JSON.parse(added).plugins, [ENTRY]);
+});
+
+test("replaces old string, object, and duplicate BB skills entries", () => {
+  const original = `{
+  "plugins": [
+    "user-plugin",
+    "${OLD_PACKAGE}",
+    { "package": "${OLD_PACKAGE}", "options": { "locationsDir": "/old" } },
+  ],
+}
+`;
+  const added = upsertPluginEntry(original, isBbSkillsPluginPackage, ENTRY);
+  assert.ok(added);
+  const parsed = jsoncValue(added) as { plugins: unknown[] };
+  assert.deepEqual(parsed.plugins, ["user-plugin", ENTRY]);
+});
+
+test("parses and replaces a commented object entry", () => {
+  const original = `{
+  // keep this comment
+  "plugins": [
+    /* old BB entry */
+    {
+      "package": "${OLD_PACKAGE}", // pinned by an older BB
+      "options": { "locationsDir": "/old/locations" },
+    },
+    "user-plugin",
+  ],
+}
+`;
+  const added = upsertPluginEntry(original, isBbSkillsPluginPackage, ENTRY);
+  assert.ok(added);
+  assert.match(added, /keep this comment/);
+  assert.match(added, /v1\.4\.0/);
+  assert.doesNotMatch(added, /v1\.3\.0/);
+  assert.match(added, /user-plugin/);
+  const parsed = jsoncValue(added) as { plugins: unknown[] };
+  assert.deepEqual(parsed.plugins, [ENTRY, "user-plugin"]);
+});
+
+test("removes only the BB skills entry and leaves other plugins", () => {
+  const original = `{
+  "plugins": [
+    "${OLD_PACKAGE}",
+    { "package": "acme", "options": { "strict": true } },
+    "github:lqmanh/bb-plugin-opencode2#v1.4.0",
+    "user-plugin",
+  ],
+}
+`;
+  const removed = removePluginEntries(original, isBbSkillsPluginPackage);
+  assert.ok(removed);
+  assert.doesNotMatch(removed, /opencode-bb-skills/);
+  assert.match(removed, /github:lqmanh\/bb-plugin-opencode2#v1\.4\.0/);
+  assert.match(removed, /acme/);
+  assert.match(removed, /user-plugin/);
+  assert.equal(
+    removePluginEntries(removed, isBbSkillsPluginPackage),
+    undefined,
+  );
+});
+
+test("replaces or removes the only plugin entry without leaving invalid JSON", () => {
+  const added = upsertPluginEntry(
+    `{ "plugins": ["${OLD_PACKAGE}"] }\n`,
+    isBbSkillsPluginPackage,
+    ENTRY,
+  );
+  assert.ok(added);
+  assert.deepEqual(JSON.parse(added).plugins, [ENTRY]);
+  const removed = removePluginEntries(added, isBbSkillsPluginPackage);
+  assert.ok(removed);
+  assert.deepEqual(JSON.parse(removed).plugins, []);
+});
+
+test("ensurePluginEntry writes only on change and remove cleans up", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "oc-plugins-"));
+  const path = join(dir, "opencode.json");
+  try {
+    writeFileSync(path, `{ "plugins": ["user-plugin", "${OLD_PACKAGE}"] }\n`);
+    assert.equal(
+      await ensurePluginEntry(path, isBbSkillsPluginPackage, ENTRY),
+      "changed",
+    );
+    assert.equal(
+      await ensurePluginEntry(path, isBbSkillsPluginPackage, ENTRY),
+      "unchanged",
+    );
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).plugins, [
+      "user-plugin",
+      ENTRY,
+    ]);
+    assert.equal(
+      await removePluginEntriesFromConfig(path, isBbSkillsPluginPackage),
+      "removed",
+    );
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).plugins, [
+      "user-plugin",
+    ]);
+    assert.equal(
+      await removePluginEntriesFromConfig(path, isBbSkillsPluginPackage),
+      "unchanged",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

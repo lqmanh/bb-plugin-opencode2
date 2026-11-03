@@ -66,7 +66,17 @@ test("derives provider options from the subagent setting", async () => {
       permissionMode: "auto",
       settings: { subagentsDisabled: true },
     }),
-    { disableSubagents: true },
+    { disableSubagents: true, nativeSkills: false },
+  );
+  assert.deepEqual(
+    provider.deriveProviderOptions({
+      threadId: "thread_1",
+      projectId: "project_1",
+      model: "openai/gpt-5",
+      permissionMode: "auto",
+      settings: { subagentsDisabled: false, nativeSkills: true },
+    }),
+    { disableSubagents: false, nativeSkills: true },
   );
 });
 

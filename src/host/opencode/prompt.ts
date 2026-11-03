@@ -14,6 +14,7 @@ import {
   type OpenCodePermissionReply,
   type OpenCodeRecord,
 } from "../types.ts";
+import { pathUnderRoots } from "./native-skills.ts";
 
 type RecordValue = OpenCodeRecord;
 
@@ -143,6 +144,27 @@ export function selectedCommandMention(
   return undefined;
 }
 
+function skillMentionResource(mention: RecordValue): RecordValue | undefined {
+  const resource = inputRecord(mention.resource);
+  if (
+    resource.kind !== "command" ||
+    resource.source !== "skill" ||
+    resource.trigger !== "/"
+  )
+    return undefined;
+  return resource;
+}
+
+/** Whether the input has a mention that `promptBody` can treat as a skill. */
+export function hasSkillMention(input: readonly RecordValue[]): boolean {
+  for (const part of input) {
+    if (part.type !== "text" || !Array.isArray(part.mentions)) continue;
+    if (part.mentions.some((mention) => skillMentionResource(mention)))
+      return true;
+  }
+  return false;
+}
+
 /** Remove a `/command` mention while keeping every other mention aligned. */
 export function withoutCommandMention(
   input: readonly RecordValue[],
@@ -159,7 +181,8 @@ export function promptBody(
   opts?: {
     configuredSkillNames?: ReadonlySet<string>;
     disableSubagents?: boolean;
-    nativeSkillNames?: ReadonlySet<string>;
+    nativeSkills?: ReadonlyMap<string, string | undefined>;
+    nativeSkillRoots?: ReadonlySet<string>;
     skillFiles?: ReadonlyMap<string, string>;
   },
 ): Pick<SessionPromptInput, "text" | "files" | "skills"> {
@@ -189,13 +212,8 @@ export function promptBody(
     if (sawText) textOffset += 1;
     const mentions = Array.isArray(part.mentions) ? part.mentions : [];
     for (const mention of mentions) {
-      const resource = inputRecord(mention.resource);
-      if (
-        resource.kind !== "command" ||
-        resource.source !== "skill" ||
-        resource.trigger !== "/"
-      )
-        continue;
+      const resource = skillMentionResource(mention);
+      if (!resource) continue;
       const id = stringValue(resource.name);
       const start =
         typeof mention.start === "number" && Number.isFinite(mention.start)
@@ -210,21 +228,28 @@ export function promptBody(
       // BB offers two kinds of skill: its own configured roots, and the
       // agent's native skills (OpenCode's own discovery, which BB lists
       // through resolveNativeRoots). Anything else is plain text.
-      if (
-        opts?.configuredSkillNames &&
-        !opts.configuredSkillNames.has(id) &&
-        !opts.nativeSkillNames?.has(id)
-      )
-        continue;
+      const configured = opts?.configuredSkillNames?.has(id) === true;
+      const native = opts?.nativeSkills?.has(id) === true;
+      const hasFile = opts?.skillFiles?.has(id) === true;
+      const hasSkillSets =
+        opts?.configuredSkillNames !== undefined ||
+        opts?.nativeSkills !== undefined;
+      if (hasSkillSets && !configured && !native && !hasFile) continue;
       const promptMention = {
         start: textOffset + start,
         end: textOffset + end,
         text: part.text.slice(start, end),
       };
-      // OpenCode only accepts native skill IDs that its registry discovered.
-      // Injected BB roots outside that registry still need their instructions
-      // attached through the same prompt API.
-      if (opts?.nativeSkillNames && !opts.nativeSkillNames.has(id)) {
+      const nativeIsBb = pathUnderRoots(
+        opts?.nativeSkills?.get(id),
+        opts?.nativeSkillRoots,
+      );
+      // A BB-configured skill must only use the native path when the registry
+      // entry came from BB's own catalog. A colliding native skill, or a
+      // missing plugin entry, keeps the file fallback so the BB skill wins.
+      const canUseNative =
+        !hasSkillSets || (native && (!configured || nativeIsBb));
+      if (!canUseNative) {
         const skillFile = opts.skillFiles?.get(id);
         if (skillFile)
           files.push({

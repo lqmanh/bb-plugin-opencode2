@@ -123,10 +123,26 @@ const backgroundThreadRequestSchema = z
   .strict();
 const backgroundThreadResultSchema = z.object({ ok: z.literal(true) }).strict();
 
+export const nativeSkillsConfigureResultSchema = z
+  .object({
+    enabled: z.boolean(),
+    packageSpec: z.string().optional(),
+    locationsDir: z.string().optional(),
+    error: z.string().optional(),
+  })
+  .strict();
+export type NativeSkillsStatus = z.infer<
+  typeof nativeSkillsConfigureResultSchema
+>;
+
 export const opencodeHostContract = defineRpcContract({
   getStatus: {
     input: z.object({}).strict(),
     output: openCodeStatusSchema,
+  },
+  "nativeSkills/configure": {
+    input: z.object({ enabled: z.boolean() }).strict(),
+    output: nativeSkillsConfigureResultSchema,
   },
   backgroundSession: {
     input: backgroundThreadRequestSchema,

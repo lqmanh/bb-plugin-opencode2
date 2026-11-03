@@ -256,12 +256,14 @@ export function revertTargetRetainingThrough(
 export function nativeSkillRoots(
   skills: readonly { path?: string }[],
   cwd: string | null,
+  ignoredRoots: ReadonlySet<string> = new Set(),
 ) {
   const roots = new Map<string, "project" | "user">();
   for (const skill of skills) {
     if (!skill.path || !isAbsolute(skill.path)) continue;
     if (basename(skill.path) !== "SKILL.md") continue;
     const root = dirname(dirname(skill.path));
+    if (ignoredRoots.has(root)) continue;
     if (!existsSync(root)) continue;
     const inWorkspace =
       cwd !== null && (root === cwd || !relative(cwd, root).startsWith(".."));

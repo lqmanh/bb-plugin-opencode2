@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { errorMessage } from "../../shared/errors.ts";
 import {
   BRIDGE_JSON_RPC_ERRORS,
@@ -51,6 +50,7 @@ import {
   installationStatus,
   providerHealth,
 } from "../opencode/maintenance.ts";
+import { nativeSkillFilePath } from "../opencode/native-skills.ts";
 import {
   openCodeServer,
   type OpenCodeServer,
@@ -58,6 +58,7 @@ import {
 import { providerUsageAggregate } from "../opencode/opencode-usage.ts";
 import {
   hasCommandMention,
+  hasSkillMention,
   promptBody,
   selectedCommandMention,
   withoutCommandMention,
@@ -125,6 +126,13 @@ export async function stopSessionForIntent(
 let configuredSkillFiles: Map<string, string> | undefined;
 let configuredSkillNames: Set<string> | undefined;
 
+function nativeSkillsOption(params: RecordValue): boolean | undefined {
+  const value = inputRecord(
+    inputRecord(params.options).providerOptions,
+  ).nativeSkills;
+  return typeof value === "boolean" ? value : undefined;
+}
+
 const PARAM_SCHEMAS = {
   initialize: initializeParamsSchema,
   "model/list": modelListParamsSchema,
@@ -188,16 +196,30 @@ async function prepareTurnInput(
   const command = planMode
     ? undefined
     : await selectedSessionCommand(session, promptInput);
-  const body = promptBody(
-    command ? withoutCommandMention(promptInput, command.name) : promptInput,
-    {
-      configuredSkillNames,
-      disableSubagents: session.disableSubagents,
-      nativeSkillNames: session.nativeSkillNames,
-      skillFiles: configuredSkillFiles,
-    },
-  );
+  const bodyInput = command
+    ? withoutCommandMention(promptInput, command.name)
+    : promptInput;
+  // Only a turn that mentions a skill needs the native registry. Fetch it
+  // lazily so ordinary turns do not pay for an extra round trip.
+  const nativeSkills = hasSkillMention(bodyInput)
+    ? await openCodeServer.nativeSkillsState(session.cwd)
+    : undefined;
+  const body = promptBody(bodyInput, {
+    configuredSkillNames,
+    disableSubagents: session.disableSubagents,
+    nativeSkills,
+    nativeSkillRoots: openCodeServer.bbCatalogRoots(),
+    skillFiles: configuredSkillFiles,
+  });
   return { command, body };
+}
+
+async function ensureNativeSkillsForParams(params: RecordValue): Promise<void> {
+  if (!configuredSkillNames) return;
+  const cwd = stringValue(params.cwd);
+  const enabled = nativeSkillsOption(params);
+  if (!cwd || enabled === undefined) return;
+  await openCodeServer.ensureNativeSkills(cwd, enabled);
 }
 
 async function configureSession(
@@ -207,9 +229,6 @@ async function configureSession(
 ): Promise<SessionState> {
   const session = sessionFromParams(params, providerThreadId);
   try {
-    session.nativeSkillNames = await openCodeServer.nativeSkillNames(
-      params.cwd,
-    );
     await registerSession(session);
     if (forceModel) {
       await ensureSessionModel(session, session.model, true);
@@ -323,6 +342,7 @@ async function handle(request: RecordValue) {
       openCodeServer.clearThreadBroken(String(params.threadId));
       const selected = modelRefFromOptions(params.options);
       const api = await openCodeServer.api();
+      await ensureNativeSkillsForParams(params);
       const result = await api.session.create({
         location: { directory: String(params.cwd) },
         ...(selected ? { model: selected } : {}),
@@ -350,6 +370,7 @@ async function handle(request: RecordValue) {
     case "thread/resume": {
       openCodeServer.clearThreadBroken(String(params.threadId));
       await openCodeServer.start();
+      await ensureNativeSkillsForParams(params);
       await configureSession(params, params.providerThreadId, true);
       notify("thread/identity", {
         threadId: params.threadId,
@@ -367,6 +388,7 @@ async function handle(request: RecordValue) {
     }
     case "thread/fork": {
       const api = await openCodeServer.api();
+      await ensureNativeSkillsForParams(params);
       const existing = sessions.get(params.threadId);
       const checkpointId = stringValue(params.sourceProviderCheckpointId);
       // BB reuses the same BB thread ID when rewinding (or editing a past
@@ -419,9 +441,6 @@ async function handle(request: RecordValue) {
         rewound.usage =
           existing?.usage ?? statelessRewindUsage ?? rewound.usage;
         try {
-          rewound.nativeSkillNames = await openCodeServer.nativeSkillNames(
-            params.cwd,
-          );
           await registerSession(rewound);
           if (existing) {
             if (rewound.model && !sameModelRef(existing.model, rewound.model)) {
@@ -771,10 +790,11 @@ async function handle(request: RecordValue) {
         configured.roots.flatMap((root) =>
           root.skills.map(
             (skill) =>
-              [skill.name, join(root.path, skill.name, "SKILL.md")] as const,
+              [skill.name, nativeSkillFilePath(root.path, skill.name)] as const,
           ),
         ),
       );
+      openCodeServer.setConfiguredSkillRoots(configured.roots);
       sendResult(request.id, { ok: true });
       return;
     }

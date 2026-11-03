@@ -1,6 +1,9 @@
 {
   "name": "bb-plugin-opencode2",
   "version": "1.4.0",
+  "workspaces": [
+    "opencode-bb-skills"
+  ],
   "description": "BB plugin that runs threads through an installed OpenCode v2 server.",
   "keywords": [
     "bb-plugin",
@@ -29,8 +32,8 @@
     "build": "bb plugin build",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test --test-concurrency=1 \"tests/**/*.test.ts\" && vitest run tests/app/app.test.tsx",
+    "typecheck": "tsc --noEmit && npm run typecheck --workspace opencode-bb-skills",
+    "test": "npm run build && node --test --test-concurrency=1 \"tests/**/*.test.ts\" && vitest run tests/app/app.test.tsx && npm test --workspace opencode-bb-skills",
     "check": "npm run format:check && npm run typecheck && npm test"
   },
   "bb": {

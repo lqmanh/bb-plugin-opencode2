@@ -64,6 +64,7 @@ export {
   approvalPermissionReply,
   automaticPermissionReply,
   enabledDynamicTools,
+  hasSkillMention,
   permissionReplyBody,
   promptBody,
   sameDynamicTools,
@@ -80,7 +81,22 @@ export {
 export {
   addBbToolsRule,
   ensureBbToolsRule,
+  ensurePluginEntry,
+  globalConfigPath,
+  removePluginEntries,
+  removePluginEntriesFromConfig,
+  upsertPluginEntry,
 } from "./opencode/opencode-config.ts";
+export {
+  BB_PLUGIN_VERSION,
+  bbSkillsPluginPackage,
+  buildNativeSkillCatalog,
+  isBbSkillsPluginPackage,
+  nativeSkillsLocationsDir,
+  nativeSkillsRoot,
+  removeNativeSkillsRoot,
+  writeNativeSkillsLocation,
+} from "./opencode/native-skills.ts";
 export {
   experimental_providerBridge,
   stopSessionForIntent,
@@ -139,7 +155,14 @@ export default experimental_defineHostEntry({
         input.cwd ?? process.cwd(),
       );
       return experimental_filterResolvedNativeRoots(
-        { skills: nativeSkillRoots(skills, input.cwd), commands: [] },
+        {
+          skills: nativeSkillRoots(
+            skills,
+            input.cwd,
+            openCodeServer.bbCatalogRoots(),
+          ),
+          commands: [],
+        },
         {
           warn: (message) => process.stderr.write(`[opencode2] ${message}\n`),
         },
@@ -148,6 +171,10 @@ export default experimental_defineHostEntry({
     async backgroundSession(input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
       return openCodeServer.backgroundSession(input.threadId);
+    },
+    async "nativeSkills/configure"(input, context) {
+      openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      return openCodeServer.setNativeSkillsEnabled(input.enabled);
     },
     async getStatus(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);

@@ -1,43 +1,34 @@
 ## What you get
 
-OpenCode v2 appears in BB's provider picker. Start a thread, pick a model
-OpenCode has connected, and work in BB's usual interface.
+OpenCode v2 appears in BB's provider picker. Start a thread, pick a connected
+model, and work in BB's usual interface.
 
-- **BB thread controls.** Fork at a checkpoint, rewind and edit with files
-  restored, steer a running turn, stop, rename, and `/compact`.
-- **Commands and plan mode.** OpenCode's slash commands appear in BB's `/` menu.
-  `/plan` runs a turn on OpenCode's read-only `plan` agent, then returns to the
-  selected agent.
-- **Permissions and questions.** Accept edits, auto, and full map to OpenCode
-  permission rules. OpenCode's questions, and forms that fit BB's question
-  schema, use BB's native question UI; unsupported forms are cancelled with a
-  visible reason.
-- **Agents, tools, and cost.** Pick an OpenCode primary agent in BB's Agent row;
-  agent changes made in OpenCode flow back. BB tools and OpenCode skills work
-  inside the thread, and shells get the `bb` CLI on `PATH`. OpenCode's reported
-  session cost appears in BB's context card.
-- **Provider usage.** When the
-  [opencode-usage](https://github.com/lqmanh/opencode-usage) OpenCode plugin is
-  installed, BB shows provider quota windows in its usage surfaces and reports
-  the source status on the plugin settings page.
+- **Threads:** fork at a checkpoint, rewind/edit with files restored, steer,
+  stop, rename, and `/compact`.
+- **Commands and plan mode:** OpenCode's slash commands in BB's `/` menu;
+  `/plan` runs on OpenCode's `plan` agent.
+- **Permissions and questions:** accept-edits, auto, and full modes; OpenCode
+  questions and supported forms use BB's native question UI.
+- **Agents, tools, and cost:** pick an OpenCode primary agent; agent changes
+  flow back to BB. BB tools, OpenCode skills, and `bb` in shells work in the
+  thread. Session cost appears in BB's context card.
+- **Provider usage:** when
+  [opencode-usage](https://github.com/lqmanh/opencode-usage) is installed, BB
+  shows quota windows and reports the source status.
 
 ## Requirements
 
-- OpenCode v2 2.2.5 or newer, with `opencode2` on the host's `PATH`. BB can
-  install and update it from the provider settings.
-- At least one model provider connected in OpenCode (`opencode2 auth login`).
-  OpenCode owns the credentials; model usage is billed by that provider, not BB.
+- OpenCode v2 2.2.5 or newer, with `opencode2` on the host's `PATH`
+- At least one model provider connected in OpenCode (`opencode2 auth login`)
 
 ## Good to know
 
 - Native OpenCode subagents are enabled by default. Turn on **Disable provider
   subagents** to delegate through BB instead.
-- The plugin keeps one deny rule in your global OpenCode config so BB threads'
-  tools do not appear in OpenCode's own sessions. The rule stays after the
-  plugin is disabled; it only matches this plugin's server names.
-- BB archive and unarchive are mirrored to the OpenCode session. If OpenCode
-  archives, deletes, or moves the session externally, the next turn explains the
-  problem instead of silently resuming it.
-- Thread goals and service tiers are not supported. Provider usage and
-  rate-limit windows come from that plugin when it is installed; OpenCode itself
-  reports session cost but not quota windows.
+- **Register BB skills natively in OpenCode** is off by default. When enabled,
+  BB installs the pinned `opencode-bb-skills` plugin from GitHub so BB's skills
+  appear in OpenCode's native registry. Other clients opening the same workspace
+  see them too; the host and OpenCode must be co-located.
+- The plugin keeps one deny rule in the global OpenCode config so BB thread
+  tools do not appear in OpenCode's own sessions.
+- Thread goals and service tiers are not supported.

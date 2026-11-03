@@ -1,0 +1,33 @@
+{
+  "name": "opencode-bb-skills",
+  "version": "1.4.0",
+  "description": "Register BB's workspace skills in OpenCode's native skill registry",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lqmanh/bb-plugin-opencode2.git",
+    "directory": "opencode-bb-skills"
+  },
+  "exports": {
+    "./server": "./src/server/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.2.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "opencode": ">=2.2.5"
+  }
+}

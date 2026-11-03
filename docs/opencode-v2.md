@@ -1,235 +1,205 @@
 # OpenCode v2 notes
 
-The bridge calls OpenCode through `@opencode/client`. Its generated types cover
-request and response fields and event envelopes, but not the semantics and
-metadata below. Official docs: https://opencode.ai/v2/docs/build/client.
+The bridge uses `@opencode/client`. The generated types cover request and event
+shapes, not the semantics below. Docs: https://opencode.ai/v2/docs/build/client.
 
 ## Permissions
 
-Rules are `{action, resource, effect: allow|deny|ask}`. OpenCode merges the
-agent rules with the session rules and evaluates them with the last matching
-rule winning. `session.update` replaces the session ruleset.
+Rules are `{action, resource, effect: allow|deny|ask}`. OpenCode merges agent
+and session rules, with the last match winning. `session.update` replaces the
+session ruleset. Permission actions are tool names; MCP tools use
+`<server>_<tool>`.
 
-Permission actions are tool names. MCP tools use `<server>_<tool>`, which is how
-`bb_opencode2_*` rules hide the per-thread BB servers.
-
-The bridge answers `permission.asked` for the active turn and for background
-children after their parent turn; foreground children without an active turn are
+The bridge answers permission requests for the active turn and for background
+children after their parent turn. Foreground children without an active turn are
 ignored.
 
 ## Events
 
-The event stream is live-only: it does not replay, so reconcile active turns
-after a reconnect.
-
-The bridge treats `session.inbox.delivered.inboxID` as the prompt message ID and
-ignores `session.execution.*` until it arrives, so trailing events from earlier
-work do not end the new turn.
-
-The bridge accepts tool input from `session.tool.called.input` or, when that is
-absent, from the accumulated `session.tool.input.ended` text.
-
-Shell tools emit `session.tool.progress` with `metadata.shellID`; poll
-`shell.output` with its byte cursor to stream output while the command runs. A
-non-zero exit can still arrive as `session.tool.success`; read `metadata.exit`
-or the trailing `Exited with code N` in the content.
-
-Edit success carries per-file patches under `metadata.files`:
-`{file, patch, status, additions, deletions}`. Write success has no patch, so
-write rows show only path and kind; the turn diff carries the patch.
-
-Native subagents: `session.tool.progress` carries `metadata.sessionID` for the
-child session, and child-session events use that session ID. The tool result is
-wrapped in `<subagent sessionID="…" state="…">…</subagent>`.
-
-`mcp.status.changed` carries the server name. Read `mcp.list` once per event to
-get the new status.
-
-Compaction also accepts legacy `session.next.compaction.*` names and
-`session.message.updated` with a compaction message.
+- The stream is live-only; reconcile active turns after a reconnect.
+- `session.inbox.delivered.inboxID` is the prompt message ID. Ignore
+  `session.execution.*` until it arrives so earlier work does not end the turn.
+- Tool input comes from `session.tool.called.input` or the accumulated
+  `session.tool.input.ended` text.
+- Shells stream via `session.tool.progress` + `shell.output` cursors. A non-zero
+  exit can still be `session.tool.success`; read `metadata.exit` or the trailing
+  `Exited with code N`.
+- Edit success carries patches in `metadata.files`; write success has no patch,
+  so write rows show only path and kind.
+- Native subagents use `metadata.sessionID` for the child session. Results are
+  wrapped in `<subagent sessionID="…" state="…">`.
+- `mcp.status.changed` carries the server name; read `mcp.list` for status.
+- Compaction also appears as `session.next.compaction.*` or a compaction
+  `session.message.updated`.
 
 ## Background tasks
 
-A shell with `background: true` succeeds with `metadata.status: "running"` and
-`metadata.shellID`; the command is still running. `session.shell.started` and
-`shell.created` carry its output file in `shell.file`. Completion is a
-`session.synthetic` with `<shell id="…" state="…" command="…">…</shell>` and
-metadata `{source:"shell", shellID, jobID?, state, exit?, signal?, timeout?}`,
-or `session.shell.ended`/`shell.exited`.
+A background shell succeeds with `metadata.status: "running"` and
+`metadata.shellID`. `session.shell.started`/`shell.created` carry its output
+file. Completion is a `session.synthetic` `<shell …>` or
+`session.shell.ended`/`shell.exited`.
 
-A subagent with `background: true` succeeds with `metadata.status: "running"`
-and the child `metadata.sessionID`. Completion is a parent `session.synthetic`
-with `<subagent sessionID="…" state="…" description="…">…</subagent>` and
-metadata `{source:"subagent", childID, agent, state}`. The child stays in the
-shared `ChildSessionRecord` registry, so its usage, permissions, and forms
-survive the spawning turn.
+A background subagent succeeds with `metadata.status: "running"` and the child
+`metadata.sessionID`. Completion is a parent `session.synthetic` `<subagent …>`.
+Its child-session usage, permissions, and forms survive the spawning turn.
 
-Both render as thread-scoped `backgroundTask` rows (`local_bash`, `local_agent`)
-with `skipTranscript: false` and `foreground: false`. Rows open with the
-spawning turn and close at thread scope, so an idle completion still lands. A
-foreground command or delegation that OpenCode backgrounds is closed as
-completed and replaced by one task row. Fast completions are buffered until the
-tool success supplies the shell or child ID; duplicate and late completions are
-ignored. `subagentsDisabled` still denies subagents, while background shells
-keep working; a denied subagent stays a failed delegation row.
+Both render as thread-scoped `backgroundTask` rows. A foreground tool that
+OpenCode backgrounds is closed and replaced by one task row. Fast completions
+are buffered until the shell or child ID is known; duplicate and late
+completions are ignored.
 
-`POST /api/session/:id/background` (`session.background`) backgrounds every
-active foreground backgroundable tool. It is all-or-nothing, returns no count,
-and is a no-op when nothing is blocking. The plugin exposes it as a thread menu
-action and never calls it automatically.
+`session.background` backgrounds every active foreground backgroundable tool. It
+is all-or-nothing, returns no count, and is exposed as a thread menu action.
 
-`thread/stop` with `intent:"interrupt"` stops background shells and child
-sessions before the parent; `release` leaves OpenCode work alone and BB settles
-dangling rows. On reconnect, the bridge reads recent `session.synthetic`
-messages and closes missed completions. A worker restart is different: BB
-settles open rows and the plugin does not recreate them, so later completions
-are ignored.
+`thread/stop` with `interrupt` stops background work before the parent;
+`release` leaves OpenCode work alone. BB settles open rows after a worker
+restart and does not recreate them.
 
 ## Diffs
 
-`session.diff` is per turn: `from` and `to` are user message IDs, and omitting
-`to` includes steered prompts in the same turn. Entries carry relative files and
-unified patches; `context` controls hunk size. An empty turn or a session
-without snapshots yields no entries, and the bridge treats a failed request as
-no patch. Shell changes and write patches appear in the turn diff, not as
-per-tool file rows.
+`session.diff` is per turn. `from`/`to` are user message IDs; omitting `to`
+includes steered prompts. Entries carry relative files and unified patches.
+Failed requests are treated as no patch.
 
 ## Message pagination
 
-`message.list` can return a `next` cursor after the last message, so stop on an
-empty page rather than on a missing cursor. Send `order=asc` only on the first
-page; use the cursor alone for later pages.
+`message.list` can return a `next` cursor after the last message. Stop on an
+empty page. Send `order=asc` only on the first page.
 
 ## Forms
 
-`form.created` is matched to its pending tool call through
-`form.metadata.tool.id` when `metadata.kind` is `"question"`. The question tool
-sets that metadata. A form from any other source, or one with no tool row, gets
-a synthetic question row keyed by the form ID. A form that arrives before the
-question tool row is stashed until the row opens.
+`form.created` is matched to its tool call through `form.metadata.tool.id` when
+`metadata.kind` is `"question"`. Forms with no tool row get a synthetic question
+row. A form arriving before its row is stashed.
 
-BB's question UI can represent `string`, `number`, `integer`, `boolean`, and
-`multiselect` fields only. Forms with `external` fields, `when` conditions,
-hidden-only fields, or more questions or options than BB accepts are cancelled
-with a message, which OpenCode returns to the model as tool failure. Hidden
-fields contribute their defaults. `required`, `custom`, defaults, number and
-string limits, and `email`/`uri`/`date`/`date-time` formats are applied when the
-answer is mapped back.
+BB supports `string`, `number`, `integer`, `boolean`, and `multiselect` fields.
+Forms with external fields, conditions, hidden-only fields, or too many
+questions/options are cancelled with a message that OpenCode returns to the
+model as a tool failure. Hidden fields use their defaults; required flags,
+defaults, limits, and common formats are applied when mapping answers.
 
-## Commands
+## Commands and plan mode
 
-`command.list` returns the workspace's slash commands. The bridge advertises
-`commands: { list: true }` and answers `commands/list`; BB's command cache
-refreshes on its own schedule. A prompt mention is routed to `session.command`
-only when it is a `command` resource, uses the `/` trigger, and the name is in
-the current list. The mention is removed from the prompt text and its arguments
-become the command's text; other mentions keep their offsets. Unknown commands
-stay ordinary text.
+`command.list` returns the workspace's slash commands. A prompt mention routes
+to `session.command` only when it is a `command` resource with `/` and the name
+is currently listed. The mention is removed and its arguments become the command
+text; other mentions keep their offsets. Unknown commands stay ordinary text.
 
 `session.command` returns no message ID. The turn waits for
-`session.inbox.enqueued` and adopts that inbox ID as its checkpoint, then uses
-`session.inbox.delivered` to know the input started. A command that never
-creates an inbox message has no checkpoint.
+`session.inbox.enqueued` and uses that inbox ID as its checkpoint.
 
-`promptMode: "plan"` in the turn options is BB plan mode, not an OpenCode
-command. The bridge removes the `/plan` mention, switches the session to the
-`plan` agent for the turn, and returns to the `agent` session option or the
-pre-plan agent on the next ordinary turn. Steering does not end plan mode. While
-plan mode is active, the session rules also deny `edit`, `write`, and `patch`,
-so full permission mode cannot override the plan agent's edit restriction.
+`promptMode: "plan"` switches to the `plan` agent for the turn and returns to
+the previous agent afterward. Steering keeps plan mode. Edit, write, and patch
+stay denied even under full permission mode.
 
-## Usage and cost
+## Usage
 
-`session.usage.updated` carries cumulative totals for one session and `cost` in
-USD (`MoneyUSD`). A native subagent runs in its own child session, so the
-parent's usage event excludes it. The bridge keeps a child-session registry,
-adds child totals to `usage.total` and child cost to `contextWindow.cost`, and
-leaves the parent's `usage.last`, `contextWindow.used`, and context size alone.
-The registry is retained after a turn ends so late child usage still reaches the
-parent. After a reconnect or resume, the bridge rebuilds it from
-`session.list({parentID})` with a bounded recent-window scan; replayed and
-hydrated totals merge monotonically.
-
-`session.step.ended` and `.failed` carry the latest request's tokens. Only the
-parent step supplies `usage.last` and the live context estimate.
-
-When a background subagent completes, its task row carries
-`usage: {totalTokens, toolUses, durationMs}` from the child registry. It is
-all-or-nothing: omitted when the child has no recorded usage. `totalTokens` sums
-input, output, reasoning, cached read, and cache write; `toolUses` is `0` until
-tracked; `durationMs` is the non-negative task duration.
+`session.usage.updated` carries cumulative session totals and USD cost. Native
+subagents run in child sessions, so their usage is kept in a child registry and
+merged into the parent total and cost. The parent's last-step tokens and context
+meter stay parent-only. Child usage survives the turn and is rebuilt
+monotonically after reconnect or resume. A background subagent's task row
+carries `usage` only when the child has recorded usage; it is omitted otherwise.
 
 ## Archive and lifecycle
 
-`session.update({archived})` archives or unarchives the OpenCode session. BB
-archive and unarchive commands are forwarded there, and the resulting
-`session.archived`/`session.unarchived` event is consumed so it is not treated
-as an external change.
-
-`session.archived` from outside BB marks the session as externally archived and
-raises the `sessionArchived` recovery hint; the next turn fails until
-`session.unarchived` arrives. `session.deleted` fails an active turn, removes
-the session from memory, and records a broken-thread reason for the next turn.
-`session.moved` fails an active turn and blocks later turns with the new
-location. `thread/start` and `thread/resume` clear a broken-thread reason.
+`session.update({archived})` mirrors BB archive/unarchive. The bridge consumes
+its own `session.archived`/`session.unarchived` events so they are not treated
+as external. External archive, deletion, or moves raise a recovery hint and
+block later turns with a clear error; external archive keeps blocking until
+`session.unarchived`. `thread/start` and `thread/resume` clear the broken-thread
+reason.
 
 ## Two-way state
 
-`session.agent.selected` mirrors an agent chosen in OpenCode back into BB's
-`agent` session option: the bridge updates `agentChoice` and republishes
-`bb/session-options` and `bb/session-option-selections`. Plan mode ignores the
-event for its turn so its own switch does not overwrite the user's choice.
-
-`session.renamed` emits a `thread.name` delta with `source: "agent"`. BB applies
-it only to an untitled thread, so a BB title is never overwritten. A title this
-bridge set is ignored as its own echo.
-
-`permission.replied`, `form.replied`, and `form.cancelled` record interactions
-settled in another OpenCode client. The provider bridge cannot cancel a provider
-interaction; BB's card remains until the user answers it or the turn ends. When
-the user later answers the card, a form closes its row as `Answered in OpenCode`
-or `Cancelled in OpenCode`, and a permission answer is not sent to OpenCode
-again.
+Agent selections in OpenCode update BB's `agent` option. Renames update only
+untitled BB threads. A form answered or cancelled in another client is recorded;
+its BB row closes when the user answers or the turn ends. A permission answered
+elsewhere is recorded so BB does not send a stale reply.
 
 ## Live refresh
 
-`provider.updated`, `model.updated`, and `credential.updated` invalidate the
-model catalog cache. `command.updated` invalidates the command catalog, and
-`skill.updated` makes sessions reload native skills on their next turn.
-`installation.update-available` clears the cached latest CLI version. BB keeps
-its own model and command caches, so its picker updates on its next refresh.
+Provider, model, and credential events invalidate the model catalog;
+`command.updated` invalidates commands; native skills are refreshed on turns
+that mention one; `installation.update-available` clears the cached latest CLI
+version. BB keeps its own caches and updates them on its own schedule.
+
+## Native skills plugin
+
+The opt-in `nativeSkills` setting adds a standalone OpenCode plugin to the
+global `plugins` array:
+
+```jsonc
+{
+  "package": "github:lqmanh/bb-plugin-opencode2#v1.4.0::path:opencode-bb-skills",
+  "options": {
+    "locationsDir": "<BB dataDir>/runtime/opencode-bb-skills/locations",
+  },
+}
+```
+
+The plugin reads the catalog matching the OpenCode location and registers its
+skills with `ctx.skill.transform`. A watcher and a periodic poll call
+`ctx.skill.reload()` when the catalog changes or disappears. Catalogs contain
+the workspace's effective BB skills, so project and shared skills are covered
+without leaking to other workspaces.
+
+The host rewrites its own entry when BB updates, so the pin follows the BB
+version. `opencode plugin check/update` skip exact revisions. Enabling adds or
+replaces the entry and reloads OpenCode when idle; disabling removes the entry
+and catalogs. The first turn after enable/upgrade may use the fallback while
+OpenCode downloads the pinned package.
+
+Limits:
+
+- The transform is location-scoped. Other clients opening the same workspace see
+  the skills.
+- The host and OpenCode service must be co-located.
+- A colliding native skill ID is overridden in BB-managed workspaces and logged.
+- OpenCode needs GitHub access on first install. The release tag must exist
+  before users enable the setting.
+- For local development, set `BB_OPENCODE_BB_SKILLS_PACKAGE` to a local path or
+  a full branch-pinned spec such as
+  `github:lqmanh/bb-plugin-opencode2#main::path:opencode-bb-skills`. Production
+  uses the version tag.
+
+If the plugin is missing, the config is read-only, a catalog is invalid, or a
+skill file is missing, BB uses the existing `SKILL.md` attachment fallback.
 
 ## Experimental dependencies
 
-Kept because there is no non-experimental alternative:
+- `experimental.mcp.add` / `remove` register the per-thread dynamic-tools MCP
+  server.
+- `experimental.session.instructions.entry.put` / `remove` install BB
+  instructions.
+- The global config is edited directly because `experimental.config.update` only
+  accepts `shell`.
 
-- `experimental.mcp.add` and `remove` register the per-thread BB dynamic-tools
-  MCP server.
-- `experimental.session.instructions.entry.put` and `remove` install BB
-  instructions on the session.
-- The global BB-tools deny rule edits `opencode.json(c)` directly.
-  `experimental.config.update` is the only config write API, so the direct edit
-  remains.
+## Maintainer notes
 
-## Experimental watchlist
+### Experimental watchlist
 
-Revisit if promoted or dropped:
+Evaluated and excluded unless noted:
 
-| API                                                           | Would enable                                                                     | Current decision                                                                                          |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `experimental.usage.limits`                                   | Provider usage and quota card, including Go rolling, weekly, and monthly windows | Excluded; provider usage comes from the [opencode-usage](https://github.com/lqmanh/opencode-usage) plugin |
-| `experimental.session.stats`                                  | Local token, cost, and tool usage dashboard                                      | Excluded; needs a native BB surface                                                                       |
-| `experimental.session.import` and `export`                    | Session import and export                                                        | Excluded; BB has no import surface                                                                        |
-| `experimental.artifacts.*`                                    | Artifact browser or panel                                                        | Excluded; no native BB artifact surface                                                                   |
-| `experimental.schedule.*`                                     | OpenCode schedules                                                               | Excluded; BB has `sendAt` and plugin cron                                                                 |
-| `experimental.persistentPty.*`                                | Persistent PTY integration                                                       | Excluded; overlaps BB terminals                                                                           |
-| `experimental.generate.text`                                  | OpenCode-backed BB AI service                                                    | Excluded; BB helper timeout is 5 seconds                                                                  |
-| `experimental.generate.image` and `decisions`                 | Image generation and structured decisions                                        | Not needed                                                                                                |
-| `experimental.voice.*`                                        | Voice input                                                                      | Excluded; BB has its own voice service                                                                    |
-| `experimental.mcp.add`, `remove`, `connect`, and `disconnect` | MCP management                                                                   | `add` and `remove` kept for dynamic tools; management UI excluded                                         |
-| `experimental.config.update`                                  | Native config writes                                                             | Excluded; direct file edit remains                                                                        |
-| `experimental.integration.wellknown.add`                      | Auth discovery                                                                   | Not needed                                                                                                |
-| `experimental.file.write`, `watch`, and `unwatch`             | File operations                                                                  | Overlaps BB file APIs                                                                                     |
-| `experimental.media.get`                                      | Media retrieval                                                                  | Not needed                                                                                                |
-| `experimental.migration.v1.status`                            | V1 migration status                                                              | Not needed                                                                                                |
-| `experimental.session.log`, `wait`, and `skill`               | Diagnostics, waiting, and skill activation                                       | Not needed                                                                                                |
+| API                                                                                                                                | Decision                                                                |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `experimental.usage.limits`                                                                                                        | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead. |
+| `experimental.session.stats`, `import`, `export`                                                                                   | No BB surface.                                                          |
+| `experimental.artifacts.*`, `schedule.*`, `persistentPty.*`                                                                        | No matching BB surface, or overlaps BB terminals.                       |
+| `experimental.generate.text`, `generate.image`, `decisions`, `voice.*`                                                             | BB has its own services; not needed.                                    |
+| `experimental.mcp.*`                                                                                                               | `add`/`remove` kept for dynamic tools; management UI excluded.          |
+| `experimental.config.update`                                                                                                       | Only accepts `shell`; direct config edits remain.                       |
+| `experimental.integration.wellknown.add`, `file.write/watch/unwatch`, `media.get`, `migration.v1.status`, `session.log/wait/skill` | Not needed, or overlaps BB APIs.                                        |
+
+### Known gaps
+
+- Command turns without an inbox message have no rewind checkpoint.
+- Background task rows do not survive a worker restart; BB settles them as
+  interrupted and the plugin does not recreate them.
+- Idle completion only marks the thread unread; a transcript message needs BB
+  core support.
+- Foreground subagent forms are handled only while the parent turn is active;
+  background children keep a task-scoped context.
+- Turn reconciliation is covered by unit tests only; a dropped event stream was
+  never reproduced live.
+- Unknown OpenCode events are dropped rather than forwarded as diagnostics.

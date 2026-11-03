@@ -7,6 +7,10 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Added
 
+- Opt-in native skill registration. BB installs the pinned `opencode-bb-skills`
+  OpenCode plugin and writes a per-workspace catalog, so BB's skills appear in
+  OpenCode's native registry. Off by default; other clients opening the same
+  workspace see them.
 - Background shells and subagents now map to BB `backgroundTask` rows, including
   foreground tools OpenCode moves to the background.
 - A thread menu action backgrounds all active foreground backgroundable tools in

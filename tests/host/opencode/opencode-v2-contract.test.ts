@@ -7,6 +7,7 @@ import {
   dynamicToolRow,
   forkBoundaryRetainingThrough,
   agentSessionOption,
+  hasSkillMention,
   mapModel,
   metadataFileChanges,
   modelCatalogEntry,
@@ -341,7 +342,7 @@ test("forwards native OpenCode skill mentions, not only BB-configured ones", () 
     ],
     {
       configuredSkillNames: new Set(["bb-cli"]),
-      nativeSkillNames: new Set(["unslop"]),
+      nativeSkills: new Map([["unslop", undefined]]),
     },
   );
   assert.deepEqual(body.skills, [
@@ -719,5 +720,136 @@ test("shows the agent a plan turn returns to", () => {
       planMode: false,
     }),
     "build",
+  );
+});
+
+test("detects only skill mentions when deciding to read the native registry", () => {
+  const mention = (source: string, trigger: string) => ({
+    resource: { kind: "command", source, trigger, name: "review" },
+  });
+  assert.equal(
+    hasSkillMention([
+      { type: "text", text: "/review", mentions: [mention("skill", "/")] },
+    ]),
+    true,
+  );
+  assert.equal(
+    hasSkillMention([
+      { type: "text", text: "hello", mentions: [mention("command", "/")] },
+    ]),
+    false,
+  );
+  assert.equal(hasSkillMention([{ type: "text", text: "hello" }]), false);
+});
+
+test("uses the native skill only when its path belongs to BB's catalog", () => {
+  const mention = {
+    type: "text",
+    text: "/review this",
+    mentions: [
+      {
+        start: 0,
+        end: 7,
+        resource: {
+          kind: "command",
+          source: "skill",
+          trigger: "/",
+          name: "review",
+        },
+      },
+    ],
+  };
+  const base = {
+    configuredSkillNames: new Set(["review"]),
+    skillFiles: new Map([["review", "/tmp/bb/review/SKILL.md"]]),
+  };
+
+  assert.deepEqual(
+    promptBody([mention], {
+      ...base,
+      nativeSkills: new Map([["review", "/bb/catalog/review/SKILL.md"]]),
+      nativeSkillRoots: new Set(["/bb/catalog"]),
+    }).skills,
+    [{ id: "review", mention: { start: 0, end: 7, text: "/review" } }],
+  );
+  assert.deepEqual(
+    promptBody([mention], {
+      ...base,
+      nativeSkills: new Map([["review", "/user/skills/review/SKILL.md"]]),
+      nativeSkillRoots: new Set(["/bb/catalog"]),
+    }).files,
+    [{ uri: "file:///tmp/bb/review/SKILL.md", name: "review/SKILL.md" }],
+  );
+  assert.deepEqual(
+    promptBody([mention], {
+      ...base,
+      nativeSkills: new Map([["review", undefined]]),
+      nativeSkillRoots: new Set(["/bb/catalog"]),
+    }).files,
+    [{ uri: "file:///tmp/bb/review/SKILL.md", name: "review/SKILL.md" }],
+  );
+});
+
+test("keeps native-only skill mentions native", () => {
+  const body = promptBody(
+    [
+      {
+        type: "text",
+        text: "/unslop this",
+        mentions: [
+          {
+            start: 0,
+            end: 7,
+            resource: {
+              kind: "command",
+              source: "skill",
+              trigger: "/",
+              name: "unslop",
+            },
+          },
+        ],
+      },
+    ],
+    {
+      nativeSkills: new Map([["unslop", "/user/skills/unslop/SKILL.md"]]),
+      nativeSkillRoots: new Set(["/bb/catalog"]),
+    },
+  );
+  assert.deepEqual(body.skills, [
+    { id: "unslop", mention: { start: 0, end: 7, text: "/unslop" } },
+  ]);
+});
+
+test("can ignore BB catalog roots in the composer's native roots", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const base = mkdtempSync(join(tmpdir(), "oc-native-ignore-"));
+  const catalog = join(
+    base,
+    ".bb",
+    "runtime",
+    "global-skills",
+    "hash",
+    "skills",
+  );
+  const user = join(base, "home", ".agents", "skills");
+  for (const [root, name] of [
+    [catalog, "inline-vis"],
+    [user, "unslop"],
+  ] as const) {
+    mkdirSync(join(root, name), { recursive: true });
+    writeFileSync(join(root, name, "SKILL.md"), "---\nname: x\n---\n");
+  }
+  assert.deepEqual(
+    nativeSkillRoots(
+      [
+        { path: join(catalog, "inline-vis", "SKILL.md") },
+        { path: join(user, "unslop", "SKILL.md") },
+      ],
+      null,
+      new Set([catalog]),
+    ),
+    [{ path: user, origin: "user", shape: "skills" }],
   );
 });

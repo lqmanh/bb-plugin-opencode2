@@ -11,6 +11,7 @@ test("uses only public SDK and package-local imports", () => {
       /^@testing-library\/react$/,
       /^@opencode\/client$/,
       /^@opencode\/client\/service$/,
+      /^@opencode\/plugin$/,
       /^@radix-ui\/react-slot$/,
       /^class-variance-authority$/,
       /^clsx$/,

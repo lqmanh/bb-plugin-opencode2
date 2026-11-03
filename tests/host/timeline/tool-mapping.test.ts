@@ -243,7 +243,7 @@ test("falls back to the configured BB skill file when OpenCode has not discovere
       },
     ],
     {
-      nativeSkillNames: new Set(["other"]),
+      nativeSkills: new Map([["other", undefined]]),
       skillFiles: new Map([["review", "/tmp/bb-skills/review/SKILL.md"]]),
     },
   );

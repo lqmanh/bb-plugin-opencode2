@@ -5,9 +5,11 @@ import {
   type OpenCodeClient,
 } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { errorMessage } from "../../shared/errors.ts";
+import type { NativeSkillsStatus } from "../../shared/settings-contract.ts";
 import { writeJsonFileAtomic } from "../session/persistence.ts";
 import { sessions, sessionsByProviderId } from "../session/session-teardown.ts";
 import {
@@ -23,7 +25,23 @@ import {
   type UsageTotals,
 } from "../types.ts";
 import { modelCatalogEntry, type ModelCatalogEntry } from "./models.ts";
-import { ensureBbToolsRule } from "./opencode-config.ts";
+import {
+  bbSkillsPluginPackage,
+  isBbSkillsPluginPackage,
+  nativeSkillsLocationsDir,
+  pathUnderRoots,
+  pruneNativeSkillsLocations,
+  removeNativeSkillsLocation,
+  removeNativeSkillsRoot,
+  writeNativeSkillsLocation,
+  type NativeSkillRoot,
+} from "./native-skills.ts";
+import {
+  ensureBbToolsRule,
+  ensurePluginEntry,
+  globalConfigPath,
+  removePluginEntriesFromConfig,
+} from "./opencode-config.ts";
 import {
   forkBoundaryRetainingThrough,
   revertTargetRetainingThrough,
@@ -43,6 +61,8 @@ const SESSION_REGISTRY_FILE = "opencode2-session-registry.json";
 const CATALOG_TTL_MS = 60_000;
 const CATALOG_COLD_RETRIES = 10;
 const CATALOG_COLD_RETRY_MS = 300;
+const SKILLS_READY_RETRIES = 3;
+const SKILLS_RELOAD_INTERVAL_MS = 30_000;
 const COMMAND_CATALOG_MAX = 500;
 const ARCHIVE_EVENT_TTL_MS = 30_000;
 // OpenCode abandons MCP startup after 30s; this is only a last-resort guard for a missed status event.
@@ -133,6 +153,13 @@ export class OpenCodeServer {
   private client?: OpenCodeClient;
   private starting?: Promise<void>;
   private dataDir?: string;
+  private nativeSkillsPackage?: string;
+  private configuredSkillRoots: readonly NativeSkillRoot[] = [];
+  private configuredSkillRealRoots = new Set<string>();
+  private nativeSkillsConfigDirty = false;
+  private nativeSkillsCleanupChecked = false;
+  private nativeSkillsLastReloadAt = 0;
+  private nativeSkillsUnreadyLogged = false;
   private eventAbortController?: AbortController;
   private watchdog?: ReturnType<typeof setInterval>;
   private connectionGeneration = 0;
@@ -157,6 +184,177 @@ export class OpenCodeServer {
         `[opencode2] Could not update OpenCode's global config: ${errorMessage(error)}\n`,
       );
     }
+  }
+
+  setConfiguredSkillRoots(roots: readonly NativeSkillRoot[]) {
+    const next = roots.map((root) => ({
+      ...root,
+      path: resolve(root.path),
+    }));
+    if (JSON.stringify(next) === JSON.stringify(this.configuredSkillRoots))
+      return;
+    this.configuredSkillRoots = next;
+    this.configuredSkillRealRoots = new Set();
+    for (const root of this.configuredSkillRoots) {
+      this.configuredSkillRealRoots.add(root.path);
+      try {
+        this.configuredSkillRealRoots.add(realpathSync(root.path));
+      } catch {
+        // The catalog may already be gone; the resolved path is still useful.
+      }
+    }
+    if (!this.nativeSkillsPackage || !this.dataDir) return;
+    for (const cwd of new Set([...sessions.values()].map((s) => s.cwd))) {
+      void writeNativeSkillsLocation(
+        this.dataDir,
+        cwd,
+        this.configuredSkillRoots,
+      ).catch(() => {});
+    }
+  }
+
+  bbCatalogRoots(): ReadonlySet<string> {
+    return this.configuredSkillRealRoots;
+  }
+
+  async setNativeSkillsEnabled(enabled: boolean): Promise<NativeSkillsStatus> {
+    const dataDir = this.dataDir;
+    if (!dataDir) {
+      return { enabled, error: "Host data directory is not set" };
+    }
+    const configPath = globalConfigPath();
+    try {
+      if (enabled) {
+        const packageSpec = bbSkillsPluginPackage();
+        const locationsDir = nativeSkillsLocationsDir(dataDir);
+        const changed =
+          (await ensurePluginEntry(configPath, isBbSkillsPluginPackage, {
+            package: packageSpec,
+            options: { locationsDir },
+          })) === "changed";
+        await pruneNativeSkillsLocations(dataDir).catch(() => {});
+        this.nativeSkillsPackage = packageSpec;
+        this.nativeSkillsCleanupChecked = false;
+        this.nativeSkillsLastReloadAt = 0;
+        this.nativeSkillsUnreadyLogged = false;
+        if (changed) this.nativeSkillsConfigDirty = true;
+        await this.settleNativeSkillsConfig();
+        return { enabled: true, packageSpec, locationsDir };
+      }
+
+      await removeNativeSkillsRoot(dataDir).catch(() => {});
+      const changed =
+        (await removePluginEntriesFromConfig(
+          configPath,
+          isBbSkillsPluginPackage,
+        )) === "removed";
+      this.nativeSkillsPackage = undefined;
+      this.nativeSkillsLastReloadAt = 0;
+      this.nativeSkillsUnreadyLogged = false;
+      this.nativeSkillsCleanupChecked = true;
+      if (changed) this.nativeSkillsConfigDirty = true;
+      await this.settleNativeSkillsConfig();
+      return { enabled: false };
+    } catch (error) {
+      if (enabled) {
+        this.nativeSkillsPackage = undefined;
+      } else {
+        this.nativeSkillsCleanupChecked = false;
+      }
+      return { enabled, error: errorMessage(error) };
+    }
+  }
+
+  private async settleNativeSkillsConfig() {
+    if (!this.nativeSkillsConfigDirty || !this.client) return;
+    if (await this.reloadConfigWhenIdleAsync())
+      this.nativeSkillsConfigDirty = false;
+  }
+
+  private logNativeSkillsUnavailable(error: string) {
+    process.stderr.write(
+      `[opencode2] Native skills are unavailable: ${error}\n`,
+    );
+  }
+
+  async ensureNativeSkills(cwd: string, enabled: boolean): Promise<boolean> {
+    const dataDir = this.dataDir;
+    if (!dataDir) return false;
+    try {
+      if (!enabled) {
+        await removeNativeSkillsLocation(dataDir, cwd).catch(() => {});
+        if (this.nativeSkillsPackage || !this.nativeSkillsCleanupChecked) {
+          const status = await this.setNativeSkillsEnabled(false);
+          if (status.error) {
+            this.logNativeSkillsUnavailable(status.error);
+            return false;
+          }
+        }
+        return true;
+      }
+
+      const expectedNames = new Set(
+        await writeNativeSkillsLocation(
+          dataDir,
+          cwd,
+          this.configuredSkillRoots,
+        ),
+      );
+      const packageSpec = bbSkillsPluginPackage();
+      if (this.nativeSkillsPackage !== packageSpec) {
+        const status = await this.setNativeSkillsEnabled(true);
+        if (status.error) {
+          this.logNativeSkillsUnavailable(status.error);
+          return false;
+        }
+      }
+      await this.api();
+      await this.settleNativeSkillsConfig();
+      if (await this.nativeSkillsReady(cwd, expectedNames)) {
+        this.nativeSkillsUnreadyLogged = false;
+        return true;
+      }
+      if (!this.nativeSkillsUnreadyLogged) {
+        this.nativeSkillsUnreadyLogged = true;
+        process.stderr.write(
+          "[opencode2] Native skills are not ready; using SKILL.md attachments\n",
+        );
+      }
+      if (
+        Date.now() - this.nativeSkillsLastReloadAt >
+        SKILLS_RELOAD_INTERVAL_MS
+      ) {
+        this.nativeSkillsLastReloadAt = Date.now();
+        this.reloadConfigWhenIdle();
+      }
+      return false;
+    } catch (error) {
+      process.stderr.write(
+        `[opencode2] Could not prepare native OpenCode skills: ${errorMessage(error)}\n`,
+      );
+      return false;
+    }
+  }
+
+  async nativeSkillsReady(
+    cwd: string,
+    expectedNames: ReadonlySet<string>,
+  ): Promise<boolean> {
+    if (expectedNames.size === 0) return true;
+    const roots = this.bbCatalogRoots();
+    for (let attempt = 0; attempt < SKILLS_READY_RETRIES; attempt++) {
+      if (attempt > 0)
+        await new Promise((resolve) =>
+          setTimeout(resolve, CATALOG_COLD_RETRY_MS),
+        );
+      const skills = await this.nativeSkillsState(cwd);
+      const ready = [...expectedNames].every((name) => {
+        const path = skills?.get(name);
+        return path !== undefined && pathUnderRoots(path, roots);
+      });
+      if (ready) return true;
+    }
+    return false;
   }
 
   // Tracks per-session MCP bridges so discard can remove OpenCode's
@@ -590,11 +788,6 @@ export class OpenCodeServer {
     this.commandCatalogs.clear();
   }
 
-  invalidateNativeSkills() {
-    for (const session of sessions.values())
-      session.nativeSkillNames = undefined;
-  }
-
   /** The OpenCode state a registered session needs to keep its own flags. */
   async sessionState(sessionId: string): Promise<{
     agent?: string;
@@ -766,6 +959,20 @@ export class OpenCodeServer {
     );
   }
 
+  async nativeSkillsState(
+    cwd: string,
+  ): Promise<Map<string, string | undefined> | undefined> {
+    try {
+      return new Map(
+        (await this.nativeSkills(cwd)).map(
+          (skill) => [skill.id, skill.path] as const,
+        ),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Wait until OpenCode reports a runtime MCP server connected. Gives up
    * quietly after the timeout or when the server failed: the session still
@@ -845,36 +1052,43 @@ export class OpenCodeServer {
 
   private reloadTimer?: ReturnType<typeof setTimeout>;
 
+  private async isIdle(api: OpenCodeClient): Promise<boolean> {
+    const [permissions, forms, active] = await Promise.all([
+      api.permission.request.list(),
+      api.form.list(),
+      api.session.active(),
+    ]);
+    return !(
+      (Array.isArray(permissions.data) && permissions.data.length > 0) ||
+      (Array.isArray(forms.data) && forms.data.length > 0) ||
+      Object.keys(inputRecord(active)).length > 0
+    );
+  }
+
   /**
    * OpenCode reads its global config once; a changed file takes effect on the
    * next location reload. A reload cancels every pending approval and
    * question service-wide, so only do it while OpenCode is idle (nothing
    * pending, no running session) and otherwise try again later.
    */
+  private async reloadConfigNow(): Promise<boolean> {
+    try {
+      const api = await this.api();
+      if (!(await this.isIdle(api))) return false;
+      // A location whose directory was deleted makes the reload report 503,
+      // but every other location still reloads.
+      await api.location.reload().catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   reloadConfigWhenIdle(attempt = 0) {
     if (this.reloadTimer) clearTimeout(this.reloadTimer);
     this.reloadTimer = undefined;
     void (async () => {
-      try {
-        const api = await this.api();
-        const [permissions, forms, active] = await Promise.all([
-          api.permission.request.list(),
-          api.form.list(),
-          api.session.active(),
-        ]);
-        const busy =
-          (Array.isArray(permissions.data) && permissions.data.length > 0) ||
-          (Array.isArray(forms.data) && forms.data.length > 0) ||
-          Object.keys(inputRecord(active)).length > 0;
-        if (!busy) {
-          // A location whose directory was deleted makes the reload report
-          // 503, but every other location still reloads.
-          await api.location.reload().catch(() => {});
-          return;
-        }
-      } catch {
-        // Service unreachable; retry below.
-      }
+      if (await this.reloadConfigNow()) return;
       if (attempt + 1 >= CONFIG_RELOAD_MAX_ATTEMPTS) return;
       this.reloadTimer = setTimeout(
         () => this.reloadConfigWhenIdle(attempt + 1),
@@ -884,12 +1098,19 @@ export class OpenCodeServer {
     })();
   }
 
-  async nativeSkillNames(cwd: string) {
-    try {
-      return new Set((await this.nativeSkills(cwd)).map((skill) => skill.id));
-    } catch {
-      return undefined;
+  async reloadConfigWhenIdleAsync(timeoutMs = 5_000): Promise<boolean> {
+    if (this.reloadTimer) clearTimeout(this.reloadTimer);
+    this.reloadTimer = undefined;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.reloadConfigNow()) {
+        await new Promise((done) => setTimeout(done, 250));
+        return true;
+      }
+      await new Promise((done) => setTimeout(done, 200));
     }
+    this.reloadConfigWhenIdle();
+    return false;
   }
 
   async listSessionMessageIds(sessionId: string): Promise<CheckpointMessage[]> {
@@ -1077,7 +1298,6 @@ export class OpenCodeServer {
     )
       this.invalidateModelCatalogs();
     if (eventType === "command.updated") this.invalidateCommands();
-    if (eventType === "skill.updated") this.invalidateNativeSkills();
     if (eventType === "installation.update-available")
       resetLatestVersionCache();
     if (eventType === "mcp.status.changed") {

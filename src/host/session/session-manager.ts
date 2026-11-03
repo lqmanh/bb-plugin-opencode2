@@ -547,10 +547,6 @@ export async function prepareTurn(
 ) {
   const opts = inputRecord(options);
   session.disableSubagents = subagentsDisabled(opts, session.disallowedTools);
-  if (!session.nativeSkillNames)
-    session.nativeSkillNames = await openCodeServer.nativeSkillNames(
-      session.cwd,
-    );
   const planMode = opts.promptMode === "plan";
   const newTurn = turn.newTurn !== false;
   await ensureSessionPermissions(
