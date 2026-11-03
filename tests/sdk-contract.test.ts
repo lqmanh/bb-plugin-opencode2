@@ -12,6 +12,7 @@ test("uses only public SDK and package-local imports", () => {
       /^@opencode\/client$/,
       /^@opencode\/client\/service$/,
       /^@opencode\/plugin$/,
+      /^jsonc-parser(?:\/lib\/esm\/main\.js)?$/,
       /^@radix-ui\/react-slot$/,
       /^class-variance-authority$/,
       /^clsx$/,

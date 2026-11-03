@@ -2,8 +2,22 @@ import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+// The package's UMD entry leaves relative requires that the plugin bundler
+// does not copy; the ESM build resolves and bundles its implementation chunks.
+import {
+  applyEdits,
+  createScanner,
+  findNodeAtLocation,
+  getNodePath,
+  getNodeValue,
+  modify,
+  parseTree,
+  SyntaxKind,
+  type Node,
+  type ParseError,
+} from "jsonc-parser/lib/esm/main.js";
 import { writeFileAtomic } from "../session/persistence.ts";
-import { DYNAMIC_MCP_SERVER_PREFIX } from "./opencode-requests.ts";
+import { BB_TOOLS_DENY_RULE } from "./opencode-requests.ts";
 
 /**
  * OpenCode attaches MCP servers to a directory, so its own sessions (TUI,
@@ -16,12 +30,6 @@ import { DYNAMIC_MCP_SERVER_PREFIX } from "./opencode-requests.ts";
  * existing top-level `permissions` array (last match wins, so it must come
  * last), or a `permissions` key holding only this rule is added.
  */
-export const BB_TOOLS_RULE = `{ "action": "${DYNAMIC_MCP_SERVER_PREFIX}*", "resource": "*", "effect": "deny" }`;
-
-const RULE_PATTERN = new RegExp(
-  `\\{\\s*"action"\\s*:\\s*"${DYNAMIC_MCP_SERVER_PREFIX}\\*"\\s*,\\s*"resource"\\s*:\\s*"\\*"\\s*,\\s*"effect"\\s*:\\s*"deny"\\s*\\}`,
-);
-
 export function globalConfigPath(env = process.env): string {
   const dir = join(
     env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
@@ -31,190 +39,6 @@ export function globalConfigPath(env = process.env): string {
   return existsSync(jsonc) ? jsonc : join(dir, "opencode.json");
 }
 
-type ArraySpan = {
-  /** `[` and `]` of a top-level array. */
-  open: number;
-  close: number;
-  keyStart: number;
-};
-
-type Scan = {
-  /** Index of the root object's closing brace. */
-  rootClose: number;
-  /** Top-level arrays by key. The first occurrence wins. */
-  arrays: Map<string, ArraySpan>;
-};
-
-/** Minimal JSONC scan: string- and comment-aware brace matching. */
-function scan(text: string): Scan | undefined {
-  let depth = 0;
-  let rootClose = -1;
-  let pendingKey: { name: string; start: number } | undefined;
-  let lastString: { value: string; start: number } | undefined;
-  const arrays = new Map<string, ArraySpan>();
-  const openArrays: Array<{
-    key?: string;
-    open: number;
-    keyStart: number;
-    depth: number;
-  }> = [];
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '"') {
-      const start = i;
-      let value = "";
-      for (i++; i < text.length && text[i] !== '"'; i++) {
-        if (text[i] === "\\") i++;
-        value += text[i];
-      }
-      lastString = { value, start };
-      continue;
-    }
-    if (ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && text[i + 1] === "*") {
-      i = text.indexOf("*/", i + 2);
-      if (i < 0) return undefined;
-      i++;
-      continue;
-    }
-    if (ch === ":") {
-      pendingKey = lastString && {
-        name: lastString.value,
-        start: lastString.start,
-      };
-      continue;
-    }
-    if (ch === "{" || ch === "[") {
-      if (ch === "[" && depth === 1 && pendingKey) {
-        openArrays.push({
-          key: pendingKey.name,
-          open: i,
-          keyStart: pendingKey.start,
-          depth,
-        });
-      }
-      depth++;
-      pendingKey = undefined;
-      continue;
-    }
-    if (ch === "}" || ch === "]") {
-      depth--;
-      if (ch === "]") {
-        const top = openArrays[openArrays.length - 1];
-        if (top && top.depth === depth) {
-          openArrays.pop();
-          if (top.key && !arrays.has(top.key)) {
-            arrays.set(top.key, {
-              open: top.open,
-              close: i,
-              keyStart: top.keyStart,
-            });
-          }
-        }
-      }
-      if (ch === "}" && depth === 0) rootClose = i;
-      continue;
-    }
-    if (ch === ",") pendingKey = undefined;
-  }
-  return rootClose >= 0 && depth === 0 ? { rootClose, arrays } : undefined;
-}
-
-/** Last significant character before `index`, skipping whitespace and comments. */
-function previousSignificant(text: string, index: number): number {
-  const stripped = text
-    .slice(0, index)
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length))
-    .replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
-  for (let i = index - 1; i >= 0; i--) if (!/\s/.test(stripped[i])) return i;
-  return -1;
-}
-
-/** First significant character at or after `index`, skipping whitespace and comments. */
-function nextSignificant(text: string, index: number): number {
-  for (let i = index; i < text.length; i++) {
-    if (/\s/.test(text[i])) continue;
-    if (text[i] === "/" && text[i + 1] === "/") {
-      const newline = text.indexOf("\n", i + 2);
-      if (newline < 0) return text.length;
-      i = newline;
-      continue;
-    }
-    if (text[i] === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      if (end < 0) return text.length;
-      i = end + 1;
-      continue;
-    }
-    return i;
-  }
-  return text.length;
-}
-
-function lineIndent(text: string, index: number) {
-  const lineStart = text.lastIndexOf("\n", index - 1) + 1;
-  return /^[ \t]*/.exec(text.slice(lineStart))?.[0] ?? "";
-}
-
-function trimRange(
-  text: string,
-  start: number,
-  end: number,
-): { start: number; end: number } | undefined {
-  while (start < end && /\s/.test(text[start])) start++;
-  while (end > start && /\s/.test(text[end - 1])) end--;
-  return start < end ? { start, end } : undefined;
-}
-
-/** Top-level comma-separated ranges inside a JSONC array. */
-function arrayElements(
-  text: string,
-  open: number,
-  close: number,
-): { start: number; end: number }[] {
-  const elements: { start: number; end: number }[] = [];
-  let start = open + 1;
-  let depth = 0;
-  for (let i = open + 1; i < close; i++) {
-    const ch = text[i];
-    if (ch === '"') {
-      for (i++; i < close && text[i] !== '"'; i++) {
-        if (text[i] === "\\") i++;
-      }
-      continue;
-    }
-    if (ch === "/" && text[i + 1] === "/") {
-      while (i < close && text[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && text[i + 1] === "*") {
-      i = text.indexOf("*/", i + 2);
-      if (i < 0 || i >= close) break;
-      i++;
-      continue;
-    }
-    if (ch === "{" || ch === "[") {
-      depth++;
-      continue;
-    }
-    if (ch === "}" || ch === "]") {
-      depth--;
-      continue;
-    }
-    if (ch === "," && depth === 0) {
-      const range = trimRange(text, start, i);
-      if (range) elements.push(range);
-      start = i + 1;
-    }
-  }
-  const last = trimRange(text, start, close);
-  if (last) elements.push(last);
-  return elements;
-}
-
 export type PluginEntry = {
   package: string;
   options?: Record<string, unknown>;
@@ -222,102 +46,49 @@ export type PluginEntry = {
 
 export type PluginMatcher = (packageSpec: string) => boolean;
 
-/** Remove comments and trailing commas so one array element can be parsed. */
-function stripJsonc(text: string): string {
-  let result = "";
-  for (let i = 0; i < text.length;) {
-    const ch = text[i];
-    if (ch === '"') {
-      const start = i;
-      i++;
-      while (i < text.length) {
-        if (text[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (text[i] === '"') {
-          i++;
-          break;
-        }
-        i++;
-      }
-      result += text.slice(start, i);
-      continue;
-    }
-    if (ch === "/" && text[i + 1] === "/") {
-      const newline = text.indexOf("\n", i + 2);
-      result += " ";
-      if (newline < 0) break;
-      i = newline;
-      continue;
-    }
-    if (ch === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      result += " ";
-      if (end < 0) break;
-      i = end + 2;
-      continue;
-    }
-    if (ch === ",") {
-      const next = nextSignificant(text, i + 1);
-      if (text[next] === "}" || text[next] === "]") {
-        i++;
-        continue;
-      }
-    }
-    result += ch;
-    i++;
-  }
-  return result;
+function parseDocument(text: string): Node {
+  const errors: ParseError[] = [];
+  const root = parseTree(text, errors, { allowTrailingComma: true });
+  if (!root || root.type !== "object" || errors.length > 0)
+    throw new Error("OpenCode config is not valid JSON");
+  return root;
 }
 
-function parsePluginElement(
-  text: string,
-  element: { start: number; end: number },
-): PluginEntry | undefined {
-  const cleaned = stripJsonc(text.slice(element.start, element.end)).trim();
-  if (!cleaned) return undefined;
-  try {
-    const value: unknown = JSON.parse(cleaned);
-    if (typeof value === "string")
-      return value ? { package: value } : undefined;
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      return undefined;
-    const record = value as Record<string, unknown>;
-    const packageSpec = record.package;
-    if (typeof packageSpec !== "string" || !packageSpec) return undefined;
-    const options = record.options;
-    if (
-      options !== undefined &&
-      (!options || typeof options !== "object" || Array.isArray(options))
-    )
-      return undefined;
-    return {
-      package: packageSpec,
-      ...(options ? { options: options as Record<string, unknown> } : {}),
-    };
-  } catch {
-    return undefined;
-  }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function matchingPluginEntries(
-  text: string,
-  span: ArraySpan,
-  matches: PluginMatcher,
-): { range: { start: number; end: number }; value: PluginEntry }[] {
-  return arrayElements(text, span.open, span.close).flatMap((range) => {
-    const value = parsePluginElement(text, range);
-    return value && matches(value.package) ? [{ range, value }] : [];
+function requiredArray(root: Node, name: string): Node | undefined {
+  const value = findNodeAtLocation(root, [name]);
+  if (!value) return undefined;
+  if (value.type !== "array")
+    throw new Error(`OpenCode config has a non-array ${name} value`);
+  return value;
+}
+
+function optionalArray(root: Node, name: string): Node | undefined {
+  const value = findNodeAtLocation(root, [name]);
+  return value?.type === "array" ? value : undefined;
+}
+
+function pluginEntry(value: unknown): PluginEntry | undefined {
+  if (typeof value === "string") return value ? { package: value } : undefined;
+  if (!isRecord(value)) return undefined;
+  const packageSpec = value.package;
+  if (typeof packageSpec !== "string" || !packageSpec) return undefined;
+  const options = value.options;
+  if (options !== undefined && !isRecord(options)) return undefined;
+  return {
+    package: packageSpec,
+    ...(options ? { options } : {}),
+  };
+}
+
+function matchingPluginEntries(array: Node, matches: PluginMatcher) {
+  return (array.children ?? []).flatMap((node, index) => {
+    const value = pluginEntry(getNodeValue(node));
+    return value && matches(value.package) ? [{ index, value }] : [];
   });
-}
-
-function formatPluginEntry(entry: PluginEntry): string {
-  const options =
-    entry.options && Object.keys(entry.options).length
-      ? `, "options": ${JSON.stringify(entry.options)}`
-      : "";
-  return `{ "package": ${JSON.stringify(entry.package)}${options} }`;
 }
 
 function samePluginEntry(left: PluginEntry, right: PluginEntry): boolean {
@@ -327,74 +98,94 @@ function samePluginEntry(left: PluginEntry, right: PluginEntry): boolean {
   );
 }
 
-function appendArrayElement(
-  text: string,
-  span: ArraySpan,
-  element: string,
-): string {
-  const keyIndent = lineIndent(text, span.keyStart);
-  const last = previousSignificant(text, span.close);
-  const empty = last === span.open;
-  const separator = empty || text[last] === "," ? "" : ",";
-  const item = `\n${keyIndent}  ${element}`;
-  const before = text.slice(0, last + 1) + separator + item;
-  const tail = text.slice(last + 1, span.close);
+function isBbToolsRule(value: unknown): boolean {
   return (
-    before +
-    (tail.includes("\n") ? tail : `\n${keyIndent}`) +
-    text.slice(span.close)
+    isRecord(value) &&
+    Object.entries(BB_TOOLS_DENY_RULE).every(
+      ([key, expected]) => value[key] === expected,
+    )
   );
 }
 
-function addRootArray(
+function editConfig(
   text: string,
-  parsed: Scan,
-  key: string,
-  element: string,
+  path: readonly (string | number)[],
+  value: unknown,
+  options: { isArrayInsertion?: boolean } = {},
 ): string {
-  const last = previousSignificant(text, parsed.rootClose);
-  const emptyRoot = text[last] === "{";
-  const gap = text.slice(last + 1, parsed.rootClose);
-  const keyIndent = lineIndent(text, parsed.rootClose);
-  const entry = `\n${keyIndent}  "${key}": [\n${keyIndent}    ${element}\n${keyIndent}  ]`;
-  return (
-    text.slice(0, last + 1) +
-    (emptyRoot || text[last] === "," ? "" : ",") +
-    entry +
-    (gap.includes("\n") ? gap : "\n") +
-    text.slice(parsed.rootClose)
+  return applyEdits(text, modify(text, [...path], value, options));
+}
+
+function appendArrayValue(text: string, array: Node, value: unknown): string {
+  return editConfig(
+    text,
+    [...getNodePath(array), array.children?.length ?? 0],
+    value,
+    { isArrayInsertion: true },
   );
+}
+
+// jsonc-parser 3.3.1's modify() removal corrupts some arrays (for example
+// [1,2] -> [12]) and can leave an invalid closing bracket. Remove from the
+// parsed node offsets instead, descending so earlier offsets stay valid.
+function nextToken(text: string, offset: number) {
+  const scanner = createScanner(text, true);
+  scanner.setPosition(offset);
+  const kind = scanner.scan();
+  return kind === SyntaxKind.EOF
+    ? undefined
+    : { kind, offset: scanner.getTokenOffset() };
+}
+
+function removeArrayElement(text: string, array: Node, index: number): string {
+  const element = array.children?.[index];
+  if (!element) return text;
+  let start = element.offset;
+  let end = element.offset + element.length;
+  while (start > array.offset + 1 && /\s/u.test(text[start - 1])) start--;
+  const after = nextToken(text, end);
+  if (after?.kind === SyntaxKind.CommaToken) {
+    end = after.offset + 1;
+    while (end < text.length && /[ \t]/u.test(text[end])) end++;
+  } else {
+    const previous = index > 0 ? array.children?.[index - 1] : undefined;
+    if (previous) {
+      const before = nextToken(text, previous.offset + previous.length);
+      if (before?.kind === SyntaxKind.CommaToken) {
+        start = before.offset;
+        while (start > array.offset + 1 && /[ \t]/u.test(text[start - 1]))
+          start--;
+      }
+    }
+  }
+  return text.slice(0, start) + text.slice(end);
+}
+
+function removeArrayValues(
+  text: string,
+  array: Node,
+  indices: readonly number[],
+): string {
+  let next = text;
+  for (const index of [...indices].sort((left, right) => right - left)) {
+    next = removeArrayElement(next, array, index);
+  }
+  return next;
 }
 
 /** Insert the rule; returns the new text, or undefined when unchanged. */
 export function addBbToolsRule(text: string): string | undefined {
-  if (RULE_PATTERN.test(text)) return undefined;
-  const parsed = scan(text);
-  if (!parsed) throw new Error("OpenCode config is not valid JSON");
-  const permissions = parsed.arrays.get("permissions");
-  if (permissions) return appendArrayElement(text, permissions, BB_TOOLS_RULE);
-  return addRootArray(text, parsed, "permissions", BB_TOOLS_RULE);
-}
-
-function removeArrayElements(
-  text: string,
-  elements: readonly { start: number; end: number }[],
-  span: ArraySpan,
-): string {
-  // Remove from the end so each earlier element keeps its original offsets.
-  // This also lets adjacent removals consume the right separator commas.
-  const sorted = [...elements].sort((left, right) => right.start - left.start);
-  let next = text;
-  let removed = 0;
-  for (const element of sorted) {
-    const range = elementRemovalRange(next, element, {
-      ...span,
-      close: span.close - removed,
-    });
-    next = next.slice(0, range.start) + next.slice(range.end);
-    removed += range.end - range.start;
-  }
-  return next;
+  const root = parseDocument(text);
+  const permissions = requiredArray(root, "permissions");
+  if (!permissions)
+    return editConfig(text, ["permissions"], [BB_TOOLS_DENY_RULE]);
+  if (
+    (permissions.children ?? []).some((node) =>
+      isBbToolsRule(getNodeValue(node)),
+    )
+  )
+    return undefined;
+  return appendArrayValue(text, permissions, BB_TOOLS_DENY_RULE);
 }
 
 /**
@@ -406,33 +197,28 @@ export function upsertPluginEntry(
   matches: PluginMatcher,
   entry: PluginEntry,
 ): string | undefined {
-  const parsed = scan(text);
-  if (!parsed) throw new Error("OpenCode config is not valid JSON");
-  const element = formatPluginEntry(entry);
-  const plugins = parsed.arrays.get("plugins");
-  if (!plugins) return addRootArray(text, parsed, "plugins", element);
+  const root = parseDocument(text);
+  const plugins = requiredArray(root, "plugins");
+  if (!plugins) return editConfig(text, ["plugins"], [entry]);
 
-  const matchesEntries = matchingPluginEntries(text, plugins, matches);
+  const matchesEntries = matchingPluginEntries(plugins, matches);
   if (matchesEntries.length === 1) {
-    const match = matchesEntries[0]!;
-    if (samePluginEntry(match.value, entry)) return undefined;
-    return (
-      text.slice(0, match.range.start) + element + text.slice(match.range.end)
-    );
+    const [{ index, value }] = matchesEntries;
+    return samePluginEntry(value, entry)
+      ? undefined
+      : editConfig(text, [...getNodePath(plugins), index], entry);
   }
+  if (matchesEntries.length === 0)
+    return appendArrayValue(text, plugins, entry);
 
-  const next = matchesEntries.length
-    ? removeArrayElements(
-        text,
-        matchesEntries.map(({ range }) => range),
-        plugins,
-      )
-    : text;
-  const reparsed = scan(next);
-  if (!reparsed) throw new Error("OpenCode config is not valid JSON");
-  const nextPlugins = reparsed.arrays.get("plugins");
+  const next = removeArrayValues(
+    text,
+    plugins,
+    matchesEntries.map(({ index }) => index),
+  );
+  const nextPlugins = requiredArray(parseDocument(next), "plugins");
   if (!nextPlugins) throw new Error("OpenCode config lost its plugins array");
-  return appendArrayElement(next, nextPlugins, element);
+  return appendArrayValue(next, nextPlugins, entry);
 }
 
 /** Remove every plugin entry whose package matches `matches`. */
@@ -440,39 +226,16 @@ export function removePluginEntries(
   text: string,
   matches: PluginMatcher,
 ): string | undefined {
-  const parsed = scan(text);
-  if (!parsed) throw new Error("OpenCode config is not valid JSON");
-  const plugins = parsed.arrays.get("plugins");
+  const root = parseDocument(text);
+  const plugins = optionalArray(root, "plugins");
   if (!plugins) return undefined;
-  const matchesEntries = matchingPluginEntries(text, plugins, matches);
+  const matchesEntries = matchingPluginEntries(plugins, matches);
   if (matchesEntries.length === 0) return undefined;
-  return removeArrayElements(
+  return removeArrayValues(
     text,
-    matchesEntries.map(({ range }) => range),
     plugins,
+    matchesEntries.map(({ index }) => index),
   );
-}
-
-function elementRemovalRange(
-  text: string,
-  element: { start: number; end: number },
-  span: ArraySpan,
-): { start: number; end: number } {
-  let start = element.start;
-  let end = element.end;
-  while (start > span.open + 1 && /\s/.test(text[start - 1])) start--;
-  const after = nextSignificant(text, end);
-  if (text[after] === ",") {
-    end = after + 1;
-    while (end < span.close && /[ \t]/.test(text[end])) end++;
-  } else {
-    const before = previousSignificant(text, start);
-    if (text[before] === ",") {
-      start = before;
-      while (start > span.open + 1 && /[ \t]/.test(text[start - 1])) start--;
-    }
-  }
-  return { start, end };
 }
 
 let configQueue: Promise<unknown> = Promise.resolve();

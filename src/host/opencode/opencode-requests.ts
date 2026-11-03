@@ -25,6 +25,13 @@ export type PermissionRule = {
   effect: "allow" | "deny" | "ask";
 };
 
+/** Global and session rule that hides other BB threads' dynamic tool servers. */
+export const BB_TOOLS_DENY_RULE: PermissionRule = {
+  action: `${DYNAMIC_MCP_SERVER_PREFIX}*`,
+  resource: "*",
+  effect: "deny",
+};
+
 // OpenCode evaluates the agent ruleset and then the session ruleset, and the
 // last matching rule wins. v2's `build` agent allows every action, so without
 // session rules OpenCode never asks and BB's permission modes do nothing.
@@ -79,11 +86,7 @@ export function sessionPermissionRules(input: {
   // Hide them all (a deny removes the tools from the model's catalog), then
   // allow this session's own server. MCP permission actions are
   // `<server>_<tool>`, and rules match globs with the last match winning.
-  rules.push({
-    action: `${DYNAMIC_MCP_SERVER_PREFIX}*`,
-    resource: "*",
-    effect: "deny",
-  });
+  rules.push(BB_TOOLS_DENY_RULE);
   if (input.dynamicToolServer && input.dynamicToolNames?.length)
     rules.push({
       action: `${input.dynamicToolServer}_*`,

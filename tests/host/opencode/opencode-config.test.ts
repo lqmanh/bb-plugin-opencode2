@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { parse } from "jsonc-parser";
 import {
   addBbToolsRule,
   bbSkillsPluginPackage,
@@ -21,9 +22,6 @@ import {
   removePluginEntriesFromConfig,
   upsertPluginEntry,
 } from "../../support/host-api.js";
-
-const RULE =
-  '{ "action": "bb_opencode2_*", "resource": "*", "effect": "deny" }';
 
 const cases: Record<string, string> = {
   "no permissions key": `{
@@ -57,6 +55,11 @@ const cases: Record<string, string> = {
   "theme": "dark", // trailing
 }
 `,
+  "jsonc object without permissions": `{
+  // keep this comment
+  "theme": "dark",
+}
+`,
   "empty object": "{}\n",
 };
 
@@ -71,18 +74,17 @@ for (const [name, original] of Object.entries(cases)) {
       assert.notEqual(cursor, -1);
       cursor++;
     }
-    assert.equal(added.split(RULE).length, 2);
-    if (!name.startsWith("jsonc")) {
-      const parsed = JSON.parse(added);
-      assert.deepEqual(parsed.permissions.at(-1), {
-        action: "bb_opencode2_*",
-        resource: "*",
-        effect: "deny",
-      });
-      const { permissions: _, ...rest } = parsed;
-      const { permissions: __, ...before } = JSON.parse(original);
-      assert.deepEqual(rest, before);
-    }
+    const parsed = parse(added) as { permissions: unknown[] };
+    assert.deepEqual(parsed.permissions.at(-1), {
+      action: "bb_opencode2_*",
+      resource: "*",
+      effect: "deny",
+    });
+    const { permissions: _, ...rest } = parsed;
+    const { permissions: __, ...before } = parse(original) as {
+      permissions?: unknown;
+    };
+    assert.deepEqual(rest, before);
     assert.equal(addBbToolsRule(added), undefined, "idempotent");
   });
 }
@@ -107,15 +109,6 @@ const ENTRY = {
     locationsDir: "/home/me/.bb/runtime/opencode-bb-skills/locations",
   },
 };
-
-function jsoncValue(text: string): unknown {
-  return JSON.parse(
-    text
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "")
-      .replace(/,\s*([}\]])/g, "$1"),
-  );
-}
 
 test("adds a BB skills object without disturbing existing plugin entries", () => {
   const original = `{
@@ -159,7 +152,7 @@ test("replaces old string, object, and duplicate BB skills entries", () => {
 `;
   const added = upsertPluginEntry(original, isBbSkillsPluginPackage, ENTRY);
   assert.ok(added);
-  const parsed = jsoncValue(added) as { plugins: unknown[] };
+  const parsed = parse(added) as { plugins: unknown[] };
   assert.deepEqual(parsed.plugins, ["user-plugin", ENTRY]);
 });
 
@@ -179,10 +172,9 @@ test("parses and replaces a commented object entry", () => {
   const added = upsertPluginEntry(original, isBbSkillsPluginPackage, ENTRY);
   assert.ok(added);
   assert.match(added, /keep this comment/);
-  assert.match(added, /v1\.4\.0/);
   assert.doesNotMatch(added, /v1\.3\.0/);
   assert.match(added, /user-plugin/);
-  const parsed = jsoncValue(added) as { plugins: unknown[] };
+  const parsed = parse(added) as { plugins: unknown[] };
   assert.deepEqual(parsed.plugins, [ENTRY, "user-plugin"]);
 });
 
@@ -208,6 +200,20 @@ test("removes only the BB skills entry and leaves other plugins", () => {
   );
 });
 
+test("preserves comments around removed plugin entries", () => {
+  const original = `{
+  "plugins": [
+    "${OLD_PACKAGE}",
+    /* keep next */ { "package": "acme", "options": { "strict": true } },
+  ],
+}
+`;
+  const removed = removePluginEntries(original, isBbSkillsPluginPackage);
+  assert.ok(removed);
+  assert.match(removed, /keep next/);
+  assert.doesNotMatch(removed, /opencode-bb-skills/);
+});
+
 test("replaces or removes the only plugin entry without leaving invalid JSON", () => {
   const added = upsertPluginEntry(
     `{ "plugins": ["${OLD_PACKAGE}"] }\n`,
@@ -219,6 +225,30 @@ test("replaces or removes the only plugin entry without leaving invalid JSON", (
   const removed = removePluginEntries(added, isBbSkillsPluginPackage);
   assert.ok(removed);
   assert.deepEqual(JSON.parse(removed).plugins, []);
+});
+
+test("rejects invalid JSON and non-array config values", () => {
+  assert.throws(() => addBbToolsRule(`{ "permissions": [`), /not valid JSON/);
+  assert.throws(
+    () => addBbToolsRule(`{ "permissions": {} }`),
+    /non-array permissions/,
+  );
+  assert.throws(
+    () =>
+      upsertPluginEntry(
+        `{ "plugins": "user-plugin" }`,
+        isBbSkillsPluginPackage,
+        ENTRY,
+      ),
+    /non-array plugins/,
+  );
+  assert.equal(
+    removePluginEntries(
+      `{ "plugins": "user-plugin" }`,
+      isBbSkillsPluginPackage,
+    ),
+    undefined,
+  );
 });
 
 test("ensurePluginEntry writes only on change and remove cleans up", async () => {
