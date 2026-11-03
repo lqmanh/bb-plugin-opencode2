@@ -19,6 +19,8 @@ All notable changes to this plugin are documented here. The format follows
 
 - Native subagent tokens and cost now count toward the parent thread's usage,
   while the parent context meter stays parent-only.
+- OpenCode question answers, including free text, now reach the tool instead of
+  being dismissed. Interactive permission decisions use the same fix.
 
 ## [1.4.0] - 2026-11-02
 

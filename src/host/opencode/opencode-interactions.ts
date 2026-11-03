@@ -6,11 +6,6 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { errorMessage } from "../../shared/errors.ts";
 import { emit, requestRuntime } from "../bridge/bridge-runtime.ts";
-import {
-  approvalPermissionReply,
-  automaticPermissionReply,
-  permissionReplyBody,
-} from "./prompt.ts";
 import { itemKey } from "../timeline/timeline.ts";
 import {
   inputRecord,
@@ -21,6 +16,11 @@ import {
   type OpenCodeRecord,
   type SessionState,
 } from "../types.ts";
+import {
+  approvalPermissionReply,
+  automaticPermissionReply,
+  permissionReplyBody,
+} from "./prompt.ts";
 
 type RecordValue = OpenCodeRecord;
 
@@ -454,7 +454,7 @@ export class OpenCodeInteractions {
         },
         { signal: active.abortController.signal },
       );
-      const decision = result?.resolution?.decision;
+      const decision = result?.decision;
       if (active.settledPermissions.delete(requestId)) return;
       const reply =
         session.active === active
@@ -700,7 +700,7 @@ export class OpenCodeInteractions {
         },
         { signal: active.abortController.signal },
       );
-      resolution = result?.resolution;
+      resolution = result;
     } catch {
       resolution = undefined;
     }

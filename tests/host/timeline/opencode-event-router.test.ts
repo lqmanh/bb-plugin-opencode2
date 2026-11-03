@@ -1035,14 +1035,12 @@ test("answers a general form through BB's question UI", async () => {
     }) as unknown as OpenCodeClient;
   const { emitted, event } = sessionFixture(api, {
     requestInteraction: async () => ({
-      resolution: {
-        kind: "user_answer",
-        answers: {
-          name: { selected: [], freeText: "Ada" },
-          count: { selected: [], freeText: "3" },
-          active: { selected: ["true"] },
-          tags: { selected: ["a"], freeText: "b" },
-        },
+      kind: "user_answer",
+      answers: {
+        name: { selected: [], freeText: "Ada" },
+        count: { selected: [], freeText: "3" },
+        active: { selected: ["true"] },
+        tags: { selected: ["a"], freeText: "b" },
       },
     }),
   });
@@ -1223,10 +1221,8 @@ test("reports a form answered in OpenCode instead of replying again", async () =
     answer: { name: "Alice" },
   });
   resolveInteraction({
-    resolution: {
-      kind: "user_answer",
-      answers: { name: { selected: [], freeText: "Bob" } },
-    },
+    kind: "user_answer",
+    answers: { name: { selected: [], freeText: "Bob" } },
   });
   await nextTick();
 
@@ -1266,7 +1262,7 @@ test("skips a permission reply already answered in OpenCode", async () => {
   });
   await nextTick();
   await event("permission.replied", { requestID: "per_1", reply: "once" });
-  resolveInteraction({ resolution: { decision: "allow_once" } });
+  resolveInteraction({ decision: "allow_once" });
   await nextTick();
 
   assert.deepEqual(replies, []);
@@ -1288,10 +1284,8 @@ test("drops settlements from a turn abandoned without finish", async () => {
     }) as unknown as OpenCodeClient;
   const { active, event, session } = sessionFixture(api, {
     requestInteraction: async () => ({
-      resolution: {
-        kind: "user_answer",
-        answers: { name: { selected: [], freeText: "Alice" } },
-      },
+      kind: "user_answer",
+      answers: { name: { selected: [], freeText: "Alice" } },
     }),
   });
 
