@@ -7,6 +7,8 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Fixed
 
+- Backgrounding a thread's active tools now resolves the session from a registry
+  shared by the host and provider-bridge workers under the plugin runtime root.
 - Removed the native-skills sync during plugin registration, which logged a
   host-call warning at startup. Thread start, resume, and fork already sync the
   initial state, and setting changes still sync immediately.

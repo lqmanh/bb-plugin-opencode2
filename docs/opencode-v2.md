@@ -49,7 +49,9 @@ are buffered until the shell or child ID is known; duplicate and late
 completions are ignored.
 
 `session.background` backgrounds every active foreground backgroundable tool. It
-is all-or-nothing, returns no count, and is exposed as a thread menu action.
+is all-or-nothing, returns no count, and is exposed as a thread menu action. The
+host worker resolves the provider session through a registry shared with the
+provider bridge under the plugin runtime root.
 
 `thread/stop` with `interrupt` stops background work before the parent;
 `release` leaves OpenCode work alone. BB settles open rows after a worker

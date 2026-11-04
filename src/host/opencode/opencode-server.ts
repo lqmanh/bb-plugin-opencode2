@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { errorMessage } from "../../shared/errors.ts";
 import type { NativeSkillsStatus } from "../../shared/settings-contract.ts";
+import { pluginRuntimeDir } from "../plugin-paths.ts";
 import { writeJsonFileAtomic } from "../session/persistence.ts";
 import { sessions, sessionsByProviderId } from "../session/session-teardown.ts";
 import {
@@ -81,6 +82,12 @@ function isBusyError(error: unknown) {
     isSessionBusyError(error) ||
     /409|busy/i.test(errorMessage(error))
   );
+}
+
+function nonNegativeNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
 }
 
 const BUSY_RETRY_ATTEMPTS = 5;
@@ -469,11 +476,16 @@ export class OpenCodeServer {
   }
 
   private sessionRegistry = new Map<string, SessionBridgeRegistration>();
-  private sessionRegistryLoaded = false;
   private sessionRegistryOperation: Promise<void> = Promise.resolve();
 
+  /**
+   * The host worker resolves background actions and the provider bridge
+   * registers sessions, so the registry must live where both can read it.
+   */
   private sessionRegistryPath() {
-    return this.dataDir ? join(this.dataDir, SESSION_REGISTRY_FILE) : undefined;
+    return this.dataDir
+      ? join(pluginRuntimeDir(this.dataDir), SESSION_REGISTRY_FILE)
+      : undefined;
   }
 
   private async withSessionRegistryLock<T>(operation: () => Promise<T>) {
@@ -485,50 +497,56 @@ export class OpenCodeServer {
     return result;
   }
 
-  private async loadSessionRegistry() {
-    if (this.sessionRegistryLoaded) return;
-    this.sessionRegistryLoaded = true;
-    const path = this.sessionRegistryPath();
-    if (!path) return;
+  private async readSessionRegistry(
+    path: string,
+  ): Promise<Map<string, SessionBridgeRegistration> | undefined> {
     try {
       const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        for (const [key, value] of Object.entries(
-          parsed as Record<string, unknown>,
-        )) {
-          const record = value as Record<string, unknown> | null;
-          const usage = (record?.usage ?? {}) as Record<string, unknown>;
-          const usageNumber = (entry: unknown) =>
-            typeof entry === "number" && Number.isFinite(entry) && entry >= 0
-              ? entry
-              : 0;
-          if (
-            record &&
-            typeof record.providerThreadId === "string" &&
-            typeof record.cwd === "string"
-          ) {
-            this.sessionRegistry.set(key, {
-              providerThreadId: record.providerThreadId,
-              cwd: record.cwd,
-              usage: {
-                input: usageNumber(usage.input),
-                output: usageNumber(usage.output),
-                reasoning: usageNumber(usage.reasoning),
-                cacheRead: usageNumber(usage.cacheRead),
-                cacheWrite: usageNumber(usage.cacheWrite),
-              },
-            });
-          }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        return undefined;
+      const entries = new Map<string, SessionBridgeRegistration>();
+      for (const [key, value] of Object.entries(
+        parsed as Record<string, unknown>,
+      )) {
+        const record = value as Record<string, unknown> | null;
+        const usage = (record?.usage ?? {}) as Record<string, unknown>;
+        if (
+          record &&
+          typeof record.providerThreadId === "string" &&
+          typeof record.cwd === "string"
+        ) {
+          entries.set(key, {
+            providerThreadId: record.providerThreadId,
+            cwd: record.cwd,
+            usage: {
+              input: nonNegativeNumber(usage.input),
+              output: nonNegativeNumber(usage.output),
+              reasoning: nonNegativeNumber(usage.reasoning),
+              cacheRead: nonNegativeNumber(usage.cacheRead),
+              cacheWrite: nonNegativeNumber(usage.cacheWrite),
+            },
+          });
         }
       }
+      return entries;
     } catch {
-      // Missing or corrupt registry: treat as empty and rebuild from here.
+      // Missing or corrupt registry: treat as empty.
+      return undefined;
     }
+  }
+
+  private async loadSessionRegistry() {
+    // Reload before mutating so a write merges sessions registered by another
+    // worker instead of replacing them with a stale snapshot.
+    const path = this.sessionRegistryPath();
+    const entries = path ? await this.readSessionRegistry(path) : undefined;
+    this.sessionRegistry =
+      entries ?? new Map<string, SessionBridgeRegistration>();
   }
 
   private async writeSessionRegistry() {
     const path = this.sessionRegistryPath();
-    if (!path || !this.dataDir) return;
+    if (!path) return;
     await writeJsonFileAtomic(path, Object.fromEntries(this.sessionRegistry));
   }
 
@@ -567,10 +585,11 @@ export class OpenCodeServer {
   async lookupSessionRegistration(
     bbThreadId: string,
   ): Promise<SessionBridgeRegistration | undefined> {
-    return this.withSessionRegistryLock(async () => {
-      await this.loadSessionRegistry();
-      return this.sessionRegistry.get(bbThreadId);
-    });
+    // Reads bypass the write lock and always hit disk so a session registered
+    // by another worker is visible on the next lookup.
+    const path = this.sessionRegistryPath();
+    if (!path) return undefined;
+    return (await this.readSessionRegistry(path))?.get(bbThreadId);
   }
 
   async start() {

@@ -10,8 +10,9 @@ import {
   unlink,
   utimes,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import rootPackage from "../../../package.json" with { type: "json" };
+import { pluginRuntimeDir } from "../plugin-paths.ts";
 import { writeJsonFileAtomic } from "../session/persistence.ts";
 
 export const BB_PLUGIN_VERSION = rootPackage.version;
@@ -104,7 +105,7 @@ export function isBbSkillsPluginPackage(packageSpec: string): boolean {
  * from the plugin root rather than from the worker's own directory.
  */
 export function nativeSkillsRoot(workerDataDir: string): string {
-  return join(dirname(workerDataDir), "runtime", BB_SKILLS_PLUGIN_PATH);
+  return join(pluginRuntimeDir(workerDataDir), BB_SKILLS_PLUGIN_PATH);
 }
 
 export function nativeSkillsLocationsDir(workerDataDir: string): string {

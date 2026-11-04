@@ -69,7 +69,8 @@ docs/           Developer documentation
   thread-scoped row.
 - **`session.background` is a user action.** It is session-wide and
   all-or-nothing, returns no count, is a no-op when nothing is blocking, and is
-  never called automatically.
+  never called automatically. The host worker resolves the session through a
+  registry shared with the bridge under the plugin runtime root.
 - **Permission modes are session rulesets.** `auto` keeps OpenCode's agent rules
   and answers remaining asks once; `full` allows everything; `accept-edits`
   allows reads, searches, edits, and selected non-mutating tools.

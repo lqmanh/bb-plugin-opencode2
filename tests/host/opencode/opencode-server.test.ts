@@ -16,6 +16,30 @@ import {
   type SessionState,
 } from "../../../src/host/types.ts";
 
+const NO_USAGE = {
+  input: 0,
+  output: 0,
+  reasoning: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
+
+function registration(providerThreadId: string, cwd = "/repo") {
+  return { providerThreadId, cwd, usage: NO_USAGE };
+}
+
+function stubBackground(server: OpenCodeServer, calls: string[]) {
+  Object.assign(server, {
+    api: createFakeOpenCodeApi({
+      session: {
+        background: async ({ sessionID }: { sessionID: string }) => {
+          calls.push(sessionID);
+        },
+      },
+    }),
+  });
+}
+
 test("follows checkpoint cursors even when a page is shorter than the requested limit", async () => {
   const inputs: { limit?: number; order?: string; cursor?: string }[] = [];
   const server = new OpenCodeServer();
@@ -94,8 +118,9 @@ test("rewinds with the SDK session revert methods", async () => {
 });
 
 test("persists the BB thread session mapping for stateless rewinds", async (t) => {
-  const dataDir = await mkdtemp(join(tmpdir(), "opencode2-sessions-"));
-  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const root = await mkdtemp(join(tmpdir(), "opencode2-sessions-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, "bridge-data");
 
   const server = new OpenCodeServer();
   server.setDataDir(dataDir);
@@ -110,7 +135,7 @@ test("persists the BB thread session mapping for stateless rewinds", async (t) =
     usage: { input: 1, output: 2, reasoning: 3, cacheRead: 4, cacheWrite: 5 },
   });
 
-  // A fresh server over the same data dir still resolves the mapping, so a
+  // A fresh server over the same plugin root still resolves the mapping, so a
   // restarted worker can tell an in-place rewind from a true fork.
   const restarted = new OpenCodeServer();
   restarted.setDataDir(dataDir);
@@ -356,28 +381,67 @@ test("stops running background shells and child sessions once", async () => {
 });
 
 test("backgrounds a thread from the persisted session registry", async (t) => {
-  const dataDir = await mkdtemp(join(tmpdir(), "opencode2-background-"));
-  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const root = await mkdtemp(join(tmpdir(), "opencode2-background-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, "bridge-data");
   const calls: string[] = [];
   const server = new OpenCodeServer();
   server.setDataDir(dataDir);
-  await server.rememberSessionRegistration("thr_persisted", {
-    providerThreadId: "ses_persisted",
-    cwd: "/repo",
-    usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-  });
-  Object.assign(server, {
-    api: createFakeOpenCodeApi({
-      session: {
-        background: async ({ sessionID }: { sessionID: string }) => {
-          calls.push(sessionID);
-        },
-      },
-    }),
-  });
+  await server.rememberSessionRegistration(
+    "thr_persisted",
+    registration("ses_persisted"),
+  );
+  stubBackground(server, calls);
 
   assert.deepEqual(await server.backgroundSession("thr_persisted"), {
     ok: true,
   });
   assert.deepEqual(calls, ["ses_persisted"]);
+});
+
+test("resolves a session registered by the provider bridge", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "opencode2-shared-sessions-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bridgeData = join(root, "bridge-data");
+  const hostData = join(root, "host-data");
+
+  const bridge = new OpenCodeServer();
+  bridge.setDataDir(bridgeData);
+  await bridge.rememberSessionRegistration(
+    "thr_shared",
+    registration("ses_shared"),
+  );
+
+  const calls: string[] = [];
+  const host = new OpenCodeServer();
+  host.setDataDir(hostData);
+  stubBackground(host, calls);
+
+  assert.deepEqual(await host.backgroundSession("thr_shared"), { ok: true });
+  assert.deepEqual(calls, ["ses_shared"]);
+});
+
+test("reloads a session registered after the first host lookup", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "opencode2-late-session-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bridge = new OpenCodeServer();
+  bridge.setDataDir(join(root, "bridge-data"));
+
+  const calls: string[] = [];
+  const host = new OpenCodeServer();
+  host.setDataDir(join(root, "host-data"));
+  stubBackground(host, calls);
+
+  await bridge.rememberSessionRegistration(
+    "thr_first",
+    registration("ses_first"),
+  );
+  assert.deepEqual(await host.backgroundSession("thr_first"), { ok: true });
+
+  await bridge.rememberSessionRegistration(
+    "thr_second",
+    registration("ses_second"),
+  );
+  assert.deepEqual(await host.backgroundSession("thr_second"), { ok: true });
+  assert.deepEqual(calls, ["ses_first", "ses_second"]);
 });
