@@ -15,7 +15,7 @@ BB writes an object entry to the global `opencode.json(c)`:
 {
   "plugins": [
     {
-      "package": "github:lqmanh/bb-plugin-opencode2#v1.5.0::path:opencode-bb-skills",
+      "package": "github:lqmanh/bb-plugin-opencode2#v1.5.1::path:opencode-bb-skills",
       "options": {
         "locationsDir": "/Users/me/.bb/plugins/opencode2/runtime/opencode-bb-skills/locations",
       },
