@@ -330,49 +330,8 @@ export function answerFormFields(
   return { answer, summary };
 }
 
-export function interactiveTurn(
-  session: SessionState,
-  active: ActiveTurn,
-): InteractionContext {
-  return {
-    providerTurnId: active.providerTurnId,
-    formSessionId: session.providerThreadId,
-    background: false,
-    abortController: active.abortController,
-    opened: active.opened,
-    openQuestions: active.openQuestions,
-    settledTools: active.settledTools,
-    questionWaiters: active.questionWaiters,
-    earlyQuestionForms: active.earlyQuestionForms,
-    settledForms: active.settledForms,
-    ownForms: active.ownForms,
-    settledPermissions: active.settledPermissions,
-    ownPermissionReplies: active.ownPermissionReplies,
-  };
-}
-
 function activeInteraction(session: SessionState) {
-  return session.active ? interactiveTurn(session, session.active) : undefined;
-}
-
-export function backgroundInteraction(
-  formSessionId: string,
-): InteractionContext {
-  return {
-    providerTurnId: null,
-    formSessionId,
-    background: true,
-    abortController: new AbortController(),
-    opened: new Map(),
-    openQuestions: new Map(),
-    settledTools: new Set(),
-    questionWaiters: new Map(),
-    earlyQuestionForms: new Map(),
-    settledForms: new Map(),
-    ownForms: new Set(),
-    settledPermissions: new Set(),
-    ownPermissionReplies: new Set(),
-  };
+  return session.active?.interaction;
 }
 
 function turnId(context: InteractionContext) {
@@ -692,7 +651,7 @@ export class OpenCodeInteractions {
     active: ActiveTurn,
     callId: string,
   ) {
-    const context = interactiveTurn(session, active);
+    const context = active.interaction;
     const form = await this.waitForQuestionForm(context, callId);
     if (session.active !== active || !context.opened.has(callId)) return;
     if (!form) {

@@ -823,6 +823,10 @@ export class OpenCodeServer {
     this.eventRouter.clearBackgroundTasks(session);
   }
 
+  clearSession(session: SessionState): void {
+    this.eventRouter.clearSession(session);
+  }
+
   async backgroundSession(threadId: string): Promise<{ ok: true }> {
     const providerThreadId =
       sessions.get(threadId)?.providerThreadId ??
@@ -835,7 +839,7 @@ export class OpenCodeServer {
   }
 
   async stopBackgroundTasks(session: SessionState): Promise<void> {
-    const tasks = [...(session.backgroundTasks?.values() ?? [])].filter(
+    const tasks = [...session.backgroundTasks.values()].filter(
       (task) => !task.settled,
     );
     if (tasks.length === 0) return;

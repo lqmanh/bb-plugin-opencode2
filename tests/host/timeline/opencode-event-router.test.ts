@@ -418,8 +418,9 @@ test("removes dynamic tools before detaching a deleted session", async () => {
       events.push("gone");
     },
   });
-  session.active?.abortController.signal.addEventListener("abort", () =>
-    events.push("abort"),
+  session.active?.interaction.abortController.signal.addEventListener(
+    "abort",
+    () => events.push("abort"),
   );
   session.dynamicToolProxy = {
     serverName: "bb_opencode2_ses_1",

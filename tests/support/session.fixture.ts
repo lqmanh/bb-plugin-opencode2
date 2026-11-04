@@ -1,4 +1,7 @@
-import type { SessionState } from "../../src/host/types.ts";
+import {
+  createSessionBackgroundState,
+  type SessionState,
+} from "../../src/host/types.ts";
 
 export function createTestSession(
   overrides: Partial<SessionState> = {},
@@ -14,6 +17,7 @@ export function createTestSession(
     bridgeEnvVars: {},
     dynamicToolScope: {},
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    ...createSessionBackgroundState(),
     ...overrides,
   };
 }

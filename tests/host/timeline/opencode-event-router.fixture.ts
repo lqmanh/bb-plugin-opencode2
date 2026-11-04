@@ -17,21 +17,20 @@ export function sessionFixture(
   api: () => Promise<OpenCodeClient>,
   hooks?: NonNullable<ConstructorParameters<typeof OpenCodeEventRouter>[3]>,
   overrides: {
-    active?: Partial<ActiveTurn> | null;
+    active?: (Partial<ActiveTurn> & { providerTurnId?: string }) | null;
     session?: Partial<SessionState>;
   } = {},
 ) {
   const emitted: OpenCodeRecord[] = [];
+  const session = createTestSession(overrides.session);
+  const { providerTurnId, ...activeOverrides } = overrides.active ?? {};
   const active: ActiveTurn = {
-    ...createActiveTurn("turn-1"),
+    ...createActiveTurn(providerTurnId ?? "turn-1", session.providerThreadId),
     promptIds: new Set(["msg_user"]),
     inputDelivered: true,
-    ...(overrides.active ?? {}),
+    ...activeOverrides,
   };
-  const session = createTestSession({
-    active: overrides.active === null ? undefined : active,
-    ...overrides.session,
-  });
+  session.active = overrides.active === null ? undefined : active;
   const lookup = new Map([[session.providerThreadId, session]]);
   const router = new OpenCodeEventRouter(
     api,

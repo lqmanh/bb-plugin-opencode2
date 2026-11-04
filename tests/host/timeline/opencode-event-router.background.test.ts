@@ -57,7 +57,7 @@ test("maps an explicit background shell to one local_bash task row", async () =>
   assert.equal(close?.item.summary, "ok");
   assert.equal(close?.item.outputFile, "/tmp/shell.out");
   assert.equal("providerTurnId" in (close ?? {}), false);
-  assert.equal(session.backgroundTasks?.get("bg:call_shell")?.settled, true);
+  assert.equal(session.backgroundTasks.get("bg:call_shell")?.settled, true);
 });
 
 test("maps an explicit background subagent and reads child usage at completion", async () => {
@@ -86,7 +86,7 @@ test("maps an explicit background subagent and reads child usage at completion",
   assert.equal(close?.item.usage?.totalTokens, 15);
   assert.equal(close?.item.usage?.toolUses, 0);
   assert.ok((close?.item.usage?.durationMs ?? -1) >= 0);
-  assert.equal(session.backgroundTasks?.get("bg:call_sub")?.settled, true);
+  assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, true);
 });
 
 test("converts a running foreground shell into a background task row", async () => {
@@ -120,7 +120,7 @@ test("buffers a completion that arrives before the tool success", async () => {
   const close = backgroundTaskClose(emitted);
   assert.equal(close?.status, "completed");
   assert.equal(close?.item.summary, "ok");
-  assert.equal(session.backgroundTasks?.get("bg:call_shell")?.settled, true);
+  assert.equal(session.backgroundTasks.get("bg:call_shell")?.settled, true);
 });
 
 test("keeps late background completions after the spawning turn finishes", async () => {
@@ -262,7 +262,7 @@ test("reconciles a completion missed while the event stream was down", async () 
   const close = backgroundTaskClose(emitted, before);
   assert.equal(close?.status, "completed");
   assert.equal(close?.item.summary, "ok");
-  assert.equal(session.backgroundTasks?.get("bg:call_shell")?.settled, true);
+  assert.equal(session.backgroundTasks.get("bg:call_shell")?.settled, true);
 });
 
 test("converts a running foreground subagent into a background task row", async () => {
@@ -287,7 +287,7 @@ test("closes open background tasks as interrupted when the thread stops", async 
   const close = backgroundTaskClose(emitted);
   assert.equal(close?.status, "interrupted");
   assert.equal(close?.item.taskStatus, "stopped");
-  assert.equal(session.backgroundTasks?.get("bg:call_shell")?.settled, true);
+  assert.equal(session.backgroundTasks.get("bg:call_shell")?.settled, true);
 });
 
 test("closes a background shell when OpenCode reports it exited", async (t) => {

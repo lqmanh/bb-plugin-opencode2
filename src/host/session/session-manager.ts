@@ -38,6 +38,7 @@ import {
 } from "./session-teardown.ts";
 import {
   ARCHIVED_SESSION_MESSAGE,
+  createSessionBackgroundState,
   inputRecord,
   parsePermissionMode,
   stringValue,
@@ -104,9 +105,7 @@ export function sessionFromParams(
     model,
     agentChoice: nativeAgentChoice(options),
     usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
-    backgroundTasks: new Map(),
-    pendingBackgroundCompletions: new Map(),
-    shellOutputFiles: new Map(),
+    ...createSessionBackgroundState(),
   };
 }
 
@@ -274,8 +273,7 @@ export async function registerSession(session: SessionState) {
       previous.pendingBackgroundCompletions;
     session.shellOutputFiles = previous.shellOutputFiles;
   } else if (previous) {
-    openCodeServer.clearChildSessions(previous.providerThreadId);
-    openCodeServer.clearBackgroundTasks(previous);
+    openCodeServer.clearSession(previous);
   }
   if (!session.agent && sameProvider && previous)
     session.agent = previous.agent;
@@ -300,7 +298,7 @@ export async function registerSession(session: SessionState) {
       ? previous.dynamicToolProxy
       : undefined;
   if (previous) {
-    previous.active?.abortController.abort();
+    previous.active?.interaction.abortController.abort();
     if (reusableProxy) {
       // Same OpenCode session and tool catalog: keep the live MCP child
       // instead of re-registering (which respawns it per message). Settle
@@ -361,9 +359,8 @@ export async function unregisterSession(
   reason: string,
 ): Promise<void> {
   removeSessionEntries(session);
-  openCodeServer.clearChildSessions(session.providerThreadId);
-  openCodeServer.clearBackgroundTasks(session);
-  session.active?.abortController.abort();
+  openCodeServer.clearSession(session);
+  session.active?.interaction.abortController.abort();
   await releaseDynamicTools(session, reason);
   await openCodeServer
     .forgetSessionRegistration(session.bbThreadId)
@@ -403,7 +400,7 @@ export async function shutdownSessions(reason: string): Promise<void> {
   openCodeServer.clearChildSessions();
 
   const removals = currentSessions.flatMap((session) => {
-    session.active?.abortController.abort();
+    session.active?.interaction.abortController.abort();
     openCodeServer.clearBackgroundTasks(session);
     const server = stopDynamicTools(session, reason);
     return server ? [server] : [];

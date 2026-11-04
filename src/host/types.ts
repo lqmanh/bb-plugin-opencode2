@@ -47,6 +47,7 @@ export function usageTotal(totals: UsageTotals) {
 }
 
 export type InteractionContext = {
+  /** Null for background tasks, which have no turn of their own. */
   providerTurnId: string | null;
   formSessionId: string;
   background: boolean;
@@ -60,6 +61,10 @@ export type InteractionContext = {
   ownForms: Set<string>;
   settledPermissions: Set<string>;
   ownPermissionReplies: Set<string>;
+};
+
+export type TurnInteractionContext = InteractionContext & {
+  providerTurnId: string;
 };
 
 export type BackgroundTaskRecord = {
@@ -89,8 +94,30 @@ export type ChildSessionRecord = {
   background?: boolean;
 };
 
+export function createInteractionContext<T extends string | null>(input: {
+  providerTurnId: T;
+  formSessionId: string;
+  background: boolean;
+}): InteractionContext & { providerTurnId: T } {
+  return {
+    providerTurnId: input.providerTurnId,
+    formSessionId: input.formSessionId,
+    background: input.background,
+    abortController: new AbortController(),
+    opened: new Map(),
+    openQuestions: new Map(),
+    settledTools: new Set(),
+    questionWaiters: new Map(),
+    earlyQuestionForms: new Map(),
+    settledForms: new Map(),
+    ownForms: new Set(),
+    settledPermissions: new Set(),
+    ownPermissionReplies: new Set(),
+  };
+}
+
 export type ActiveTurn = {
-  providerTurnId: string;
+  interaction: TurnInteractionContext;
   startedAt: number;
   /** Set once OpenCode accepted the prompt; reconciliation waits for it. */
   promptDelivered?: boolean;
@@ -104,15 +131,11 @@ export type ActiveTurn = {
    * compaction still finishing) and must not end this turn.
    */
   inputDelivered?: boolean;
-  abortController: AbortController;
   manualCompaction?: { itemId: string };
   checkpointId?: string;
-  opened: Map<string, OpenCodeRecord>;
   pendingTools: Map<string, string>;
   pendingInput: Map<string, string>;
   touchedFiles: Map<string, string[]>;
-  openQuestions: Map<string, string>;
-  settledTools: Set<string>;
   /** Tool calls already closed, so a repeated terminal event is ignored. */
   finishedTools?: Set<string>;
   /** Set while the asynchronous turn-diff read is finishing the turn. */
@@ -121,37 +144,22 @@ export type ActiveTurn = {
   shellPolls?: Map<string, { stopped: boolean }>;
   /** Token counts of the latest finished step, for `usage.last`. */
   lastStepTokens?: OpenCodeRecord;
-  /** Question calls waiting for their form, keyed by tool call ID. */
-  questionWaiters: Map<string, { resolve(form?: OpenCodeRecord): void }>;
-  /** Forms that arrived before their question tool registered a waiter. */
-  earlyQuestionForms: Map<string, OpenCodeRecord>;
-  /** Form outcomes observed from OpenCode, keyed by raw form ID. */
-  settledForms: Map<string, "answered" | "cancelled">;
-  /** Raw IDs of BB's own form writes, removed when their OpenCode echo arrives. */
-  ownForms: Set<string>;
-  /** Permission requests settled in OpenCode, keyed by raw request ID. */
-  settledPermissions: Set<string>;
-  /** Raw IDs of BB's own permission replies, removed on their echo. */
-  ownPermissionReplies: Set<string>;
 };
 
-export function createActiveTurn(providerTurnId: string): ActiveTurn {
+export function createActiveTurn(
+  providerTurnId: string,
+  formSessionId: string,
+): ActiveTurn {
   return {
-    providerTurnId,
+    interaction: createInteractionContext({
+      providerTurnId,
+      formSessionId,
+      background: false,
+    }),
     startedAt: Date.now(),
-    abortController: new AbortController(),
-    opened: new Map(),
     pendingTools: new Map(),
     pendingInput: new Map(),
     touchedFiles: new Map(),
-    openQuestions: new Map(),
-    settledTools: new Set(),
-    questionWaiters: new Map(),
-    earlyQuestionForms: new Map(),
-    settledForms: new Map(),
-    ownForms: new Set(),
-    settledPermissions: new Set(),
-    ownPermissionReplies: new Set(),
   };
 }
 
@@ -199,12 +207,23 @@ export type SessionState = {
   /** Parent-only last step, used for late child usage after a turn closes. */
   lastUsage?: { tokens: UsageTotals; used: number };
   /** OpenCode background shells and subagents shown as BB task rows. */
-  backgroundTasks?: Map<string, BackgroundTaskRecord>;
+  backgroundTasks: Map<string, BackgroundTaskRecord>;
   /** Completions that arrived before their task row was registered. */
-  pendingBackgroundCompletions?: Map<string, OpenCodeRecord>;
+  pendingBackgroundCompletions: Map<string, OpenCodeRecord>;
   /** Full output files for OpenCode shells, keyed by shell ID. */
-  shellOutputFiles?: Map<string, string>;
+  shellOutputFiles: Map<string, string>;
 };
+
+export function createSessionBackgroundState(): Pick<
+  SessionState,
+  "backgroundTasks" | "pendingBackgroundCompletions" | "shellOutputFiles"
+> {
+  return {
+    backgroundTasks: new Map(),
+    pendingBackgroundCompletions: new Map(),
+    shellOutputFiles: new Map(),
+  };
+}
 
 export function isSubagentTool(name: string): boolean {
   const tool = name.toLowerCase();

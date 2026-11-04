@@ -532,17 +532,17 @@ async function handle(request: RecordValue) {
         );
       if (session.terminalError) throw new Error(session.terminalError);
       if (session.active) throw new Error("An OpenCode turn is already active");
-      const active = createActiveTurn(nextTurnId());
+      const active = createActiveTurn(nextTurnId(), session.providerThreadId);
       session.active = active;
       if (isManualCompactionTurn(params.input)) {
         const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
         active.manualCompaction = { itemId: messageId };
-        active.opened.set(messageId, { type: "compaction" });
+        active.interaction.opened.set(messageId, { type: "compaction" });
         emit(
           session.bbThreadId,
           manualCompactionStartDeltas(
             params.clientRequestId,
-            active.providerTurnId,
+            active.interaction.providerTurnId,
             messageId,
           ),
         );
@@ -573,11 +573,14 @@ async function handle(request: RecordValue) {
         // a turn BB hasn't started yet, so it is dropped, the turn keeps zero
         // accepted inputs, and BB hides Edit message / rejects edit-message
         // with "not accepted into exactly one turn".
-        { kind: "turn.open", providerTurnId: active.providerTurnId },
+        {
+          kind: "turn.open",
+          providerTurnId: active.interaction.providerTurnId,
+        },
         {
           kind: "input.accepted",
           clientRequestId: params.clientRequestId,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
       sendResult(request.id, { threadId: params.threadId });
@@ -664,10 +667,13 @@ async function handle(request: RecordValue) {
       let active = session.active;
       const openedTurn = !active;
       if (!active) {
-        active = createActiveTurn(nextTurnId());
+        active = createActiveTurn(nextTurnId(), session.providerThreadId);
         session.active = active;
         emit(session.bbThreadId, [
-          { kind: "turn.open", providerTurnId: active.providerTurnId },
+          {
+            kind: "turn.open",
+            providerTurnId: active.interaction.providerTurnId,
+          },
         ]);
       }
       const planMode = inputRecord(params.options).promptMode === "plan";
@@ -713,7 +719,10 @@ async function handle(request: RecordValue) {
         }
         active.promptDelivered = true;
         emit(session.bbThreadId, [
-          steerAcceptedDelta(clientRequestId, active.providerTurnId),
+          steerAcceptedDelta(
+            clientRequestId,
+            active.interaction.providerTurnId,
+          ),
         ]);
         sendResult(request.id, { threadId: params.threadId });
         return;
@@ -767,8 +776,9 @@ async function handle(request: RecordValue) {
             .remove({ sessionID: providerThreadId })
             .catch(() => {});
       }
-      if (providerThreadId) openCodeServer.clearChildSessions(providerThreadId);
-      if (session) openCodeServer.clearBackgroundTasks(session);
+      if (session) openCodeServer.clearSession(session);
+      else if (providerThreadId)
+        openCodeServer.clearChildSessions(providerThreadId);
       sessions.delete(params.threadId);
       if (providerThreadId) sessionsByProviderId.delete(providerThreadId);
       // Drop the persisted mapping so a later thread/fork for this BB thread

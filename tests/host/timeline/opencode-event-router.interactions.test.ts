@@ -267,10 +267,10 @@ test("drops settlements from a turn abandoned without finish", async () => {
   });
 
   await event("form.replied", { id: "frm_reused" });
-  assert.equal(active.settledForms.get("frm_reused"), "answered");
+  assert.equal(active.interaction.settledForms.get("frm_reused"), "answered");
 
   // Discard the turn without finish(), then reuse the form ID in the next one.
-  const next = createActiveTurn("turn-2");
+  const next = createActiveTurn("turn-2", "ses_1");
   session.active = next;
 
   await event("form.created", {
@@ -283,5 +283,5 @@ test("drops settlements from a turn abandoned without finish", async () => {
   await nextTick();
 
   assert.equal(replies.length, 1);
-  assert.equal(next.settledForms.size, 0);
+  assert.equal(next.interaction.settledForms.size, 0);
 });

@@ -13,11 +13,7 @@ import {
   notify,
 } from "../bridge/bridge-runtime.ts";
 import { withSelectedAgent } from "../opencode/models.ts";
-import {
-  backgroundInteraction,
-  interactiveTurn,
-  OpenCodeInteractions,
-} from "../opencode/opencode-interactions.ts";
+import { OpenCodeInteractions } from "../opencode/opencode-interactions.ts";
 import { toolFailureError } from "../opencode/prompt.ts";
 import { dynamicMcpServerName } from "../opencode/opencode-requests.ts";
 import {
@@ -56,6 +52,7 @@ import {
   ARCHIVED_SESSION_MESSAGE,
   DELETED_SESSION_MESSAGE,
   MOVED_SESSION_MESSAGE,
+  createInteractionContext,
   inputRecord,
   isSubagentTool,
   parseInputText,
@@ -194,18 +191,6 @@ function sameUsage(left: UsageTotals, right: UsageTotals) {
   );
 }
 
-function backgroundTasks(session: SessionState) {
-  return (session.backgroundTasks ??= new Map());
-}
-
-function pendingCompletions(session: SessionState) {
-  return (session.pendingBackgroundCompletions ??= new Map());
-}
-
-function shellOutputFiles(session: SessionState) {
-  return (session.shellOutputFiles ??= new Map());
-}
-
 function shellCompletionKey(shellId: string) {
   return `shell:${shellId}`;
 }
@@ -291,7 +276,7 @@ function usageSnapshotDeltas(
       : session.usageCost + (child.cost ?? 0);
   // BB applies a usage delta without providerTurnId to the current or last
   // turn, so late child usage does not need a synthetic turn ID.
-  const providerTurnId = active?.providerTurnId;
+  const providerTurnId = active?.interaction.providerTurnId;
   return [
     {
       kind: "usage",
@@ -500,16 +485,16 @@ export class OpenCodeEventRouter {
   }
 
   private backgroundTaskForCall(session: SessionState, callId: string) {
-    return backgroundTasks(session).get(backgroundTaskKey(callId));
+    return session.backgroundTasks.get(backgroundTaskKey(callId));
   }
 
   private backgroundTaskForShell(session: SessionState, shellId: string) {
     const owner = this.shellTaskOwners.get(shellId);
     if (owner?.session === session) {
-      const task = backgroundTasks(session).get(owner.taskId);
+      const task = session.backgroundTasks.get(owner.taskId);
       if (task) return task;
     }
-    for (const task of backgroundTasks(session).values())
+    for (const task of session.backgroundTasks.values())
       if (task.shellId === shellId) return task;
     return undefined;
   }
@@ -517,10 +502,10 @@ export class OpenCodeEventRouter {
   private backgroundTaskForChild(session: SessionState, childId: string) {
     const taskId = this.childSessions.get(childId)?.backgroundTaskId;
     if (taskId) {
-      const task = backgroundTasks(session).get(taskId);
+      const task = session.backgroundTasks.get(taskId);
       if (task) return task;
     }
-    for (const task of backgroundTasks(session).values())
+    for (const task of session.backgroundTasks.values())
       if (task.childSessionId === childId) return task;
     return undefined;
   }
@@ -566,9 +551,13 @@ export class OpenCodeEventRouter {
       startedAt: Date.now(),
       settled: false,
       item,
-      interaction: backgroundInteraction(""),
+      interaction: createInteractionContext({
+        providerTurnId: null,
+        formSessionId: "",
+        background: true,
+      }),
     };
-    backgroundTasks(session).set(task.id, task);
+    session.backgroundTasks.set(task.id, task);
     this.emit(session.bbThreadId, [
       {
         kind: "item.open",
@@ -608,7 +597,7 @@ export class OpenCodeEventRouter {
         session,
         taskId: task.id,
       });
-      const file = shellOutputFiles(session).get(shellId);
+      const file = session.shellOutputFiles.get(shellId);
       if (file) {
         task.outputFile = file;
         task.item.outputFile = file;
@@ -627,7 +616,7 @@ export class OpenCodeEventRouter {
     completion: BackgroundCompletion,
   ) {
     rememberBounded(
-      pendingCompletions(session),
+      session.pendingBackgroundCompletions,
       completionKey(completion),
       completion as OpenCodeRecord,
       100,
@@ -639,7 +628,7 @@ export class OpenCodeEventRouter {
     task: BackgroundTaskRecord,
   ) {
     if (task.settled) return;
-    const map = pendingCompletions(session);
+    const map = session.pendingBackgroundCompletions;
     const keys = [
       task.shellId ? shellCompletionKey(task.shellId) : undefined,
       task.childSessionId ? childCompletionKey(task.childSessionId) : undefined,
@@ -658,7 +647,7 @@ export class OpenCodeEventRouter {
     record: ChildSessionRecord,
   ) {
     const task = record.backgroundTaskId
-      ? backgroundTasks(session).get(record.backgroundTaskId)
+      ? session.backgroundTasks.get(record.backgroundTaskId)
       : undefined;
     return task?.interaction;
   }
@@ -758,7 +747,7 @@ export class OpenCodeEventRouter {
   }
 
   interruptBackgroundTasks(session: SessionState, reason?: string) {
-    for (const task of backgroundTasks(session).values()) {
+    for (const task of session.backgroundTasks.values()) {
       if (task.settled) continue;
       this.settleBackgroundTask(
         session,
@@ -769,14 +758,19 @@ export class OpenCodeEventRouter {
   }
 
   clearBackgroundTasks(session: SessionState) {
-    for (const task of session.backgroundTasks?.values() ?? []) {
+    for (const task of session.backgroundTasks.values()) {
       if (task.shellId) this.shellTaskOwners.delete(task.shellId);
       for (const id of task.interaction.opened.keys())
         this.parentRefs.delete(id);
     }
-    session.backgroundTasks?.clear();
-    session.pendingBackgroundCompletions?.clear();
-    session.shellOutputFiles?.clear();
+    session.backgroundTasks.clear();
+    session.pendingBackgroundCompletions.clear();
+    session.shellOutputFiles.clear();
+  }
+
+  clearSession(session: SessionState) {
+    this.clearBackgroundTasks(session);
+    this.clearChildSessions(session.providerThreadId);
   }
 
   private handleSynthetic(session: SessionState, data: RecordValue) {
@@ -803,8 +797,8 @@ export class OpenCodeEventRouter {
     shellId: string,
     file: string,
   ) {
-    rememberBounded(shellOutputFiles(session), shellId, file, 200);
-    for (const task of backgroundTasks(session).values())
+    rememberBounded(session.shellOutputFiles, shellId, file, 200);
+    for (const task of session.backgroundTasks.values())
       if (task.shellId === shellId && !task.settled) {
         task.outputFile = file;
         task.item.outputFile = file;
@@ -861,7 +855,7 @@ export class OpenCodeEventRouter {
             : "";
     const owner = this.shellTaskOwners.get(shellId);
     if (owner) {
-      const task = backgroundTasks(owner.session).get(owner.taskId);
+      const task = owner.session.backgroundTasks.get(owner.taskId);
       if (task && !task.settled)
         this.settleBackgroundTask(
           owner.session,
@@ -871,7 +865,7 @@ export class OpenCodeEventRouter {
       return;
     }
     for (const session of this.sessionLookup.values()) {
-      if (!session.backgroundTasks?.size) continue;
+      if (session.backgroundTasks.size === 0) continue;
       const task = this.backgroundTaskForShell(session, shellId);
       if (!task || task.settled) continue;
       this.settleBackgroundTask(
@@ -998,7 +992,7 @@ export class OpenCodeEventRouter {
    * also durable in the session's message history.
    */
   async reconcileBackgroundTasks(session: SessionState): Promise<void> {
-    if (![...backgroundTasks(session).values()].some((task) => !task.settled))
+    if (![...session.backgroundTasks.values()].some((task) => !task.settled))
       return;
     const api = await this.api();
     const result = await api.message.list({
@@ -1216,13 +1210,13 @@ export class OpenCodeEventRouter {
         : undefined;
     if (event.type === "session.text.started" && textPartId) {
       const item = { type: "agentMessage", text: "" };
-      active.opened.set(textPartId, item);
+      active.interaction.opened.set(textPartId, item);
       this.emit(session.bbThreadId, [
         {
           kind: "item.open",
           key: itemKey(textPartId, "agentMessage"),
           item,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
     }
@@ -1237,7 +1231,7 @@ export class OpenCodeEventRouter {
           key: itemKey(textPartId, "agentMessage"),
           channel: "agentMessage",
           text: data.delta,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
     }
@@ -1246,26 +1240,26 @@ export class OpenCodeEventRouter {
       textPartId &&
       typeof data.text === "string"
     ) {
-      const item = active.opened.get(textPartId) ?? {
+      const item = active.interaction.opened.get(textPartId) ?? {
         type: "agentMessage",
         text: data.text,
       };
       item.text = data.text;
-      active.opened.delete(textPartId);
+      active.interaction.opened.delete(textPartId);
       this.emit(session.bbThreadId, [
         {
           kind: "item.textClose",
           key: itemKey(textPartId, "agentMessage"),
           channel: "agentMessage",
           text: data.text,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
         {
           kind: "item.close",
           key: itemKey(textPartId, "agentMessage"),
           status: "completed",
           item,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
     }
@@ -1275,13 +1269,13 @@ export class OpenCodeEventRouter {
         : undefined;
     if (event.type === "session.reasoning.started" && reasoningPartId) {
       const item = { type: "reasoning", summary: [], content: [] };
-      active.opened.set(reasoningPartId, item);
+      active.interaction.opened.set(reasoningPartId, item);
       this.emit(session.bbThreadId, [
         {
           kind: "item.open",
           key: itemKey(reasoningPartId, "reasoningText"),
           item,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
     }
@@ -1296,7 +1290,7 @@ export class OpenCodeEventRouter {
           key: itemKey(reasoningPartId, "reasoningText"),
           channel: "reasoningText",
           text: data.delta,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
     }
@@ -1305,27 +1299,27 @@ export class OpenCodeEventRouter {
       reasoningPartId &&
       typeof data.text === "string"
     ) {
-      const item = active.opened.get(reasoningPartId) ?? {
+      const item = active.interaction.opened.get(reasoningPartId) ?? {
         type: "reasoning",
         summary: [],
         content: [],
       };
       item.content = [data.text];
-      active.opened.delete(reasoningPartId);
+      active.interaction.opened.delete(reasoningPartId);
       this.emit(session.bbThreadId, [
         {
           kind: "item.textClose",
           key: itemKey(reasoningPartId, "reasoningText"),
           channel: "reasoningText",
           text: data.text,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
         {
           kind: "item.close",
           key: itemKey(reasoningPartId, "reasoningText"),
           status: "completed",
           item,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
     }
@@ -1352,13 +1346,13 @@ export class OpenCodeEventRouter {
             eventId,
             name,
             input,
-            active.providerTurnId,
+            active.interaction.providerTurnId,
           );
         } else {
           const row = sessionToolRow(session, name, input);
           if (row.item.type === "delegation")
             (row.item as RecordValue).childRef = eventId;
-          active.opened.set(eventId, row.item);
+          active.interaction.opened.set(eventId, row.item);
           const touched = touchedPaths(name, input);
           if (touched.length) active.touchedFiles.set(eventId, touched);
           this.emit(session.bbThreadId, [
@@ -1367,7 +1361,7 @@ export class OpenCodeEventRouter {
               key: itemKey(eventId, "tool"),
               item: row.item,
               presentation: row.presentation,
-              providerTurnId: active.providerTurnId,
+              providerTurnId: active.interaction.providerTurnId,
             },
           ]);
           // OpenCode's question tool blocks forever waiting on an interactive
@@ -1382,7 +1376,7 @@ export class OpenCodeEventRouter {
         active.pendingTools.delete(eventId);
         active.pendingInput.delete(eventId);
       } else {
-        const item = active.opened.get(eventId);
+        const item = active.interaction.opened.get(eventId);
         if (item) item.args = data.input;
       }
     }
@@ -1390,7 +1384,7 @@ export class OpenCodeEventRouter {
       if (task) {
         this.updateBackgroundTask(session, task, metadata);
       } else {
-        const opened = active.opened.get(eventId);
+        const opened = active.interaction.opened.get(eventId);
         if (childId && opened?.type === "delegation") opened.childRef = childId;
         const shellId = stringValue(metadata.shellID);
         if (shellId && opened?.type === "command")
@@ -1406,8 +1400,8 @@ export class OpenCodeEventRouter {
       if (active.finishedTools.has(eventId)) return;
       active.finishedTools.add(eventId);
       // handleQuestion may already have closed + answered this call.
-      if (active.settledTools.has(eventId)) {
-        active.settledTools.delete(eventId);
+      if (active.interaction.settledTools.has(eventId)) {
+        active.interaction.settledTools.delete(eventId);
         active.touchedFiles.delete(eventId);
         active.pendingInput.delete(eventId);
         active.pendingTools.delete(eventId);
@@ -1451,7 +1445,7 @@ export class OpenCodeEventRouter {
         }
         return;
       }
-      const foreground = active.opened.get(eventId);
+      const foreground = active.interaction.opened.get(eventId);
       const toolName =
         foreground?.type === "command"
           ? "bash"
@@ -1470,14 +1464,14 @@ export class OpenCodeEventRouter {
             foreground.summary = "Moved to background";
             if (childId) foreground.childRef = childId;
           }
-          active.opened.delete(eventId);
+          active.interaction.opened.delete(eventId);
           this.emit(session.bbThreadId, [
             {
               kind: "item.close",
               key: itemKey(eventId, "tool"),
               status: "completed",
               item: foreground,
-              providerTurnId: active.providerTurnId,
+              providerTurnId: active.interaction.providerTurnId,
             },
           ]);
         }
@@ -1489,18 +1483,18 @@ export class OpenCodeEventRouter {
           eventId,
           toolName,
           input,
-          active.providerTurnId,
+          active.interaction.providerTurnId,
         );
         this.updateBackgroundTask(session, opened, metadata);
         return;
       }
-      let item = active.opened.get(eventId);
+      let item = active.interaction.opened.get(eventId);
       if (!item) {
         const row = sessionToolRow(session, name, input);
         if (row.item.type === "delegation")
           (row.item as RecordValue).childRef = eventId;
         item = row.item;
-        active.opened.set(eventId, item);
+        active.interaction.opened.set(eventId, item);
         const touched = touchedPaths(name, input);
         if (touched.length) active.touchedFiles.set(eventId, touched);
         active.pendingTools.delete(eventId);
@@ -1511,7 +1505,7 @@ export class OpenCodeEventRouter {
             key: itemKey(eventId, "tool"),
             item,
             presentation: row.presentation,
-            providerTurnId: active.providerTurnId,
+            providerTurnId: active.interaction.providerTurnId,
           },
         ]);
       }
@@ -1546,7 +1540,7 @@ export class OpenCodeEventRouter {
             ? (exitCode ?? 0)
             : (exitCode ?? 1);
       }
-      active.opened.delete(eventId);
+      active.interaction.opened.delete(eventId);
       this.emit(session.bbThreadId, [
         {
           kind: "item.close",
@@ -1560,7 +1554,7 @@ export class OpenCodeEventRouter {
             ? { resultText: item.result }
             : {}),
           item,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
       if (event.type === "session.tool.success") {
@@ -1617,7 +1611,7 @@ export class OpenCodeEventRouter {
           message: `${stringValue(error.message) ?? "OpenCode model request failed"}. Retrying${attempt}.`,
           willRetry: true,
           ...(category ? { category } : {}),
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
         },
       ]);
     }
@@ -1667,8 +1661,7 @@ export class OpenCodeEventRouter {
 
   private async detachSession(session: SessionState, reason: string) {
     this.interruptBackgroundTasks(session, reason);
-    this.clearBackgroundTasks(session);
-    this.clearChildSessions(session.providerThreadId);
+    this.clearSession(session);
     await releaseSessionTools(session, reason, () => this.api());
     if (this.sessionLookup.get(session.providerThreadId) === session) {
       (this.sessionLookup as Map<string, SessionState>).delete(
@@ -1815,16 +1808,16 @@ export class OpenCodeEventRouter {
     if (!isStarted && !isCompleted && !isFailed) return false;
 
     if (isStarted) {
-      if (itemId && !active.opened.has(itemId)) {
+      if (itemId && !active.interaction.opened.has(itemId)) {
         const item = { type: "compaction" };
-        active.opened.set(itemId, item);
+        active.interaction.opened.set(itemId, item);
         this.emit(session.bbThreadId, [
           {
             kind: "item.open",
             key: itemKey(itemId, "compaction"),
             item,
             presentation: compactionPresentation,
-            providerTurnId: active.providerTurnId,
+            providerTurnId: active.interaction.providerTurnId,
           },
         ]);
       }
@@ -1845,30 +1838,30 @@ export class OpenCodeEventRouter {
         reason === "manual" ||
         eventType === "session.compacted");
     if (manual && manualCompaction) {
-      active.opened.delete(manualCompaction.itemId);
+      active.interaction.opened.delete(manualCompaction.itemId);
       this.emit(
         session.bbThreadId,
         manualCompactionOutcomeDeltas({
-          providerTurnId: active.providerTurnId,
+          providerTurnId: active.interaction.providerTurnId,
           messageId: manualCompaction.itemId,
           status: isCompleted ? "completed" : "failed",
           ...(isFailed ? { error } : {}),
         }),
       );
-      active.openQuestions.clear();
-      active.settledTools.clear();
+      active.interaction.openQuestions.clear();
+      active.interaction.settledTools.clear();
       active.pendingTools.clear();
       active.pendingInput.clear();
       active.touchedFiles.clear();
-      active.abortController.abort();
+      active.interaction.abortController.abort();
       session.active = undefined;
       return true;
     }
 
     if (itemId) {
-      const item = active.opened.get(itemId);
+      const item = active.interaction.opened.get(itemId);
       if (item) {
-        active.opened.delete(itemId);
+        active.interaction.opened.delete(itemId);
         this.emit(session.bbThreadId, [
           {
             kind: "item.close",
@@ -1876,14 +1869,17 @@ export class OpenCodeEventRouter {
             status: isCompleted ? "completed" : "failed",
             item,
             presentation: compactionPresentation,
-            providerTurnId: active.providerTurnId,
+            providerTurnId: active.interaction.providerTurnId,
           },
         ]);
       }
     }
     if (isCompleted)
       this.emit(session.bbThreadId, [
-        { kind: "context.compacted", providerTurnId: active.providerTurnId },
+        {
+          kind: "context.compacted",
+          providerTurnId: active.interaction.providerTurnId,
+        },
       ]);
     return true;
   }
@@ -1914,7 +1910,7 @@ export class OpenCodeEventRouter {
               location: { directory: session.cwd },
               cursor,
             },
-            { signal: active.abortController.signal },
+            { signal: active.interaction.abortController.signal },
           );
           const output = inputRecord(result.data);
           if (
@@ -1932,7 +1928,7 @@ export class OpenCodeEventRouter {
                   output.output,
                   SHELL_OUTPUT_CHUNK_BYTES,
                 ),
-                providerTurnId: active.providerTurnId,
+                providerTurnId: active.interaction.providerTurnId,
               },
             ]);
           }
@@ -2001,14 +1997,14 @@ export class OpenCodeEventRouter {
         kind: "item.open",
         key: itemKey(key, "fileChange"),
         item,
-        providerTurnId: active.providerTurnId,
+        providerTurnId: active.interaction.providerTurnId,
       },
       {
         kind: "item.close",
         key: itemKey(key, "fileChange"),
         status: "completed",
         item,
-        providerTurnId: active.providerTurnId,
+        providerTurnId: active.interaction.providerTurnId,
       },
     ]);
   }
@@ -2021,15 +2017,15 @@ export class OpenCodeEventRouter {
     const active = session.active;
     if (!active || active.finishing) return;
     active.finishing = true;
-    active.abortController.abort();
-    const context = interactiveTurn(session, active);
+    const context = active.interaction;
+    context.abortController.abort();
     for (const child of this.childRecords(session))
       if (!child.backgroundTaskId) child.terminal = true;
     if (active.manualCompaction) {
       this.emit(
         session.bbThreadId,
         manualCompactionOutcomeDeltas({
-          providerTurnId: active.providerTurnId,
+          providerTurnId: context.providerTurnId,
           messageId: active.manualCompaction.itemId,
           status,
           ...(error ? { error } : {}),
@@ -2048,9 +2044,9 @@ export class OpenCodeEventRouter {
       session,
       context,
       status,
-      active.providerTurnId,
+      context.providerTurnId,
     );
-    active.settledTools.clear();
+    context.settledTools.clear();
     active.pendingTools.clear();
     active.pendingInput.clear();
     active.touchedFiles.clear();
@@ -2060,14 +2056,14 @@ export class OpenCodeEventRouter {
         {
           kind: "turn.diff",
           diff,
-          providerTurnId: active.providerTurnId,
+          providerTurnId: context.providerTurnId,
         },
       ]);
     if (status === "failed") {
       this.emit(
         session.bbThreadId,
         providerFailureDeltas({
-          providerTurnId: active.providerTurnId,
+          providerTurnId: context.providerTurnId,
           error: error ?? "OpenCode execution failed",
           ...(active.checkpointId
             ? { providerCheckpointId: active.checkpointId }
@@ -2082,7 +2078,7 @@ export class OpenCodeEventRouter {
           ...(active.checkpointId
             ? { providerCheckpointId: active.checkpointId }
             : {}),
-          providerTurnId: active.providerTurnId,
+          providerTurnId: context.providerTurnId,
         },
       ]);
     }
