@@ -133,16 +133,18 @@ global `plugins` array:
 {
   "package": "github:lqmanh/bb-plugin-opencode2#v1.5.0::path:opencode-bb-skills",
   "options": {
-    "locationsDir": "<BB dataDir>/runtime/opencode-bb-skills/locations",
+    "locationsDir": "<BB dataDir>/plugins/opencode2/runtime/opencode-bb-skills/locations",
   },
 }
 ```
 
-The plugin reads the catalog matching the OpenCode location and registers its
-skills with `ctx.skill.transform`. A watcher and a periodic poll call
-`ctx.skill.reload()` when the catalog changes or disappears. Catalogs contain
-the workspace's effective BB skills, so project and shared skills are covered
-without leaking to other workspaces.
+The catalog lives under the plugin data root, not a host- or bridge-specific
+directory, so both workers write the same `locationsDir`. The plugin reads the
+catalog matching the OpenCode location and registers its skills with
+`ctx.skill.transform`. A watcher and a periodic poll call `ctx.skill.reload()`
+when the catalog changes or disappears. Catalogs contain the workspace's
+effective BB skills, so project and shared skills are covered without leaking to
+other workspaces.
 
 The host rewrites its own entry when BB updates, so the pin follows the BB
 version. `opencode plugin check/update` skip exact revisions. Enabling adds or

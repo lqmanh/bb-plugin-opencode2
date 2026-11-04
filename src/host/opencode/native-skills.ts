@@ -10,7 +10,7 @@ import {
   unlink,
   utimes,
 } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import rootPackage from "../../../package.json" with { type: "json" };
 import { writeJsonFileAtomic } from "../session/persistence.ts";
 
@@ -98,12 +98,17 @@ export function isBbSkillsPluginPackage(packageSpec: string): boolean {
   ].some((prefix) => spec.startsWith(prefix));
 }
 
-export function nativeSkillsRoot(dataDir: string): string {
-  return join(dataDir, "runtime", BB_SKILLS_PLUGIN_PATH);
+/**
+ * Host and provider-bridge workers have separate data directories under the
+ * same plugin root. The catalog must be shared with OpenCode, so derive it
+ * from the plugin root rather than from the worker's own directory.
+ */
+export function nativeSkillsRoot(workerDataDir: string): string {
+  return join(dirname(workerDataDir), "runtime", BB_SKILLS_PLUGIN_PATH);
 }
 
-export function nativeSkillsLocationsDir(dataDir: string): string {
-  return join(nativeSkillsRoot(dataDir), "locations");
+export function nativeSkillsLocationsDir(workerDataDir: string): string {
+  return join(nativeSkillsRoot(workerDataDir), "locations");
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -167,17 +172,17 @@ export async function buildNativeSkillCatalog(
 }
 
 export async function writeNativeSkillsLocation(
-  dataDir: string,
+  workerDataDir: string,
   cwd: string,
   roots: readonly NativeSkillRoot[],
 ): Promise<string[]> {
   const catalog = await buildNativeSkillCatalog(cwd, roots);
   const names = catalog.skills.map((skill) => skill.name);
   if (catalog.skills.length === 0) {
-    await removeNativeSkillsLocation(dataDir, cwd);
+    await removeNativeSkillsLocation(workerDataDir, cwd);
     return names;
   }
-  const directory = nativeSkillsLocationsDir(dataDir);
+  const directory = nativeSkillsLocationsDir(workerDataDir);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const path = join(
     directory,
@@ -197,13 +202,13 @@ export async function writeNativeSkillsLocation(
 }
 
 export async function removeNativeSkillsLocation(
-  dataDir: string,
+  workerDataDir: string,
   cwd: string,
 ): Promise<void> {
   const location = await normalizedLocation(cwd);
   await unlink(
     join(
-      nativeSkillsLocationsDir(dataDir),
+      nativeSkillsLocationsDir(workerDataDir),
       `${locationHash(location.canonical)}.json`,
     ),
   ).catch(() => {});
@@ -211,9 +216,9 @@ export async function removeNativeSkillsLocation(
 
 /** Drop catalogs for workspaces that have not been refreshed recently. */
 export async function pruneNativeSkillsLocations(
-  dataDir: string,
+  workerDataDir: string,
 ): Promise<void> {
-  const directory = nativeSkillsLocationsDir(dataDir);
+  const directory = nativeSkillsLocationsDir(workerDataDir);
   const entries = await readdir(directory, { withFileTypes: true }).catch(
     () => [],
   );
@@ -228,6 +233,8 @@ export async function pruneNativeSkillsLocations(
 }
 
 /** Remove every catalog for this host; used when the setting is turned off. */
-export async function removeNativeSkillsRoot(dataDir: string): Promise<void> {
-  await rm(nativeSkillsRoot(dataDir), { recursive: true, force: true });
+export async function removeNativeSkillsRoot(
+  workerDataDir: string,
+): Promise<void> {
+  await rm(nativeSkillsRoot(workerDataDir), { recursive: true, force: true });
 }

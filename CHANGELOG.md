@@ -3,6 +3,13 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- Native skill catalogs now live under the plugin data root, so the host and
+  provider bridge write the same `locationsDir` that OpenCode reads.
+
 ## [1.5.0] - 2026-11-04
 
 ### Added

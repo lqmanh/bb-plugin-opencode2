@@ -110,12 +110,26 @@ test("pins the plugin package to the BB version and path", () => {
   );
 });
 
+test("host and bridge workers share one catalog root", () => {
+  const pluginRoot = join(tmpdir(), "oc-native-shared");
+  assert.equal(
+    nativeSkillsLocationsDir(join(pluginRoot, "host-data")),
+    join(pluginRoot, "runtime", "opencode-bb-skills", "locations"),
+  );
+  assert.equal(
+    nativeSkillsLocationsDir(join(pluginRoot, "bridge-data")),
+    join(pluginRoot, "runtime", "opencode-bb-skills", "locations"),
+  );
+});
+
 test("writes and removes a per-location catalog", async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), "oc-native-location-"));
+  const pluginRoot = mkdtempSync(join(tmpdir(), "oc-native-location-"));
+  const dataDir = join(pluginRoot, "host-data");
+  mkdirSync(dataDir, { recursive: true });
   try {
-    const skills = join(dataDir, "skills");
+    const skills = join(pluginRoot, "skills");
     skill(skills, "review", "Review changes");
-    const workspace = join(dataDir, "workspace");
+    const workspace = join(pluginRoot, "workspace");
     mkdirSync(workspace, { recursive: true });
 
     const names = await writeNativeSkillsLocation(dataDir, workspace, [
@@ -137,12 +151,14 @@ test("writes and removes a per-location catalog", async () => {
     await removeNativeSkillsRoot(dataDir);
     assert.throws(() => readdirSync(nativeSkillsRoot(dataDir)));
   } finally {
-    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(pluginRoot, { recursive: true, force: true });
   }
 });
 
 test("enabling writes one pinned object entry and disabling removes it", async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), "oc-native-enable-"));
+  const pluginRoot = mkdtempSync(join(tmpdir(), "oc-native-enable-"));
+  const dataDir = join(pluginRoot, "host-data");
+  mkdirSync(dataDir, { recursive: true });
   const configHome = mkdtempSync(join(tmpdir(), "oc-native-config-"));
   const previous = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = configHome;
@@ -157,7 +173,10 @@ test("enabling writes one pinned object entry and disabling removes it", async (
     assert.equal(enabled.enabled, true);
     assert.equal(enabled.error, undefined);
     assert.ok(enabled.packageSpec);
-    assert.ok(enabled.locationsDir);
+    assert.equal(
+      enabled.locationsDir,
+      join(pluginRoot, "runtime", "opencode-bb-skills", "locations"),
+    );
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     assert.deepEqual(config.plugins, [
       "user-plugin",
@@ -212,7 +231,7 @@ test("enabling writes one pinned object entry and disabling removes it", async (
   } finally {
     if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = previous;
-    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(pluginRoot, { recursive: true, force: true });
     rmSync(configHome, { recursive: true, force: true });
   }
 });
