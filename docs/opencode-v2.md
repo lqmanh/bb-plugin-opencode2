@@ -131,7 +131,7 @@ global `plugins` array:
 
 ```jsonc
 {
-  "package": "github:lqmanh/bb-plugin-opencode2#v1.4.0::path:opencode-bb-skills",
+  "package": "github:lqmanh/bb-plugin-opencode2#v1.5.0::path:opencode-bb-skills",
   "options": {
     "locationsDir": "<BB dataDir>/runtime/opencode-bb-skills/locations",
   },
