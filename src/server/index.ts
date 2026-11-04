@@ -80,16 +80,8 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
-  void settings
-    .get()
-    .then((values) => {
-      if (values.nativeSkills === true) void syncNativeSkills(true);
-    })
-    .catch((error) => {
-      bb.log.warn(
-        `Could not read the native OpenCode skills setting: ${errorMessage(error)}`,
-      );
-    });
+  // The provider bridge syncs the initial state on thread start/resume; this
+  // handler only pushes later setting changes.
   settings.onChange((next, previous) => {
     if (next.nativeSkills !== previous.nativeSkills) {
       void syncNativeSkills(next.nativeSkills === true);

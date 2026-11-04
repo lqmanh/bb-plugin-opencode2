@@ -3,6 +3,14 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- Removed the native-skills sync during plugin registration, which logged a
+  host-call warning at startup. Thread start, resume, and fork already sync the
+  initial state, and setting changes still sync immediately.
+
 ## [1.5.1] - 2026-11-04
 
 ### Fixed
