@@ -117,7 +117,7 @@ reason.
 Agent selections in OpenCode update BB's `agent` option. Renames update only
 untitled BB threads. A form answered or cancelled in another client is recorded;
 its BB row closes when the user answers or the turn ends. A permission answered
-elsewhere is recorded so BB does not send a stale reply.
+elsewhere is recorded so this plugin does not send a stale reply.
 
 ## Live refresh
 
@@ -133,26 +133,27 @@ global `plugins` array:
 
 ```jsonc
 {
-  "package": "github:lqmanh/bb-plugin-opencode2#v1.5.1::path:opencode-bb-skills",
+  "package": "github:lqmanh/bb-plugin-opencode2#vX.Y.Z::path:opencode-bb-skills",
   "options": {
     "locationsDir": "<BB dataDir>/plugins/opencode2/runtime/opencode-bb-skills/locations",
   },
 }
 ```
 
-The catalog lives under the plugin data root, not a host- or bridge-specific
-directory, so both workers write the same `locationsDir`. The plugin reads the
-catalog matching the OpenCode location and registers its skills with
-`ctx.skill.transform`. A watcher and a periodic poll call `ctx.skill.reload()`
-when the catalog changes or disappears. Catalogs contain the workspace's
-effective BB skills, so project and shared skills are covered without leaking to
-other workspaces.
+The catalog lives under the plugin data root, so the host and bridge workers
+share one `locationsDir`. The skills plugin reads the catalog for the OpenCode
+location and registers its skills with `ctx.skill.transform`; a watcher and a
+periodic poll call `ctx.skill.reload()` when the catalog changes or disappears.
+Each catalog holds only that workspace's effective BB skills, including project
+and shared ones.
 
-The host rewrites its own entry when BB updates, so the pin follows the BB
-version. `opencode plugin check/update` skip exact revisions. Enabling adds or
-replaces the entry and reloads OpenCode when idle; disabling removes the entry
-and catalogs. The first turn after enable/upgrade may use the fallback while
-OpenCode downloads the pinned package.
+`vX.Y.Z` is `BB_SKILLS_PLUGIN_VERSION`, the provider release that last changed
+the skills plugin ([Releasing](../opencode-bb-skills/README.md#releasing)).
+OpenCode caches the install by package string, so other provider releases
+neither rewrite the config nor trigger a download. Enabling adds or replaces the
+entry, including older providers' pins, and reloads OpenCode when idle;
+disabling removes the entry and catalogs. Until OpenCode finishes downloading
+after enabling or a pin change, skill mentions use the fallback.
 
 Limits:
 
@@ -160,15 +161,14 @@ Limits:
   the skills.
 - The host and OpenCode service must be co-located.
 - A colliding native skill ID is overridden in BB-managed workspaces and logged.
-- OpenCode needs GitHub access on first install. The release tag must exist
+- OpenCode needs GitHub access on first install. The pinned tag must exist
   before users enable the setting.
 - For local development, set `BB_OPENCODE_BB_SKILLS_PACKAGE` to a local path or
-  a full branch-pinned spec such as
-  `github:lqmanh/bb-plugin-opencode2#main::path:opencode-bb-skills`. Production
-  uses the version tag.
+  a branch spec such as
+  `github:lqmanh/bb-plugin-opencode2#main::path:opencode-bb-skills`.
 
-If the plugin is missing, the config is read-only, a catalog is invalid, or a
-skill file is missing, BB uses the existing `SKILL.md` attachment fallback.
+If the skills plugin or a skill file is missing, the config is read-only, or a
+catalog is invalid, this plugin attaches the skill's `SKILL.md` instead.
 
 ## Experimental dependencies
 

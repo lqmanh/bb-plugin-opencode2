@@ -226,7 +226,7 @@ export function promptBody(
       if (!id || start === undefined || end === undefined || end < start)
         continue;
       // BB offers two kinds of skill: its own configured roots, and the
-      // agent's native skills (OpenCode's own discovery, which BB lists
+      // agent's native skills (OpenCode's own discovery, which this plugin lists
       // through resolveNativeRoots). Anything else is plain text.
       const configured = opts?.configuredSkillNames?.has(id) === true;
       const native = opts?.nativeSkills?.has(id) === true;
@@ -244,9 +244,9 @@ export function promptBody(
         opts?.nativeSkills?.get(id),
         opts?.nativeSkillRoots,
       );
-      // A BB-configured skill must only use the native path when the registry
-      // entry came from BB's own catalog. A colliding native skill, or a
-      // missing plugin entry, keeps the file fallback so the BB skill wins.
+      // A BB-configured skill uses the native path only when the registry entry
+      // came from this plugin's catalog. A colliding native skill or a missing
+      // skills plugin entry keeps the file fallback, so the BB skill wins.
       const canUseNative =
         !hasSkillSets || (native && (!configured || nativeIsBb));
       if (!canUseNative) {

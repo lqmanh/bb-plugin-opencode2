@@ -54,8 +54,8 @@ test("bounds multi-megabyte tool input and output before serializing a BB timeli
   const item = delta.item as { args: { content: string }; result: string };
 
   assert.ok(Buffer.byteLength(serialized) <= MAX_TIMELINE_DELTA_BYTES);
-  assert.match(item.args.content, /BB truncated/);
-  assert.match(item.result, /BB truncated/);
+  assert.match(item.args.content, /\[truncated /);
+  assert.match(item.result, /\[truncated /);
   assert.match(item.result, /start-/);
   assert.match(item.result, /-end/);
 });

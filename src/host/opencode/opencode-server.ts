@@ -15,6 +15,7 @@ import { writeJsonFileAtomic } from "../session/persistence.ts";
 import { sessions, sessionsByProviderId } from "../session/session-teardown.ts";
 import {
   OpenCodeEventRouter,
+  tokenCount,
   usageCostAmount,
   usageTotals,
 } from "../timeline/opencode-event-router.ts";
@@ -82,12 +83,6 @@ function isBusyError(error: unknown) {
     isSessionBusyError(error) ||
     /409|busy/i.test(errorMessage(error))
   );
-}
-
-function nonNegativeNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? value
-    : 0;
 }
 
 const BUSY_RETRY_ATTEMPTS = 5;
@@ -475,7 +470,6 @@ export class OpenCodeServer {
     await writeJsonFileAtomic(path, Object.fromEntries(this.mcpRegistry));
   }
 
-  private sessionRegistry = new Map<string, SessionBridgeRegistration>();
   private sessionRegistryOperation: Promise<void> = Promise.resolve();
 
   /**
@@ -497,88 +491,69 @@ export class OpenCodeServer {
     return result;
   }
 
+  /** Missing or corrupt registry entries read as absent. */
   private async readSessionRegistry(
     path: string,
-  ): Promise<Map<string, SessionBridgeRegistration> | undefined> {
+  ): Promise<Map<string, SessionBridgeRegistration>> {
+    const entries = new Map<string, SessionBridgeRegistration>();
+    let parsed: unknown;
     try {
-      const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-        return undefined;
-      const entries = new Map<string, SessionBridgeRegistration>();
-      for (const [key, value] of Object.entries(
-        parsed as Record<string, unknown>,
-      )) {
-        const record = value as Record<string, unknown> | null;
-        const usage = (record?.usage ?? {}) as Record<string, unknown>;
-        if (
-          record &&
-          typeof record.providerThreadId === "string" &&
-          typeof record.cwd === "string"
-        ) {
-          entries.set(key, {
-            providerThreadId: record.providerThreadId,
-            cwd: record.cwd,
-            usage: {
-              input: nonNegativeNumber(usage.input),
-              output: nonNegativeNumber(usage.output),
-              reasoning: nonNegativeNumber(usage.reasoning),
-              cacheRead: nonNegativeNumber(usage.cacheRead),
-              cacheWrite: nonNegativeNumber(usage.cacheWrite),
-            },
-          });
-        }
-      }
-      return entries;
+      parsed = JSON.parse(await readFile(path, "utf8"));
     } catch {
-      // Missing or corrupt registry: treat as empty.
-      return undefined;
+      return entries;
     }
+    for (const [key, value] of Object.entries(inputRecord(parsed))) {
+      const record = inputRecord(value);
+      const usage = inputRecord(record.usage);
+      if (
+        typeof record.providerThreadId !== "string" ||
+        typeof record.cwd !== "string"
+      )
+        continue;
+      entries.set(key, {
+        providerThreadId: record.providerThreadId,
+        cwd: record.cwd,
+        usage: {
+          input: tokenCount(usage.input),
+          output: tokenCount(usage.output),
+          reasoning: tokenCount(usage.reasoning),
+          cacheRead: tokenCount(usage.cacheRead),
+          cacheWrite: tokenCount(usage.cacheWrite),
+        },
+      });
+    }
+    return entries;
   }
 
-  private async loadSessionRegistry() {
-    // Reload before mutating so a write merges sessions registered by another
-    // worker instead of replacing them with a stale snapshot.
-    const path = this.sessionRegistryPath();
-    const entries = path ? await this.readSessionRegistry(path) : undefined;
-    this.sessionRegistry =
-      entries ?? new Map<string, SessionBridgeRegistration>();
-  }
-
-  private async writeSessionRegistry() {
+  /**
+   * Read, change, and write the registry under the lock. Reading first merges
+   * sessions registered by another worker instead of replacing them with a
+   * stale snapshot.
+   */
+  private async updateSessionRegistry(
+    mutate: (entries: Map<string, SessionBridgeRegistration>) => void,
+  ) {
     const path = this.sessionRegistryPath();
     if (!path) return;
-    await writeJsonFileAtomic(path, Object.fromEntries(this.sessionRegistry));
+    await this.withSessionRegistryLock(async () => {
+      const entries = await this.readSessionRegistry(path);
+      mutate(entries);
+      await writeJsonFileAtomic(path, Object.fromEntries(entries));
+    });
   }
 
   async rememberSessionRegistration(
     bbThreadId: string,
     entry: SessionBridgeRegistration,
   ) {
-    await this.withSessionRegistryLock(async () => {
-      await this.loadSessionRegistry();
-      const previous = this.sessionRegistry.get(bbThreadId);
-      this.sessionRegistry.set(bbThreadId, entry);
-      try {
-        await this.writeSessionRegistry();
-      } catch (error) {
-        if (previous) this.sessionRegistry.set(bbThreadId, previous);
-        else this.sessionRegistry.delete(bbThreadId);
-        throw error;
-      }
-    });
+    await this.updateSessionRegistry((entries) =>
+      entries.set(bbThreadId, entry),
+    );
   }
 
   async forgetSessionRegistration(bbThreadId: string) {
-    await this.withSessionRegistryLock(async () => {
-      await this.loadSessionRegistry();
-      const previous = this.sessionRegistry.get(bbThreadId);
-      this.sessionRegistry.delete(bbThreadId);
-      try {
-        await this.writeSessionRegistry();
-      } catch (error) {
-        if (previous) this.sessionRegistry.set(bbThreadId, previous);
-        throw error;
-      }
+    await this.updateSessionRegistry((entries) => {
+      entries.delete(bbThreadId);
     });
   }
 
@@ -589,7 +564,7 @@ export class OpenCodeServer {
     // by another worker is visible on the next lookup.
     const path = this.sessionRegistryPath();
     if (!path) return undefined;
-    return (await this.readSessionRegistry(path))?.get(bbThreadId);
+    return (await this.readSessionRegistry(path)).get(bbThreadId);
   }
 
   async start() {
@@ -1286,7 +1261,7 @@ export class OpenCodeServer {
           await this.finish(
             session,
             "failed",
-            "OpenCode reported this turn failed while BB was disconnected from its event stream",
+            "OpenCode reported this turn failed while the OpenCode v2 plugin was disconnected from its event stream",
           );
         else
           await this.finish(

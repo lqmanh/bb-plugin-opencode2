@@ -49,7 +49,7 @@ function utf8Suffix(value: string, maxBytes: number) {
 }
 
 function truncationMarker(omittedBytes: number) {
-  return `[BB truncated ${omittedBytes.toLocaleString("en-US")} UTF-8 bytes]`;
+  return `[truncated ${omittedBytes.toLocaleString("en-US")} UTF-8 bytes]`;
 }
 
 export function boundedTimelineText(value: string, maxBytes: number) {
@@ -97,7 +97,7 @@ function boundedTimelineValue(
     depth >= MAX_TIMELINE_VALUE_DEPTH ||
     state.nodes >= MAX_TIMELINE_VALUE_NODES
   ) {
-    return "[BB truncated nested provider data]";
+    return "[truncated nested provider data]";
   }
   state.nodes += 1;
 
@@ -109,9 +109,7 @@ function boundedTimelineValue(
       result.push(boundedTimelineValue(entry, state, depth + 1));
     }
     if (value.length > result.length)
-      result.push(
-        `[BB truncated ${value.length - result.length} array entries]`,
-      );
+      result.push(`[truncated ${value.length - result.length} array entries]`);
     return result;
   }
 
@@ -140,7 +138,7 @@ function boundedTimelineValue(
     retainedEntries += 1;
   }
   if (omittedProperties) {
-    result.__bb_truncated__ = "[BB truncated additional object properties]";
+    result.__truncated__ = "[truncated additional object properties]";
   }
   return result;
 }

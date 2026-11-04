@@ -11,11 +11,16 @@ import {
   utimes,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import rootPackage from "../../../package.json" with { type: "json" };
 import { pluginRuntimeDir } from "../plugin-paths.ts";
 import { writeJsonFileAtomic } from "../session/persistence.ts";
 
-export const BB_PLUGIN_VERSION = rootPackage.version;
+/**
+ * Pinned `opencode-bb-skills` version (tag `v<version>`), independent of this
+ * plugin's version. Bump it with `opencode-bb-skills/package.json` only when
+ * this plugin needs a skills plugin change; each bump rewrites users' OpenCode
+ * config and triggers a download.
+ */
+export const BB_SKILLS_PLUGIN_VERSION = "1.5.1";
 export const BB_SKILLS_PLUGIN_PATH = "opencode-bb-skills";
 export const BB_SKILLS_REPOSITORY = "github:lqmanh/bb-plugin-opencode2";
 const LOCATION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -61,17 +66,16 @@ export function pathUnderRoots(
 }
 
 /**
- * The OpenCode plugin is installed from this repository and pinned to the BB
- * plugin version. `BB_OPENCODE_BB_SKILLS_PACKAGE` is a development override
- * for a local checkout; production uses the version tag.
+ * OpenCode caches the install by this exact string.
+ * `BB_OPENCODE_BB_SKILLS_PACKAGE` overrides it for development.
  */
 export function bbSkillsPluginPackage(env = process.env): string {
   const override = env.BB_OPENCODE_BB_SKILLS_PACKAGE?.trim();
   if (override) return override;
-  return `${BB_SKILLS_REPOSITORY}#v${BB_PLUGIN_VERSION}::path:${BB_SKILLS_PLUGIN_PATH}`;
+  return `${BB_SKILLS_REPOSITORY}#v${BB_SKILLS_PLUGIN_VERSION}::path:${BB_SKILLS_PLUGIN_PATH}`;
 }
 
-/** Whether a configured package spec belongs to the BB skills plugin. */
+/** Whether a configured package spec is `opencode-bb-skills`. */
 export function isBbSkillsPluginPackage(packageSpec: string): boolean {
   const spec = packageSpec.trim().replaceAll("\\", "/");
   const local = spec.replace(/\/+$/u, "");

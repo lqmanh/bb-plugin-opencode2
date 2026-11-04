@@ -199,7 +199,7 @@ export type SessionState = {
   terminalError?: string;
   /** Why the session stopped being usable, without comparing `terminalError`. */
   terminalKind?: SessionTerminalKind;
-  /** True while BB itself is removing the OpenCode session. */
+  /** True while this plugin is removing the OpenCode session. */
   closing?: boolean;
   usage: UsageTotals;
   /** Parent session cost in USD. Child cost is kept in the router registry. */

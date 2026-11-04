@@ -26,9 +26,10 @@ model, and work in BB's usual interface.
 - Native OpenCode subagents are enabled by default. Turn on **Disable provider
   subagents** to delegate through BB instead.
 - **Register BB skills natively in OpenCode** is off by default. When enabled,
-  BB installs the pinned `opencode-bb-skills` plugin from GitHub so BB's skills
-  appear in OpenCode's native registry. Other clients opening the same workspace
-  see them too; the host and OpenCode must be co-located.
+  this plugin adds the pinned `opencode-bb-skills` plugin to OpenCode's config
+  (OpenCode installs it from GitHub), so BB's skills appear in OpenCode's native
+  registry. Other clients opening the same workspace see them too; the host and
+  OpenCode must be co-located.
 - The plugin keeps one deny rule in the global OpenCode config so BB thread
   tools do not appear in OpenCode's own sessions.
 - Thread goals and service tiers are not supported.

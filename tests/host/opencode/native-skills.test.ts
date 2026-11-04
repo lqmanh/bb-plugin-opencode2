@@ -1,4 +1,4 @@
-// The native-skills view is a local, BB-owned catalog the OpenCode plugin reads.
+// Native skills use a local catalog this plugin writes and opencode-bb-skills reads.
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
@@ -9,11 +9,13 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
-  BB_PLUGIN_VERSION,
+  BB_SKILLS_PLUGIN_VERSION,
   bbSkillsPluginPackage,
   buildNativeSkillCatalog,
   isBbSkillsPluginPackage,
@@ -80,11 +82,11 @@ test("builds an effective catalog from every root, last description wins", async
   }
 });
 
-test("pins the plugin package to the BB version and path", () => {
+test("pins the skills plugin package to its version and path", () => {
   const packageSpec = bbSkillsPluginPackage({});
   assert.equal(
     packageSpec,
-    `github:lqmanh/bb-plugin-opencode2#v${BB_PLUGIN_VERSION}::path:opencode-bb-skills`,
+    `github:lqmanh/bb-plugin-opencode2#v${BB_SKILLS_PLUGIN_VERSION}::path:opencode-bb-skills`,
   );
   assert.equal(isBbSkillsPluginPackage(packageSpec), true);
   assert.equal(
@@ -186,14 +188,12 @@ test("enabling writes one pinned object entry and disabling removes it", async (
       },
     ]);
 
+    const enabledText = readFileSync(configPath, "utf8");
     assert.equal(
       (await server.setNativeSkillsEnabled(true)).packageSpec,
       enabled.packageSpec,
     );
-    assert.equal(
-      JSON.parse(readFileSync(configPath, "utf8")).plugins.length,
-      2,
-    );
+    assert.equal(readFileSync(configPath, "utf8"), enabledText);
 
     writeFileSync(
       configPath,
@@ -236,16 +236,39 @@ test("enabling writes one pinned object entry and disabling removes it", async (
   }
 });
 
-test("versioned package files move together", () => {
-  const rootPackage = JSON.parse(
-    readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
-  ) as { version?: unknown };
+test("the skills pin matches the skills package version", () => {
   const pluginPackage = JSON.parse(
     readFileSync(
       new URL("../../../opencode-bb-skills/package.json", import.meta.url),
       "utf8",
     ),
   ) as { version?: unknown };
-  assert.equal(rootPackage.version, BB_PLUGIN_VERSION);
-  assert.equal(pluginPackage.version, BB_PLUGIN_VERSION);
+  assert.equal(pluginPackage.version, BB_SKILLS_PLUGIN_VERSION);
+});
+
+// Catches skills plugin edits without a pin bump; skips without the tag.
+test("the skills plugin source is unchanged since its pinned tag", (t) => {
+  const tag = `v${BB_SKILLS_PLUGIN_VERSION}`;
+  const repo = fileURLToPath(new URL("../../../", import.meta.url));
+  const tagged = spawnSync(
+    "git",
+    ["rev-parse", "-q", "--verify", `refs/tags/${tag}^{commit}`],
+    { cwd: repo, encoding: "utf8" },
+  );
+  if (tagged.error || tagged.status !== 0) {
+    t.skip(`${tag} is not tagged in this checkout`);
+    return;
+  }
+  const diff = spawnSync(
+    "git",
+    ["diff", "--quiet", tag, "--", "opencode-bb-skills/src"],
+    { cwd: repo, encoding: "utf8" },
+  );
+  assert.equal(
+    diff.status,
+    0,
+    diff.status === 1
+      ? `opencode-bb-skills/src changed since ${tag}; bump the pin`
+      : `git diff failed: ${diff.stderr || diff.error}`,
+  );
 });

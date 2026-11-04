@@ -189,8 +189,8 @@ export function addBbToolsRule(text: string): string | undefined {
 }
 
 /**
- * Add or replace the entries matching `matches` with one object entry. String
- * entries from older BB builds and hand-written object entries are replaced.
+ * Replace every entry matching `matches`, including string entries from older
+ * versions of this plugin and hand-written objects, with one object entry.
  */
 export function upsertPluginEntry(
   text: string,

@@ -105,7 +105,7 @@ function sessionToolRow(session: SessionState, name: string, input: unknown) {
   );
 }
 
-function tokenCount(value: unknown) {
+export function tokenCount(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : 0;

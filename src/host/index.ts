@@ -88,7 +88,7 @@ export {
   upsertPluginEntry,
 } from "./opencode/opencode-config.ts";
 export {
-  BB_PLUGIN_VERSION,
+  BB_SKILLS_PLUGIN_VERSION,
   bbSkillsPluginPackage,
   buildNativeSkillCatalog,
   isBbSkillsPluginPackage,

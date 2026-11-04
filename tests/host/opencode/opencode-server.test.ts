@@ -278,7 +278,7 @@ test("forwards archive state and consumes its own archive event", async () => {
     await server.setSessionArchived(session.providerThreadId, true);
     assert.deepEqual(updates, [{ sessionID: "ses_archive", archived: true }]);
 
-    // The event caused by BB's own update must not look like an external
+    // The event caused by this plugin's own update must not look like an external
     // archive to the lifecycle handler.
     await server.handleEvent({
       type: "session.archived",
@@ -300,15 +300,7 @@ test("forwards archive state and consumes its own archive event", async () => {
 test("backgrounds the OpenCode session for a live or persisted thread", async () => {
   const calls: string[] = [];
   const server = new OpenCodeServer();
-  Object.assign(server, {
-    api: createFakeOpenCodeApi({
-      session: {
-        background: async ({ sessionID }: { sessionID: string }) => {
-          calls.push(sessionID);
-        },
-      },
-    }),
-  });
+  stubBackground(server, calls);
   sessions.clear();
   sessions.set(
     "thr_live",
@@ -397,28 +389,6 @@ test("backgrounds a thread from the persisted session registry", async (t) => {
     ok: true,
   });
   assert.deepEqual(calls, ["ses_persisted"]);
-});
-
-test("resolves a session registered by the provider bridge", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "opencode2-shared-sessions-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const bridgeData = join(root, "bridge-data");
-  const hostData = join(root, "host-data");
-
-  const bridge = new OpenCodeServer();
-  bridge.setDataDir(bridgeData);
-  await bridge.rememberSessionRegistration(
-    "thr_shared",
-    registration("ses_shared"),
-  );
-
-  const calls: string[] = [];
-  const host = new OpenCodeServer();
-  host.setDataDir(hostData);
-  stubBackground(host, calls);
-
-  assert.deepEqual(await host.backgroundSession("thr_shared"), { ok: true });
-  assert.deepEqual(calls, ["ses_shared"]);
 });
 
 test("reloads a session registered after the first host lookup", async (t) => {

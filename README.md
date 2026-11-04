@@ -7,8 +7,8 @@ its own tool execution; BB provides the thread, timeline, and UI.
 ## Requirements
 
 - BB 0.48.1 or newer
-- OpenCode v2 2.2.5 or newer (`opencode2` on the host's `PATH`); BB can install
-  or update it from the provider settings
+- OpenCode v2 2.2.5 or newer (`opencode2` on the host's `PATH`); BB's provider
+  settings can install or update it
 - A model provider connected in OpenCode (`opencode2 auth login`)
 
 ## Install
@@ -47,14 +47,15 @@ Open Settings → OpenCode v2 in BB.
   source.
 - **Disable provider subagents** makes agents delegate through BB. Off by
   default.
-- **Register BB skills natively in OpenCode** installs the pinned
-  [`opencode-bb-skills`](opencode-bb-skills/) plugin and writes a per-workspace
-  catalog. Off by default. Other OpenCode clients opening the same workspace see
-  the skills; the host and OpenCode must be co-located.
+- **Register BB skills natively in OpenCode** adds a `plugins` entry owned by
+  this plugin for the pinned [`opencode-bb-skills`](opencode-bb-skills/) plugin,
+  which OpenCode installs from GitHub, and writes a per-workspace catalog. Off
+  by default. Other OpenCode clients opening the same workspace see the skills;
+  the host and OpenCode must be co-located.
 
 The plugin keeps a `bb_opencode2_*` deny rule in the global OpenCode config so
-BB tools stay out of OpenCode's own sessions. The native skills setting also
-adds one BB-owned `plugins` entry. OpenCode applies config changes when idle.
+BB tools stay out of OpenCode's own sessions. OpenCode applies config changes
+when idle.
 
 See [`skills/opencode2-provider/SKILL.md`](skills/opencode2-provider/SKILL.md)
 for settings keys and troubleshooting.

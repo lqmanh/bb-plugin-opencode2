@@ -5,6 +5,14 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `opencode-bb-skills` has its own pinned version, so updates of this plugin
+  that leave it unchanged no longer rewrite the OpenCode config or trigger a new
+  download.
+- Timeline truncation markers no longer carry a `BB` prefix: `[truncated …]`,
+  and `__truncated__` for omitted object properties.
+
 ### Fixed
 
 - Backgrounding a thread's active tools now resolves the session from a registry
@@ -24,10 +32,10 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Added
 
-- Opt-in native skill registration. BB installs the pinned `opencode-bb-skills`
-  OpenCode plugin and writes a per-workspace catalog, so BB's skills appear in
-  OpenCode's native registry. Off by default; other clients opening the same
-  workspace see them.
+- Opt-in native skill registration. The plugin adds the pinned
+  `opencode-bb-skills` OpenCode plugin to OpenCode's config and writes a
+  per-workspace catalog, so BB's skills appear in OpenCode's native registry.
+  Off by default; other clients opening the same workspace see them.
 - Background shells and subagents now map to BB `backgroundTask` rows, including
   foreground tools OpenCode moves to the background.
 - A thread menu action backgrounds all active foreground backgroundable tools in

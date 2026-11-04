@@ -110,7 +110,7 @@ const ENTRY = {
   },
 };
 
-test("adds a BB skills object without disturbing existing plugin entries", () => {
+test("adds an opencode-bb-skills object without disturbing existing plugin entries", () => {
   const original = `{
   "plugins": ["user-plugin", { "package": "acme", "options": { "strict": true } }],
   "theme": "dark"
@@ -141,12 +141,13 @@ test("adds a plugins key when the config has none", () => {
   assert.deepEqual(JSON.parse(added).plugins, [ENTRY]);
 });
 
-test("replaces old string, object, and duplicate BB skills entries", () => {
+test("replaces old string, object, and duplicate opencode-bb-skills entries", () => {
   const original = `{
   "plugins": [
-    "user-plugin",
     "${OLD_PACKAGE}",
+    "user-plugin",
     { "package": "${OLD_PACKAGE}", "options": { "locationsDir": "/old" } },
+    { "package": "${PACKAGE}", "options": { "locationsDir": "/old" } },
   ],
 }
 `;
@@ -154,15 +155,19 @@ test("replaces old string, object, and duplicate BB skills entries", () => {
   assert.ok(added);
   const parsed = parse(added) as { plugins: unknown[] };
   assert.deepEqual(parsed.plugins, ["user-plugin", ENTRY]);
+  assert.equal(
+    upsertPluginEntry(added, isBbSkillsPluginPackage, ENTRY),
+    undefined,
+  );
 });
 
 test("parses and replaces a commented object entry", () => {
   const original = `{
   // keep this comment
   "plugins": [
-    /* old BB entry */
+    /* old opencode-bb-skills entry */
     {
-      "package": "${OLD_PACKAGE}", // pinned by an older BB
+      "package": "${OLD_PACKAGE}", // pinned by an older version of this plugin
       "options": { "locationsDir": "/old/locations" },
     },
     "user-plugin",
@@ -178,7 +183,7 @@ test("parses and replaces a commented object entry", () => {
   assert.deepEqual(parsed.plugins, [ENTRY, "user-plugin"]);
 });
 
-test("removes only the BB skills entry and leaves other plugins", () => {
+test("removes only the opencode-bb-skills entry and leaves other plugins", () => {
   const original = `{
   "plugins": [
     "${OLD_PACKAGE}",

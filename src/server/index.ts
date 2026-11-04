@@ -3,9 +3,10 @@
 // The host bridge talks to OpenCode's local v2 HTTP API. This file only owns
 // provider metadata and keeps process/API details out of the BB server runtime.
 import {
-  type BbPluginApi,
   experimental_PluginRpcRefusal,
+  type BbPluginApi,
 } from "@get-bb/plugin-sdk";
+import { errorMessage } from "../shared/errors.ts";
 import {
   OPENCODE_PROVIDER_ID,
   opencodeHostContract,
@@ -21,7 +22,6 @@ import {
   usageResourceFromSnapshot,
   usageResources,
 } from "./provider-usage.ts";
-import { errorMessage } from "../shared/errors.ts";
 
 export default function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
@@ -36,8 +36,8 @@ export default function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Register BB skills natively in OpenCode",
       description:
-        "Install a small OpenCode plugin and add BB's skills to OpenCode's native skill registry for BB workspaces. " +
-        "Other OpenCode clients that open the same workspace will see those skills. " +
+        "Add an OpenCode plugin to OpenCode's config so BB's skills appear in OpenCode's native skill registry for BB workspaces. " +
+        "Other OpenCode clients opening the same workspace see them too. " +
         "OpenCode downloads the pinned plugin from GitHub on first use. Off by default.",
       default: false,
     },

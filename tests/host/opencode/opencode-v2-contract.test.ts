@@ -742,7 +742,7 @@ test("detects only skill mentions when deciding to read the native registry", ()
   assert.equal(hasSkillMention([{ type: "text", text: "hello" }]), false);
 });
 
-test("uses the native skill only when its path belongs to BB's catalog", () => {
+test("uses the native skill only when its path belongs to this plugin's catalog", () => {
   const mention = {
     type: "text",
     text: "/review this",
@@ -820,7 +820,7 @@ test("keeps native-only skill mentions native", () => {
   ]);
 });
 
-test("can ignore BB catalog roots in the composer's native roots", async () => {
+test("can ignore this plugin's catalog roots in the composer's native roots", async () => {
   const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");

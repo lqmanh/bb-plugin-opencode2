@@ -57,11 +57,11 @@ docs/           Developer documentation
 
 ## Design decisions
 
-- **Native skills use a standalone OpenCode plugin.** The plugin is pinned to
-  the BB version, reads a per-workspace catalog under the plugin data root
-  shared by the host and provider bridge, and registers skills with
-  `ctx.skill.transform`. Other clients opening the same workspace see them;
-  other workspaces do not.
+- **Native skills use a standalone OpenCode plugin.** `opencode-bb-skills` is
+  pinned to its own version (`BB_SKILLS_PLUGIN_VERSION`), not this plugin's. It
+  reads a per-workspace catalog under this plugin's data root, shared by the
+  host and provider bridge, and registers skills with `ctx.skill.transform`.
+  Other clients opening the same workspace see them; other workspaces do not.
 - **Native subagents are enabled by default.** `subagentsDisabled` adds a
   session deny rule.
 - **Background work uses `backgroundTask` rows.** Explicit background shells and

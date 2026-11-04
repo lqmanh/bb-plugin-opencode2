@@ -11,11 +11,11 @@ Settings:
 
 - `subagentsDisabled` (default `false`): when `true`, OpenCode's native
   `subagent` tool is denied and hidden.
-- `nativeSkills` (default `false`): installs the pinned `opencode-bb-skills`
-  plugin and adds the workspace's BB skills to OpenCode's native registry. It
-  writes one BB-owned object entry; disabling removes it and the catalogs.
-  OpenCode needs GitHub access for the first install. Other clients opening the
-  same workspace see the skills. The host and OpenCode must be co-located.
+- `nativeSkills` (default `false`): adds the pinned `opencode-bb-skills` plugin
+  to OpenCode's config so the workspace's BB skills appear in OpenCode's native
+  registry; disabling removes the entry and the catalogs. OpenCode installs the
+  plugin from GitHub on first use. Other clients opening the same workspace see
+  the skills. The host and OpenCode must be co-located.
 
 Read with `bb plugin config opencode2`; change with
 `bb plugin config opencode2 set <key> <value>`.
@@ -24,7 +24,7 @@ Use BB's provider controls to enable or disable the provider.
 
 The plugin keeps one `bb_opencode2_*` deny rule in the global OpenCode config so
 BB tools stay out of OpenCode's own sessions. `nativeSkills` also writes one
-BB-owned `plugins` entry. OpenCode applies both when idle.
+`plugins` entry owned by this plugin. OpenCode applies both when idle.
 
 Primary agents, including `plan`, are the `agent` session option on each model.
 Set it with `bb thread spawn --option agent=<name>` or
