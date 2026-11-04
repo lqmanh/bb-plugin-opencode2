@@ -3,7 +3,7 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [1.6.0] - 2026-11-05
 
 ### Changed
 
@@ -171,6 +171,7 @@ First release: BB threads that run on an installed OpenCode v2 server.
 - Compatibility with OpenCode v2.0.27 API changes.
 - BB tools not reaching OpenCode under the desktop app, and cold model lists.
 
+[1.6.0]: https://github.com/lqmanh/bb-plugin-opencode2/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/lqmanh/bb-plugin-opencode2/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/lqmanh/bb-plugin-opencode2/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/lqmanh/bb-plugin-opencode2/compare/v1.3.0...v1.4.0

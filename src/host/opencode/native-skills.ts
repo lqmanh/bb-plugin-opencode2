@@ -20,7 +20,7 @@ import { writeJsonFileAtomic } from "../session/persistence.ts";
  * this plugin needs a skills plugin change; each bump rewrites users' OpenCode
  * config and triggers a download.
  */
-export const BB_SKILLS_PLUGIN_VERSION = "1.5.1";
+export const BB_SKILLS_PLUGIN_VERSION = "1.6.0";
 export const BB_SKILLS_PLUGIN_PATH = "opencode-bb-skills";
 export const BB_SKILLS_REPOSITORY = "github:lqmanh/bb-plugin-opencode2";
 const LOCATION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
