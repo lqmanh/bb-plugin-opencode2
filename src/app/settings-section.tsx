@@ -1,4 +1,13 @@
+import { Button } from "@/app/components/button";
+import { cn } from "@/app/lib/utils";
 import { useRpc } from "@get-bb/plugin-sdk/app";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   opencodeSettingsRpcContract,
   type HostStatus,
@@ -6,14 +15,10 @@ import {
   type UsageSourceStatus,
 } from "../shared/settings-contract.ts";
 import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
-import { Button } from "@/app/components/button";
-import { cn } from "@/app/lib/utils";
+  openCodeStatusDisplay,
+  usageStatusDisplay,
+  type StatusTone,
+} from "./settings-status.ts";
 
 function errorText(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
@@ -36,27 +41,6 @@ function statusText(status: OpenCodeStatus) {
     return `${version} · ${status.latestVersion} available`;
   return version;
 }
-
-type StatusTone = "ok" | "warn" | "error" | "neutral";
-
-type StatusDisplay = { label: string; tone: StatusTone };
-
-const OPENCODE_STATUS_DISPLAY: Record<OpenCodeStatus["status"], StatusDisplay> =
-  {
-    ready: { label: "Ready", tone: "ok" },
-    not_installed: { label: "Not installed", tone: "warn" },
-    unsupported_version: { label: "Update required", tone: "warn" },
-    unauthenticated: { label: "No model provider connected", tone: "warn" },
-    unknown: { label: "Service unreachable", tone: "error" },
-  };
-
-const USAGE_SOURCE_DISPLAY: Record<UsageSourceStatus["status"], StatusDisplay> =
-  {
-    active: { label: "Active", tone: "ok" },
-    no_accounts: { label: "No accounts", tone: "warn" },
-    unavailable: { label: "Unavailable", tone: "error" },
-    not_installed: { label: "Not installed", tone: "neutral" },
-  };
 
 const TONE_DOT_CLASSES: Record<StatusTone, string> = {
   ok: "bg-emerald-500",
@@ -96,6 +80,22 @@ function StatusRow({
   );
 }
 
+function usageSourceText(usage: UsageSourceStatus) {
+  switch (usage.sourceType) {
+    case "package":
+    case undefined:
+      return usage.source
+        ? `${usage.source}${usage.version ? ` ${usage.version}` : ""}`
+        : "Unknown";
+    case "local":
+      return usage.source ? `${usage.source} · local` : "Unknown";
+    case "builtin":
+      return "Built-in";
+    case "sdk":
+      return "SDK";
+  }
+}
+
 function usageSourceLabel(usage: UsageSourceStatus) {
   if (usage.status === "not_installed") {
     return (
@@ -109,17 +109,13 @@ function usageSourceLabel(usage: UsageSourceStatus) {
       </a>
     );
   }
-  const source =
-    usage.sourceType && usage.sourceType !== "package"
-      ? `opencode-usage · ${usage.sourceType}`
-      : `${usage.source ?? "opencode-usage"}${usage.version ? ` ${usage.version}` : ""}`;
   const count =
     usage.providerCount > 0
       ? ` · ${usage.providerCount} ${usage.providerCount === 1 ? "provider" : "providers"}`
       : "";
   return (
-    <span title={usage.sourceType === "local" ? usage.source : undefined}>
-      {source}
+    <span>
+      {usageSourceText(usage)}
       {count}
     </span>
   );
@@ -127,17 +123,15 @@ function usageSourceLabel(usage: UsageSourceStatus) {
 
 function HostStatusRow({ host }: { host: HostStatus }) {
   const status = host.status;
-  const statusDisplay = status
-    ? OPENCODE_STATUS_DISPLAY[status.status]
-    : { label: "Status unavailable", tone: "error" as const };
-  const usageDisplay = USAGE_SOURCE_DISPLAY[host.usage.status];
+  const openCodeDisplay = openCodeStatusDisplay(status?.status);
+  const usageDisplay = usageStatusDisplay(host.usage.status);
   return (
     <div className="flex flex-col gap-1.5">
       <div className="text-sm font-medium">{host.hostName}</div>
       <StatusRow
         detail={status ? statusText(status) : host.error}
-        tone={statusDisplay.tone}
-        label={statusDisplay.label}
+        tone={openCodeDisplay.tone}
+        label={openCodeDisplay.label}
       />
       <StatusRow
         detail={<>Usage source: {usageSourceLabel(host.usage)}</>}

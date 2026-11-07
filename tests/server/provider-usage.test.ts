@@ -49,13 +49,23 @@ const providers = [
 const usagePlugin = {
   id: "opencode-usage",
   source: { type: "package", target: "opencode-usage", version: "1.2.3" },
+  features: { rpc: true },
+  state: { status: "active" },
 };
 
-function fakeApi(options: {
+const rpcNotRegistered = {
+  type: "rpc.unavailable",
+  message: "RPC is unavailable: opencode-usage",
+};
+
+type FakeApiOptions = {
   plugins?: unknown[];
+  pluginError?: unknown;
   output?: unknown;
-  rpcError?: boolean;
-}): {
+  rpcError?: unknown;
+};
+
+function fakeApi(options: FakeApiOptions): {
   api: () => Promise<OpenCodeClient>;
   pluginCalls: unknown[];
   rpcCalls: RpcCall[];
@@ -66,18 +76,23 @@ function fakeApi(options: {
     plugin: {
       list: async (input: unknown) => {
         pluginCalls.push(input);
+        if (options.pluginError !== undefined) throw options.pluginError;
         return { data: options.plugins ?? [] };
       },
     },
     rpc: {
       call: async (input: RpcCall) => {
         rpcCalls.push(input);
-        if (options.rpcError) throw new Error("rpc unavailable");
+        if (options.rpcError !== undefined) throw options.rpcError;
         return { output: options.output };
       },
     },
   });
   return { api: async () => client, pluginCalls, rpcCalls };
+}
+
+function sourceStatus(options: FakeApiOptions) {
+  return usageSourceStatus(fakeApi(options).api, "/repo");
 }
 
 function snapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
@@ -119,7 +134,7 @@ test("lists providers without fetching quota and reports unusable plugins", asyn
     },
   ]);
 
-  const failed = fakeApi({ rpcError: true });
+  const failed = fakeApi({ rpcError: new Error("rpc unavailable") });
   assert.equal((await listProviderUsage(failed.api, "/repo")).available, false);
 
   const invalid = fakeApi({
@@ -142,44 +157,109 @@ test("reports the opencode-usage source status", async () => {
   });
   assert.deepEqual(active.pluginCalls, [{ location: { directory: "/repo" } }]);
 
-  const empty = fakeApi({ plugins: [usagePlugin], output: { providers: [] } });
-  assert.deepEqual(await usageSourceStatus(empty.api, "/repo"), {
-    status: "no_accounts",
-    sourceType: "package",
-    source: "opencode-usage",
-    version: "1.2.3",
-    providerCount: 0,
-  });
+  assert.deepEqual(
+    await sourceStatus({ plugins: [usagePlugin], output: { providers: [] } }),
+    {
+      status: "no_accounts",
+      sourceType: "package",
+      source: "opencode-usage",
+      version: "1.2.3",
+      providerCount: 0,
+    },
+  );
 
-  const local = fakeApi({
-    plugins: [
-      {
-        ...usagePlugin,
-        source: { type: "local", path: "/tmp/opencode-usage" },
-      },
-    ],
-    output: { providers },
-  });
-  assert.deepEqual(await usageSourceStatus(local.api, "/repo"), {
-    status: "active",
-    sourceType: "local",
-    source: "/tmp/opencode-usage",
-    providerCount: 2,
-  });
+  assert.deepEqual(
+    await sourceStatus({
+      plugins: [
+        {
+          ...usagePlugin,
+          source: { type: "local", path: "/tmp/opencode-usage" },
+        },
+      ],
+      output: { providers },
+    }),
+    {
+      status: "active",
+      sourceType: "local",
+      source: "/tmp/opencode-usage",
+      providerCount: 2,
+    },
+  );
 
-  const missing = fakeApi({ rpcError: true });
-  assert.deepEqual(await usageSourceStatus(missing.api, "/repo"), {
+  assert.deepEqual(await sourceStatus({ rpcError: rpcNotRegistered }), {
     status: "not_installed",
     providerCount: 0,
   });
 
-  const unavailable = fakeApi({ plugins: [usagePlugin], rpcError: true });
-  const failed = await usageSourceStatus(unavailable.api, "/repo");
+  const failed = await sourceStatus({
+    plugins: [usagePlugin],
+    rpcError: { type: "internal", message: "quota backend down" },
+  });
+  assert.partialDeepStrictEqual(failed, {
+    status: "unavailable",
+    sourceType: "package",
+    version: "1.2.3",
+    providerCount: 0,
+  });
+  assert.match(failed.error ?? "", /quota backend down/);
+});
+
+test("reports a custom usage implementation without plugin metadata", async () => {
+  assert.deepEqual(await sourceStatus({ output: { providers } }), {
+    status: "active",
+    providerCount: 2,
+  });
+
+  const failed = await sourceStatus({
+    rpcError: { type: "internal", message: "custom usage failed" },
+  });
   assert.equal(failed.status, "unavailable");
-  assert.equal(failed.sourceType, "package");
-  assert.equal(failed.version, "1.2.3");
-  assert.equal(failed.providerCount, 0);
-  assert.match(failed.error ?? "", /rpc unavailable/);
+});
+
+test("treats a listed opencode-usage plugin as installed when its RPC fails", async () => {
+  assert.partialDeepStrictEqual(
+    await sourceStatus({ plugins: [usagePlugin], rpcError: rpcNotRegistered }),
+    {
+      status: "unavailable",
+      sourceType: "package",
+      version: "1.2.3",
+    },
+  );
+});
+
+test("reports a failing custom usage implementation as unavailable", async () => {
+  const plugins = [
+    {
+      id: "custom-usage",
+      source: { type: "local", path: "/tmp/custom-usage" },
+      features: { server: true },
+      state: { status: "active" },
+    },
+  ];
+
+  const invalid = await sourceStatus({ plugins, output: { invalid: true } });
+  assert.equal(invalid.status, "unavailable");
+  assert.match(invalid.error ?? "", /invalid response/);
+
+  const untyped = await sourceStatus({
+    plugins,
+    rpcError: new Error("fetch failed"),
+  });
+  assert.equal(untyped.status, "unavailable");
+  assert.match(untyped.error ?? "", /fetch failed/);
+});
+
+test("requires a successful plugin list to report the contract as missing", async () => {
+  assert.deepEqual(
+    await sourceStatus({ plugins: [], rpcError: rpcNotRegistered }),
+    { status: "not_installed", providerCount: 0 },
+  );
+
+  const unconfirmed = await sourceStatus({
+    pluginError: new Error("plugin list failed"),
+    rpcError: rpcNotRegistered,
+  });
+  assert.equal(unconfirmed.status, "unavailable");
 });
 
 test("gets one snapshot, propagates bypassCache, and rejects unusable responses", async () => {

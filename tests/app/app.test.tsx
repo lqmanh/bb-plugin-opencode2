@@ -1,10 +1,51 @@
 // @vitest-environment jsdom
-import { fireEvent, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import { opencodeSettingsRpcContract } from "../../src/shared/settings-contract.ts";
+import { fireEvent, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  opencodeSettingsRpcContract,
+  type HostStatus,
+  type OpenCodeStatus,
+  type UsageSourceStatus,
+} from "../../src/shared/settings-contract.ts";
 
 const mountedSlots: Array<{ lifecycle: { unmount(): void } }> = [];
+
+const baseStatus = {
+  statusMessage: null,
+  installedVersion: "2.2.5",
+  latestVersion: "2.2.5",
+  minimumSupportedVersion: "2.2.5",
+  loginCommand: "opencode2 auth login",
+};
+
+function makeHost(
+  hostName: string,
+  status: Partial<OpenCodeStatus> = {},
+  usage: Partial<UsageSourceStatus> = {},
+): HostStatus {
+  return {
+    hostId: hostName,
+    hostName,
+    status: { ...baseStatus, status: "ready", ...status },
+    usage: { status: "active", providerCount: 0, ...usage },
+  };
+}
+
+async function mountSettings(
+  getStatus: () => Promise<{ hosts: HostStatus[] }>,
+) {
+  const app = await loadPluginApp(() => import("../../src/app/index.tsx"));
+  const registration = app.settingsSections[0];
+  expect(registration?.id).toBe("settings");
+  const slot = renderSlot<{}, typeof opencodeSettingsRpcContract>(
+    registration!,
+    {},
+    { rpc: { getStatus } },
+  );
+  mountedSlots.push(slot);
+  return slot;
+}
 
 afterEach(() => {
   for (const slot of mountedSlots.splice(0)) slot.lifecycle.unmount();
@@ -12,45 +53,29 @@ afterEach(() => {
 
 describe("OpenCode settings", () => {
   it("shows host status and usage source without a model list", async () => {
-    const app = await loadPluginApp(() => import("../../src/app/index.tsx"));
-    const registration = app.settingsSections[0];
-    expect(registration?.id).toBe("settings");
-
     const getStatus = vi.fn(async () => ({
       hosts: [
-        {
-          hostId: "host_1",
-          hostName: "laptop",
-          status: {
-            status: "ready" as const,
-            statusMessage: null,
-            installedVersion: "2.2.5",
-            latestVersion: "2.2.6",
-            minimumSupportedVersion: "2.2.5",
-            loginCommand: "opencode2 auth login",
-          },
-          usage: {
-            status: "active" as const,
-            sourceType: "local" as const,
+        makeHost(
+          "laptop",
+          { latestVersion: "2.2.6" },
+          {
+            sourceType: "local",
             source: "/tmp/opencode-usage",
             providerCount: 2,
           },
-        },
+        ),
       ],
     }));
-    const slot = renderSlot<{}, typeof opencodeSettingsRpcContract>(
-      registration!,
-      {},
-      { rpc: { getStatus } },
-    );
-    mountedSlots.push(slot);
+    const slot = await mountSettings(getStatus);
 
     expect(
       await slot.findByText(/OpenCode 2\.2\.5 · 2\.2\.6 available/),
     ).toBeTruthy();
-    expect(slot.getByText("Ready")).toBeTruthy();
-    expect(slot.getByText(/opencode-usage · local · 2 providers/)).toBeTruthy();
-    expect(slot.getByText("Active")).toBeTruthy();
+    expect(slot.getAllByText("Ready")).toHaveLength(2);
+    expect(
+      slot.getByText(/\/tmp\/opencode-usage · local · 2 providers/),
+    ).toBeTruthy();
+    expect(slot.queryByText("Active")).toBeNull();
     expect(slot.queryByText("Models")).toBeNull();
     expect(slot.queryByRole("switch")).toBeNull();
 
@@ -58,6 +83,59 @@ describe("OpenCode settings", () => {
     await waitFor(() => {
       expect(getStatus).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("uses one status vocabulary and labels unknown usage sources", async () => {
+    const getStatus = vi.fn(async () => ({
+      hosts: [
+        makeHost("ready-host", {}, { providerCount: 2 }),
+        makeHost(
+          "update-host",
+          { status: "unsupported_version", installedVersion: "2.1.0" },
+          { status: "no_accounts" },
+        ),
+        makeHost(
+          "install-host",
+          {
+            status: "not_installed",
+            installedVersion: null,
+            latestVersion: null,
+          },
+          { status: "not_installed" },
+        ),
+        makeHost(
+          "down-host",
+          { status: "unknown" },
+          { status: "unavailable", error: "usage backend down" },
+        ),
+      ],
+    }));
+    const slot = await mountSettings(getStatus);
+
+    const hostRow = async (name: string) =>
+      within((await slot.findByText(name)).parentElement as HTMLElement);
+
+    const ready = await hostRow("ready-host");
+    expect(ready.getAllByText("Ready")).toHaveLength(2);
+    expect(ready.getByText(/Unknown · 2 providers/)).toBeTruthy();
+    expect(ready.queryByRole("link")).toBeNull();
+
+    const update = await hostRow("update-host");
+    expect(update.getByText("Update needed")).toBeTruthy();
+    expect(update.getByText("Setup needed")).toBeTruthy();
+
+    const install = await hostRow("install-host");
+    expect(install.getByText("Setup needed")).toBeTruthy();
+    expect(install.getByText("Not installed")).toBeTruthy();
+    expect(
+      install
+        .getByRole("link", { name: "opencode-usage" })
+        .getAttribute("href"),
+    ).toBe("https://github.com/lqmanh/opencode-usage");
+
+    const down = await hostRow("down-host");
+    expect(down.getAllByText("Unavailable")).toHaveLength(2);
+    expect(down.getByText("usage backend down")).toBeTruthy();
   });
 
   it("registers a menu action that backgrounds active OpenCode tools", async () => {

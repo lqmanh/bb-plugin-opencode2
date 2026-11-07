@@ -43,8 +43,7 @@ replacing OpenCode instructions, and cancelling provider interactions from BB.
 
 Open Settings → OpenCode v2 in BB.
 
-- **Status** shows each host's OpenCode version, updates, and `opencode-usage`
-  source.
+- **Status** shows each host's OpenCode version, usage source, and updates.
 - **Disable provider subagents** makes agents delegate through BB. Off by
   default.
 - **Register BB skills natively in OpenCode** adds a `plugins` entry owned by

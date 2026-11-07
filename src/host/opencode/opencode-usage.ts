@@ -14,6 +14,8 @@ import { errorMessage } from "../../shared/errors.ts";
 import type { OpenCodeApi } from "../types.ts";
 
 const USAGE_RPC_ID = "opencode-usage";
+// OpenCode answers an unregistered RPC ID with RpcError type "rpc.unavailable".
+const RPC_NOT_REGISTERED = "rpc.unavailable";
 
 const usageRpcListSchema = z
   .object({
@@ -59,6 +61,15 @@ function pluginMetadata(plugin: PluginInfo): UsagePluginMetadata {
   }
 }
 
+function isUsagePlugin(plugin: PluginInfo): boolean {
+  if (plugin.id === USAGE_RPC_ID) return true;
+  if (plugin.source.type !== "package") return false;
+  return (
+    plugin.source.target === USAGE_RPC_ID ||
+    plugin.source.target.startsWith(`${USAGE_RPC_ID}@`)
+  );
+}
+
 async function lookupUsagePlugin(
   api: OpenCodeApi,
   cwd: string,
@@ -66,7 +77,7 @@ async function lookupUsagePlugin(
   try {
     const client = await api();
     const listed = await client.plugin.list({ location: { directory: cwd } });
-    const selected = listed.data.find((plugin) => plugin.id === USAGE_RPC_ID);
+    const selected = listed.data.find(isUsagePlugin);
     return selected
       ? { status: "found", metadata: pluginMetadata(selected) }
       : { status: "missing" };
@@ -91,26 +102,56 @@ async function callUsageRpc(
   return result.output;
 }
 
-type UsageFetch =
-  { ok: true; providers: UsageSnapshot[] } | { ok: false; error: string };
+type UsageFetch<T> =
+  | { ok: true; providers: T[] }
+  | { ok: false; error: string; errorType?: string };
 
-async function fetchUsageSnapshots(
+function rpcErrorType(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const type = (error as { type?: unknown }).type;
+  return typeof type === "string" ? type : undefined;
+}
+
+async function fetchUsage<T>(
   api: OpenCodeApi,
   cwd: string,
+  method: "list" | "get",
+  schema: z.ZodType<{ providers: T[] }>,
   input: Record<string, string | boolean> = {},
-): Promise<UsageFetch> {
+): Promise<UsageFetch<T>> {
   try {
-    const output = await callUsageRpc(api, cwd, "get", input);
-    const parsed = usageRpcGetSchema.safeParse(output);
+    const output = await callUsageRpc(api, cwd, method, input);
+    const parsed = schema.safeParse(output);
     return parsed.success
       ? { ok: true, providers: parsed.data.providers }
-      : { ok: false, error: "opencode-usage.get returned an invalid response" };
+      : {
+          ok: false,
+          error: `opencode-usage.${method} returned an invalid response`,
+        };
   } catch (error) {
     return {
       ok: false,
-      error: `opencode-usage.get failed: ${errorMessage(error)}`,
+      error: `opencode-usage.${method} failed: ${errorMessage(error)}`,
+      errorType: rpcErrorType(error),
     };
   }
+}
+
+function fetchUsageSnapshots(
+  api: OpenCodeApi,
+  cwd: string,
+  input: Record<string, string | boolean> = {},
+) {
+  return fetchUsage<UsageSnapshot>(api, cwd, "get", usageRpcGetSchema, input);
+}
+
+function fetchUsageList(api: OpenCodeApi, cwd: string) {
+  return fetchUsage<UsageList["providers"][number]>(
+    api,
+    cwd,
+    "list",
+    usageRpcListSchema,
+  );
 }
 
 function unavailableUsageList(error: string): UsageList {
@@ -121,19 +162,17 @@ export async function listProviderUsage(
   api: OpenCodeApi,
   cwd = process.cwd(),
 ): Promise<UsageList> {
-  let output: unknown;
-  try {
-    output = await callUsageRpc(api, cwd, "list");
-  } catch (error) {
-    return unavailableUsageList(errorMessage(error));
-  }
-  const parsed = usageRpcListSchema.safeParse(output);
-  if (!parsed.success) {
-    return unavailableUsageList(
-      "opencode-usage.list returned an invalid response",
-    );
-  }
-  return { available: true, providers: parsed.data.providers };
+  const result = await fetchUsageList(api, cwd);
+  return result.ok
+    ? { available: true, providers: result.providers }
+    : unavailableUsageList(result.error);
+}
+
+function usageContractMissing(
+  errorType: string | undefined,
+  lookup: UsagePluginLookup,
+): boolean {
+  return errorType === RPC_NOT_REGISTERED && lookup.status === "missing";
 }
 
 export async function usageSourceStatus(
@@ -142,17 +181,14 @@ export async function usageSourceStatus(
 ): Promise<UsageSourceStatus> {
   const [lookup, listed] = await Promise.all([
     lookupUsagePlugin(api, cwd),
-    listProviderUsage(api, cwd),
+    fetchUsageList(api, cwd),
   ]);
   const metadata = lookup.status === "found" ? lookup.metadata : {};
 
-  if (!listed.available) {
-    return lookup.status === "missing"
+  if (!listed.ok) {
+    return usageContractMissing(listed.errorType, lookup)
       ? { status: "not_installed", providerCount: 0 }
-      : unavailableUsageStatus(
-          listed.error ?? "opencode-usage is unavailable",
-          metadata,
-        );
+      : unavailableUsageStatus(listed.error, metadata);
   }
 
   const providerCount = listed.providers.length;

@@ -103,6 +103,17 @@ meter stay parent-only. Child usage survives the turn and is rebuilt
 monotonically after reconnect or resume. A background subagent's task row
 carries `usage` only when the child has recorded usage; it is omitted otherwise.
 
+Settings reports the usage source through the `opencode-usage` RPC contract, not
+the plugin package. Any implementation with `list`/`get` works; `opencode-usage`
+is only the default. Status comes from the contract, while `plugin.list`
+supplies display metadata. A working implementation with no metadata shows an
+unknown source. The `opencode-usage` install link appears only when the contract
+is missing: `rpc.unavailable` and a successful `plugin.list` with no usage
+plugin. `rpc.unavailable` alone is not enough because it also covers a closing
+RPC service. Every other failure reports Unavailable. `features.rpc` is not used
+because it marks a package's `./rpc` entrypoint, not a registered RPC. These
+checks are host-global and read-only.
+
 ## Archive and lifecycle
 
 `session.update({archived})` mirrors BB archive/unarchive. The bridge consumes
