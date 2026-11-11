@@ -93,5 +93,5 @@ docs/           Developer documentation
 - **Child usage is merged into the parent.** Child tokens and cost count toward
   the thread; the parent's context meter stays parent-only.
 
-See [opencode-v2.md](opencode-v2.md) for OpenCode behavior, known gaps, and the
-experimental API watchlist.
+See [opencode-v2.md](opencode-v2.md) for OpenCode behaviors, known gaps, and
+Experimental APIs.

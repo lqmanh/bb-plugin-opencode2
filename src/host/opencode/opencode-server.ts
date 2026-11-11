@@ -9,7 +9,11 @@ import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { errorMessage } from "../../shared/errors.ts";
-import type { NativeSkillsStatus } from "../../shared/settings-contract.ts";
+import {
+  SESSION_OPTIONS_STATE_KIND,
+  type NativeSkillsStatus,
+} from "../../shared/settings-contract.ts";
+import { emit } from "../bridge/bridge-runtime.ts";
 import { pluginRuntimeDir } from "../plugin-paths.ts";
 import { writeJsonFileAtomic } from "../session/persistence.ts";
 import { sessions, sessionsByProviderId } from "../session/session-teardown.ts";
@@ -26,7 +30,12 @@ import {
   type SessionState,
   type UsageTotals,
 } from "../types.ts";
-import { modelCatalogEntry, type ModelCatalogEntry } from "./models.ts";
+import {
+  agentOptionChoice,
+  agentSessionOption,
+  modelCatalogEntry,
+  type ModelCatalogEntry,
+} from "./models.ts";
 import {
   bbSkillsPluginPackage,
   isBbSkillsPluginPackage,
@@ -116,6 +125,14 @@ export type OpenCodeCommand = {
 };
 
 type CatalogCache<T> = Map<string, { at: number; result: Promise<T> }>;
+
+type PrimaryAgent = { id: string; description?: string };
+
+type NativeSkill = { id: string; path?: string };
+
+function skillPaths(skills: NativeSkill[]): Map<string, string | undefined> {
+  return new Map(skills.map((skill) => [skill.id, skill.path] as const));
+}
 
 // Persisted so an in-place rewind (BB reuses the same BB thread ID) still
 // works when the host worker holding the live session is gone: after a worker
@@ -344,17 +361,32 @@ export class OpenCodeServer {
   ): Promise<boolean> {
     if (expectedNames.size === 0) return true;
     const roots = this.bbCatalogRoots();
+    const isReady = (skills: Map<string, string | undefined>) =>
+      [...expectedNames].every((name) => {
+        const path = skills.get(name);
+        return path !== undefined && pathUnderRoots(path, roots);
+      });
+
+    // An empty skill list means the Location is still cold, so retry on the
+    // same budget as the other cold catalogs. A failed list is not cold;
+    // retrying ten times only delays every caller.
+    let skills: NativeSkill[];
+    try {
+      skills = await this.coldList(() => this.nativeSkills(cwd));
+    } catch {
+      return false;
+    }
+    if (skills.length === 0) return false;
+
+    let state = skillPaths(skills);
     for (let attempt = 0; attempt < SKILLS_READY_RETRIES; attempt++) {
-      if (attempt > 0)
+      if (attempt > 0) {
         await new Promise((resolve) =>
           setTimeout(resolve, CATALOG_COLD_RETRY_MS),
         );
-      const skills = await this.nativeSkillsState(cwd);
-      const ready = [...expectedNames].every((name) => {
-        const path = skills?.get(name);
-        return path !== undefined && pathUnderRoots(path, roots);
-      });
-      if (ready) return true;
+        state = (await this.nativeSkillsState(cwd)) ?? new Map();
+      }
+      if (isReady(state)) return true;
     }
     return false;
   }
@@ -921,29 +953,54 @@ export class OpenCodeServer {
   }
 
   /**
+   * Tell BB which agent a thread is on, so `bb thread options` and the
+   * composer can show and change it after the thread exists. The model list only
+   * offers the option before a thread does.
+   */
+  async publishAgentOption(
+    session: SessionState,
+    agentList: Promise<PrimaryAgent[] | undefined> = this.primaryAgents(
+      session.cwd,
+    ).catch(() => undefined),
+  ) {
+    const agents = await agentList;
+    if (!agents) return;
+    const option = agentSessionOption(agents, agentOptionChoice(session));
+    const options = option ? [option] : [];
+    const serialized = JSON.stringify(options);
+    if (session.publishedAgentOptions === serialized) return;
+    session.publishedAgentOptions = serialized;
+    emit(session.bbThreadId, [
+      {
+        kind: "extension.state",
+        extensionKind: SESSION_OPTIONS_STATE_KIND,
+        payload: { options },
+      },
+    ]);
+  }
+
+  /**
    * Agents a user can pick as a session's primary agent: OpenCode's `primary`
    * and `all` modes, minus hidden ones. Subagent-only agents are reached
    * through delegation instead.
    */
-  async primaryAgents(
-    cwd: string,
-  ): Promise<{ id: string; description?: string }[]> {
+  async primaryAgents(cwd: string): Promise<PrimaryAgent[]> {
     const api = await this.api();
-    const result = await api.agent.list({ location: { directory: cwd } });
-    return (Array.isArray(result.data) ? result.data : []).flatMap(
-      (value: unknown) => {
-        const agent = inputRecord(value);
-        const id = stringValue(agent.id ?? agent.name);
-        if (!id || agent.hidden === true || agent.mode === "subagent")
-          return [];
-        const description = stringValue(agent.description);
-        return [{ id, ...(description ? { description } : {}) }];
-      },
-    );
+    const data = await this.coldList(async () => {
+      const result = await api.agent.list({ location: { directory: cwd } });
+      return Array.isArray(result.data) ? result.data : [];
+    });
+    return data.flatMap((value: unknown) => {
+      const agent = inputRecord(value);
+      const id = stringValue(agent.id ?? agent.name);
+      if (!id || agent.hidden === true || agent.mode === "subagent") return [];
+      const description = stringValue(agent.description);
+      return [{ id, ...(description ? { description } : {}) }];
+    });
   }
 
   /** Skills OpenCode discovered for a workspace: ID and SKILL.md path. */
-  async nativeSkills(cwd: string): Promise<{ id: string; path?: string }[]> {
+  async nativeSkills(cwd: string): Promise<NativeSkill[]> {
     const api = await this.api();
     const result = await api.skill.list({ location: { directory: cwd } });
     return (Array.isArray(result.data) ? result.data : []).flatMap(
@@ -961,11 +1018,7 @@ export class OpenCodeServer {
     cwd: string,
   ): Promise<Map<string, string | undefined> | undefined> {
     try {
-      return new Map(
-        (await this.nativeSkills(cwd)).map(
-          (skill) => [skill.id, skill.path] as const,
-        ),
-      );
+      return skillPaths(await this.nativeSkills(cwd));
     } catch {
       return undefined;
     }
@@ -1296,6 +1349,18 @@ export class OpenCodeServer {
     )
       this.invalidateModelCatalogs();
     if (eventType === "command.updated") this.invalidateCommands();
+    if (eventType === "agent.updated") {
+      const cwd = stringValue(inputRecord(event.location).directory);
+      const affected = [...sessions.values()].filter(
+        (session) => session.cwd === cwd,
+      );
+      if (cwd && affected.length > 0) {
+        // One agent list per location, shared by its sessions.
+        const agents = this.primaryAgents(cwd).catch(() => undefined);
+        for (const session of affected)
+          void this.publishAgentOption(session, agents);
+      }
+    }
     if (eventType === "installation.update-available")
       resetLatestVersionCache();
     if (eventType === "mcp.status.changed") {

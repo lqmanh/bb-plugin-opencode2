@@ -3,6 +3,20 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Requires OpenCode 2.2.7 or newer.
+- Background tasks reconcile each task through `shell.get` and `session.get`.
+
+### Fixed
+
+- Cold-start races on OpenCode 2.2.7 could show the usage source as Not
+  installed, list no agents, or report native skills as not ready.
+- `agent.updated` now refreshes the Agent option.
+- A failed usage plugin now reports its error.
+
 ## [1.6.0] - 2026-11-05
 
 ### Changed

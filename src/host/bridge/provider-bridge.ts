@@ -66,7 +66,6 @@ import {
 import {
   ensureSessionModel,
   prepareTurn,
-  publishAgentOption,
   registerSession,
   releaseDynamicTools,
   sessionFromParams,
@@ -309,6 +308,8 @@ async function handle(request: RecordValue) {
     }
     case "model/list": {
       const cwd = params.cwd ?? process.cwd();
+      // Both lists retry independently on a cold location; load them together.
+      const agents = openCodeServer.primaryAgents(cwd).catch(() => []);
       const catalog = await openCodeServer.modelCatalog(cwd, true);
       const models = catalog.models
         .map((model) => {
@@ -322,9 +323,7 @@ async function handle(request: RecordValue) {
         ? catalog.defaultId
         : models[0]?.id;
       // Agents come from this workspace, so project-level agents show up.
-      const agentOption = agentSessionOption(
-        await openCodeServer.primaryAgents(cwd).catch(() => []),
-      );
+      const agentOption = agentSessionOption(await agents);
       sendResult(request.id, {
         models: models.map(({ model, entry, id }) =>
           mapModel(
@@ -364,7 +363,7 @@ async function handle(request: RecordValue) {
       emit(params.threadId, [{ kind: "session.reset" }]);
       sendResult(request.id, { providerThreadId, sessionRestorable: true });
       const started = sessions.get(String(params.threadId));
-      if (started) void publishAgentOption(started);
+      if (started) void openCodeServer.publishAgentOption(started);
       return;
     }
     case "thread/resume": {
@@ -383,7 +382,7 @@ async function handle(request: RecordValue) {
         sessionRestorable: true,
       });
       const resumed = sessions.get(String(params.threadId));
-      if (resumed) void publishAgentOption(resumed);
+      if (resumed) void openCodeServer.publishAgentOption(resumed);
       return;
     }
     case "thread/fork": {
@@ -466,7 +465,7 @@ async function handle(request: RecordValue) {
           providerThreadId: params.sourceProviderThreadId,
           sessionRestorable: true,
         });
-        void publishAgentOption(rewound);
+        void openCodeServer.publishAgentOption(rewound);
         return;
       }
       const boundary = await openCodeServer.forkBoundaryRetainingThrough(
@@ -494,7 +493,7 @@ async function handle(request: RecordValue) {
       emit(params.threadId, [{ kind: "session.reset" }]);
       sendResult(request.id, { providerThreadId, sessionRestorable: true });
       const forked = sessions.get(params.threadId);
-      if (forked) void publishAgentOption(forked);
+      if (forked) void openCodeServer.publishAgentOption(forked);
       return;
     }
     case "thread/name/set": {

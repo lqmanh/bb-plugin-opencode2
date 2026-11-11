@@ -192,10 +192,17 @@ test("reads shell exit codes from v2 tool metadata or content", () => {
     shellExitCode({
       content: [
         { type: "text", text: "tick\n" },
-        { type: "text", text: "Exited with code 2" },
+        { type: "text", text: "Exit code: 2" },
       ],
     }),
     2,
+  );
+  assert.equal(
+    shellExitCode({
+      metadata: { status: "completed", signal: "SIGTERM" },
+      content: [{ type: "text", text: "Exit code: 143 (SIGTERM)" }],
+    }),
+    143,
   );
   assert.equal(shellExitCode({ metadata: { status: "completed" } }), undefined);
 });

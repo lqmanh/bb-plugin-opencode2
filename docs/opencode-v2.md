@@ -1,4 +1,4 @@
-# OpenCode v2 notes
+# OpenCode v2
 
 The bridge uses `@opencode/client`. The generated types cover request and event
 shapes, not the semantics below. Docs: https://opencode.ai/v2/docs/build/client.
@@ -22,8 +22,9 @@ ignored.
 - Tool input comes from `session.tool.called.input` or the accumulated
   `session.tool.input.ended` text.
 - Shells stream via `session.tool.progress` + `shell.output` cursors. A non-zero
-  exit can still be `session.tool.success`; read `metadata.exit` or the trailing
-  `Exited with code N`.
+  exit can still be `session.tool.success`: `metadata.exit` carries the code for
+  exited commands, while signalled commands set `metadata.signal` and no exit.
+  Their content ends with `Exit code: N` or `Exit code: N (SIGTERM)`.
 - Edit success carries patches in `metadata.files`; write success has no patch,
   so write rows show only path and kind.
 - Native subagents use `metadata.sessionID` for the child session. Results are
@@ -47,6 +48,17 @@ Both render as thread-scoped `backgroundTask` rows. A foreground tool that
 OpenCode backgrounds is closed and replaced by one task row. Fast completions
 are buffered until the shell or child ID is known; duplicate and late
 completions are ignored.
+
+After a reconnect, and when a thread starts, resumes, or forks, unsettled tasks
+reconcile per task. Shell tasks use `shell.get` for terminal status and exit;
+`shell.output` supplies the summary when available. A running shell stays open.
+`ShellNotFoundError` settles the task as stopped because the shell is gone.
+Subagent tasks use `session.get`’s outcome when the child is idle for
+succeeded/failed/interrupted. Otherwise `session.active` decides: a present
+child stays open, while an absent child is re-read once and settles from a late
+outcome or as stopped. Missing child sessions settle as stopped, and other
+errors stay open. Reconciled subagent rows have no summary. There is no
+message-history fallback.
 
 `session.background` backgrounds every active foreground backgroundable tool. It
 is all-or-nothing, returns no count, and is exposed as a thread menu action. The
@@ -107,12 +119,15 @@ Settings reports the usage source through the `opencode-usage` RPC contract, not
 the plugin package. Any implementation with `list`/`get` works; `opencode-usage`
 is only the default. Status comes from the contract, while `plugin.list`
 supplies display metadata. A working implementation with no metadata shows an
-unknown source. The `opencode-usage` install link appears only when the contract
-is missing: `rpc.unavailable` and a successful `plugin.list` with no usage
-plugin. `rpc.unavailable` alone is not enough because it also covers a closing
-RPC service. Every other failure reports Unavailable. `features.rpc` is not used
-because it marks a package's `./rpc` entrypoint, not a registered RPC. These
-checks are host-global and read-only.
+unknown source. A listed usage plugin whose state is `failed` reports
+Unavailable with that plugin's error. A cold `rpc.unavailable` is retried for
+about 1.5s before classification; after a failed round, later calls skip retries
+for 5 minutes, or until a successful call clears it. The `opencode-usage`
+install link appears only when the contract is missing: `rpc.unavailable` and a
+successful `plugin.list` with no usage plugin. `rpc.unavailable` alone is not
+enough because it also covers a closing RPC service. Every other failure reports
+Unavailable. `features.rpc` is not used because it marks a package's `./rpc`
+entrypoint, not a registered RPC. These checks are host-global and read-only.
 
 ## Archive and lifecycle
 
@@ -133,9 +148,16 @@ elsewhere is recorded so this plugin does not send a stale reply.
 ## Live refresh
 
 Provider, model, and credential events invalidate the model catalog;
-`command.updated` invalidates commands; native skills are refreshed on turns
-that mention one; `installation.update-available` clears the cached latest CLI
+`command.updated` invalidates commands; `agent.updated` republishes the agent
+option for sessions in that location; native skills are refreshed on turns that
+mention one; `installation.update-available` clears the cached latest CLI
 version. BB keeps its own caches and updates them on its own schedule.
+
+## Cold locations
+
+Since 2.2.7, OpenCode does not wait for plugins in request handlers. A cold
+location can briefly return empty `agent.list` and `skill.list` results; those
+reads are retried.
 
 ## Native skills plugin
 
@@ -181,36 +203,35 @@ Limits:
 If the skills plugin or a skill file is missing, the config is read-only, or a
 catalog is invalid, this plugin attaches the skill's `SKILL.md` instead.
 
-## Experimental dependencies
-
-- `experimental.mcp.add` / `remove` register the per-thread dynamic-tools MCP
-  server.
-- `experimental.session.instructions.entry.put` / `remove` install BB
-  instructions.
-- The global config is edited directly because `experimental.config.update` only
-  accepts `shell`.
-
 ## Maintainer notes
 
-### Experimental watchlist
+### Experimental APIs
 
-Evaluated and excluded unless noted:
+OpenCode's `experimental` namespace holds working APIs that may change between
+minor releases. Used APIs have no fallback; check them on every OpenCode bump.
 
-| API                                                                                                                                | Decision                                                                |
-| ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `experimental.usage.limits`                                                                                                        | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead. |
-| `experimental.session.stats`, `import`, `export`                                                                                   | No BB surface.                                                          |
-| `experimental.artifacts.*`, `schedule.*`, `persistentPty.*`                                                                        | No matching BB surface, or overlaps BB terminals.                       |
-| `experimental.generate.text`, `generate.image`, `decisions`, `voice.*`                                                             | BB has its own services; not needed.                                    |
-| `experimental.mcp.*`                                                                                                               | `add`/`remove` kept for dynamic tools; management UI excluded.          |
-| `experimental.config.update`                                                                                                       | Only accepts `shell`; direct config edits remain.                       |
-| `experimental.integration.wellknown.add`, `file.write/watch/unwatch`, `media.get`, `migration.v1.status`, `session.log/wait/skill` | Not needed, or overlaps BB APIs.                                        |
+| API                                                                                                                                | Status   | Notes                                                                                                              |
+| ---------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
+| `experimental.mcp.add`, `remove`                                                                                                   | Used     | Register and remove the per-thread dynamic-tools MCP server.                                                       |
+| `experimental.session.instructions.entry.put`, `remove`                                                                            | Used     | Install BB instructions.                                                                                           |
+| `experimental.job.list`                                                                                                            | Excluded | Finished jobs leave the list once their completion is delivered; `shell.get` / `session.get` cover reconciliation. |
+| `experimental.mcp.*` (other)                                                                                                       | Excluded | Management UI not needed.                                                                                          |
+| `experimental.config.update`                                                                                                       | Excluded | Only accepts `shell`; the global config is edited directly.                                                        |
+| `experimental.usage.limits`                                                                                                        | Excluded | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead.                                            |
+| `experimental.session.stats`, `import`, `export`                                                                                   | Excluded | No BB surface.                                                                                                     |
+| `experimental.artifacts.*`, `schedule.*`, `persistentPty.*`                                                                        | Excluded | No matching BB surface, or overlaps BB terminals.                                                                  |
+| `experimental.generate.text`, `generate.image`, `decisions`, `voice.*`                                                             | Excluded | BB has its own services; not needed.                                                                               |
+| `experimental.integration.wellknown.add`, `file.write/watch/unwatch`, `media.get`, `migration.v1.status`, `session.log/wait/skill` | Excluded | Not needed, or overlaps BB APIs.                                                                                   |
 
 ### Known gaps
 
 - Command turns without an inbox message have no rewind checkpoint.
 - Background task rows do not survive a worker restart; BB settles them as
   interrupted and the plugin does not recreate them.
+- A shell that disappears after an OpenCode restart settles as stopped without
+  its exit code or output; `shell.get` returns `ShellNotFoundError`.
+- Reconciled subagent rows have no summary; the session API exposes no result
+  text.
 - Idle completion only marks the thread unread; a transcript message needs BB
   core support.
 - Foreground subagent forms are handled only while the parent turn is active;

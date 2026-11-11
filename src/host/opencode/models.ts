@@ -7,6 +7,7 @@ import {
   stringValue,
   type ModelRef,
   type OpenCodeRecord,
+  type SessionState,
 } from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
@@ -190,6 +191,21 @@ export function agentSessionOption(
       ...(agent.description ? { description: agent.description } : {}),
     })),
   };
+}
+
+/**
+ * The agent BB's Agent row should show. During a plan turn it names the agent
+ * the next ordinary turn returns to, matching `planAgentTransition`.
+ */
+export function agentOptionChoice(
+  session: Pick<
+    SessionState,
+    "agent" | "agentChoice" | "planMode" | "agentBeforePlan"
+  >,
+): string | undefined {
+  return session.planMode
+    ? (session.agentChoice ?? session.agentBeforePlan)
+    : (session.agentChoice ?? session.agent);
 }
 
 /**

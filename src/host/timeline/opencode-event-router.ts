@@ -3,6 +3,13 @@ import {
   experimental_COMPACTION_PRESENTATION as compactionPresentation,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import {
+  isSessionNotFoundError,
+  isShellNotFoundError,
+  type OpenCodeClient,
+  type SessionInfo,
+  type ShellInfo1,
+} from "@opencode/client";
+import {
   AGENT_OPTION_ID,
   SESSION_OPTIONS_STATE_KIND,
   SESSION_OPTION_SELECTIONS_STATE_KIND,
@@ -37,6 +44,7 @@ import {
   backgroundTaskKey,
   backgroundTaskTaskType,
   backgroundTaskUsage,
+  completionState,
   contentText,
   diffFileChanges,
   dynamicToolRow,
@@ -81,14 +89,15 @@ const CHILD_RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * OpenCode v2 reports a shell tool's exit status as `metadata.exit` on
- * `session.tool.success` (a non-zero exit is still a "success" event) and
- * appends "Exited with code N" to the content.
+ * `session.tool.success` (a non-zero exit is still a "success" event).
+ * Signalled commands set `metadata.signal` and no exit; their content ends
+ * with "Exit code: N (SIGNAME)".
  */
 export function shellExitCode(data: RecordValue): number | undefined {
   const candidates = [inputRecord(data.metadata).exit, data.exitCode];
   for (const value of candidates)
     if (typeof value === "number" && Number.isInteger(value)) return value;
-  const match = contentText(data.content).match(/Exited with code (-?\d+)/);
+  const match = contentText(data.content).match(/Exit code: (-?\d+)/);
   return match ? Number(match[1]) : undefined;
 }
 
@@ -240,6 +249,14 @@ function shellCompletion(
     ...(exit !== undefined ? { exit } : {}),
     ...(status === "timeout" ? { timeout: true } : {}),
   };
+}
+
+/** A session is running when it went busy after it last went idle. */
+function sessionRunning(time: { busy?: number; idle?: number }): boolean {
+  return (
+    time.busy !== undefined &&
+    (time.idle === undefined || time.busy > time.idle)
+  );
 }
 
 function childUsage(children: Iterable<ChildSessionRecord>) {
@@ -954,10 +971,10 @@ export class OpenCodeEventRouter {
           queue.push(childId);
           discovered++;
           const time = inputRecord(info.time);
-          const busy = typeof time.busy === "number" ? time.busy : undefined;
-          const idle = typeof time.idle === "number" ? time.idle : undefined;
-          const running =
-            busy !== undefined && (idle === undefined || busy > idle);
+          const running = sessionRunning({
+            busy: typeof time.busy === "number" ? time.busy : undefined,
+            idle: typeof time.idle === "number" ? time.idle : undefined,
+          });
           const existing = this.childSessions.get(childId);
           const callId = existing?.callId ?? "";
           const record = this.registerChildSession(childId, session, callId, {
@@ -986,25 +1003,137 @@ export class OpenCodeEventRouter {
       );
   }
 
+  private cancelBackgroundTask(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+    reason: string,
+  ) {
+    this.settleBackgroundTask(
+      session,
+      task,
+      taskCompletion(task, "cancelled", reason),
+    );
+  }
+
+  private async reconcileShellTask(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+    api: OpenCodeClient,
+  ) {
+    const shellId = task.shellId;
+    if (!shellId) return;
+    const location = { directory: session.cwd };
+    let shell: ShellInfo1;
+    try {
+      shell = (await api.shell.get({ id: shellId, location })).data;
+    } catch (error) {
+      if (isShellNotFoundError(error))
+        this.cancelBackgroundTask(
+          session,
+          task,
+          "Shell is no longer available in OpenCode",
+        );
+      return;
+    }
+    if (shell.status === "running") return;
+
+    let text = "";
+    try {
+      text = (
+        await api.shell.output({
+          id: shellId,
+          location,
+          limit: SHELL_OUTPUT_CHUNK_BYTES,
+        })
+      ).data.output;
+    } catch {
+      // Status and exit still settle the task without a summary.
+    }
+    this.settleBackgroundTask(
+      session,
+      task,
+      shellCompletion(shellId, shell.status, shell.exit, text),
+    );
+  }
+
   /**
-   * Settle background tasks whose completion synthetic arrived while the
-   * event stream was down. The stream is live-only; the same synthetic is
-   * also durable in the session's message history.
+   * Read the child session and settle the task if it is gone or finished.
+   * Returns false only when the child exists without a final outcome; a failed
+   * read returns true and leaves the task open.
+   */
+  private async settleFinishedSubagent(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+    childId: string,
+    api: OpenCodeClient,
+  ): Promise<boolean> {
+    let child: SessionInfo;
+    try {
+      child = await api.session.get({ sessionID: childId });
+    } catch (error) {
+      if (isSessionNotFoundError(error))
+        this.cancelBackgroundTask(
+          session,
+          task,
+          "Subagent session is no longer available in OpenCode",
+        );
+      return true;
+    }
+    // A resumed child keeps its previous outcome while busy again.
+    if (sessionRunning(child.time) || !child.outcome) return false;
+    this.settleBackgroundTask(
+      session,
+      task,
+      taskCompletion(task, completionState(child.outcome), ""),
+    );
+    return true;
+  }
+
+  private async reconcileSubagentTask(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+    api: OpenCodeClient,
+    active: () => Promise<RecordValue>,
+  ) {
+    const childId = task.childSessionId;
+    if (!childId) return;
+    const settled = () =>
+      this.settleFinishedSubagent(session, task, childId, api);
+    if (await settled()) return;
+    if (childId in (await active())) return;
+    // Re-read once: the child may have finished between the two reads.
+    if (await settled()) return;
+    this.cancelBackgroundTask(
+      session,
+      task,
+      "Subagent is no longer running in OpenCode",
+    );
+  }
+
+  /**
+   * Reconcile background tasks per task with stable session/shell APIs. The
+   * event stream is live-only, so a completion can arrive while it is down.
    */
   async reconcileBackgroundTasks(session: SessionState): Promise<void> {
-    if (![...session.backgroundTasks.values()].some((task) => !task.settled))
-      return;
+    const unsettled = [...session.backgroundTasks.values()].filter(
+      (task) => !task.settled,
+    );
+    if (unsettled.length === 0) return;
     const api = await this.api();
-    const result = await api.message.list({
-      sessionID: session.providerThreadId,
-      limit: 50,
-      order: "desc" as const,
-    });
-    const messages = Array.isArray(result.data) ? result.data : [];
-    for (const value of messages) {
-      const message = inputRecord(value);
-      if (stringValue(message.type) !== "synthetic") continue;
-      this.handleSynthetic(session, message);
+
+    // One session.active read per reconcile, shared (including a failure).
+    let activeSessions: Promise<RecordValue> | undefined;
+    const active = () =>
+      (activeSessions ??= api.session.active().then(inputRecord));
+
+    for (const task of unsettled) {
+      try {
+        if (task.kind === "shell")
+          await this.reconcileShellTask(session, task, api);
+        else await this.reconcileSubagentTask(session, task, api, active);
+      } catch {
+        // A failed session.active read leaves only this task open.
+      }
     }
   }
 

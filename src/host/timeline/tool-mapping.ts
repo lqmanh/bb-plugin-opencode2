@@ -120,7 +120,7 @@ function tagAttribute(attributes: string, name: string) {
   return match?.[1];
 }
 
-function completionState(value: unknown): BackgroundCompletion["state"] {
+export function completionState(value: unknown): BackgroundCompletion["state"] {
   switch (stringValue(value)?.toLowerCase()) {
     case "completed":
     case "succeeded":

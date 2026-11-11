@@ -30,6 +30,7 @@ export {
   startDynamicToolsMcpProxy,
 } from "./bridge/dynamic-tools-mcp.ts";
 export {
+  agentOptionChoice,
   agentSessionOption,
   mapModel,
   modelCatalogEntry,
@@ -102,7 +103,6 @@ export {
   stopSessionForIntent,
 } from "./bridge/provider-bridge.ts";
 export {
-  agentOptionChoice,
   planAgentTransition,
   planPermissionModeForTurn,
   sessionFromParams,

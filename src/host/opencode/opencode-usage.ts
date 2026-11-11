@@ -16,6 +16,13 @@ import type { OpenCodeApi } from "../types.ts";
 const USAGE_RPC_ID = "opencode-usage";
 // OpenCode answers an unregistered RPC ID with RpcError type "rpc.unavailable".
 const RPC_NOT_REGISTERED = "rpc.unavailable";
+// OpenCode 2.2.7 stopped waiting for plugins in request handlers, so the first
+// RPC after a Location boots can be unavailable for about a second. After the
+// retries run out, later calls for that cwd skip retries for 5 minutes or until
+// an RPC succeeds.
+const USAGE_RPC_RETRIES = 5;
+const USAGE_RPC_RETRY_MS = 300;
+const USAGE_RETRY_SUPPRESS_MS = 5 * 60_000;
 
 const usageRpcListSchema = z
   .object({
@@ -42,7 +49,8 @@ type UsagePluginMetadata = {
 type UsagePluginLookup =
   | { status: "found"; metadata: UsagePluginMetadata }
   | { status: "missing" }
-  | { status: "failed" };
+  | { status: "failed"; metadata: UsagePluginMetadata; error: string }
+  | { status: "unconfirmed" };
 
 function pluginMetadata(plugin: PluginInfo): UsagePluginMetadata {
   switch (plugin.source.type) {
@@ -78,11 +86,13 @@ async function lookupUsagePlugin(
     const client = await api();
     const listed = await client.plugin.list({ location: { directory: cwd } });
     const selected = listed.data.find(isUsagePlugin);
-    return selected
-      ? { status: "found", metadata: pluginMetadata(selected) }
-      : { status: "missing" };
+    if (!selected) return { status: "missing" };
+    const metadata = pluginMetadata(selected);
+    return selected.state.status === "failed"
+      ? { status: "failed", metadata, error: selected.state.error }
+      : { status: "found", metadata };
   } catch {
-    return { status: "failed" };
+    return { status: "unconfirmed" };
   }
 }
 
@@ -106,6 +116,8 @@ type UsageFetch<T> =
   | { ok: true; providers: T[] }
   | { ok: false; error: string; errorType?: string };
 
+const usageRetrySuppressedUntil = new Map<string, number>();
+
 function rpcErrorType(error: unknown): string | undefined {
   if (!error || typeof error !== "object") return undefined;
   const type = (error as { type?: unknown }).type;
@@ -119,21 +131,36 @@ async function fetchUsage<T>(
   schema: z.ZodType<{ providers: T[] }>,
   input: Record<string, string | boolean> = {},
 ): Promise<UsageFetch<T>> {
-  try {
-    const output = await callUsageRpc(api, cwd, method, input);
-    const parsed = schema.safeParse(output);
-    return parsed.success
-      ? { ok: true, providers: parsed.data.providers }
-      : {
+  const retry = (usageRetrySuppressedUntil.get(cwd) ?? 0) <= Date.now();
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0)
+      await new Promise((resolve) => setTimeout(resolve, USAGE_RPC_RETRY_MS));
+    try {
+      const output = await callUsageRpc(api, cwd, method, input);
+      const parsed = schema.safeParse(output);
+      if (!parsed.success) {
+        return {
           ok: false,
           error: `opencode-usage.${method} returned an invalid response`,
         };
-  } catch (error) {
-    return {
-      ok: false,
-      error: `opencode-usage.${method} failed: ${errorMessage(error)}`,
-      errorType: rpcErrorType(error),
-    };
+      }
+      usageRetrySuppressedUntil.delete(cwd);
+      return { ok: true, providers: parsed.data.providers };
+    } catch (error) {
+      const errorType = rpcErrorType(error);
+      if (errorType === RPC_NOT_REGISTERED && retry) {
+        if (attempt < USAGE_RPC_RETRIES) continue;
+        usageRetrySuppressedUntil.set(
+          cwd,
+          Date.now() + USAGE_RETRY_SUPPRESS_MS,
+        );
+      }
+      return {
+        ok: false,
+        error: `opencode-usage.${method} failed: ${errorMessage(error)}`,
+        errorType,
+      };
+    }
   }
 }
 
@@ -179,22 +206,29 @@ export async function usageSourceStatus(
   api: OpenCodeApi,
   cwd = process.cwd(),
 ): Promise<UsageSourceStatus> {
-  const [lookup, listed] = await Promise.all([
-    lookupUsagePlugin(api, cwd),
-    fetchUsageList(api, cwd),
-  ]);
-  const metadata = lookup.status === "found" ? lookup.metadata : {};
+  // Look up the plugin first: a listed-but-failed plugin aborts before the RPC,
+  // and a cold plugin list is what makes the first RPC unavailable.
+  const lookup = await lookupUsagePlugin(api, cwd);
+  if (lookup.status === "failed")
+    return unavailableUsageStatus(lookup.error, lookup.metadata);
 
-  if (!listed.ok) {
+  const listed = await fetchUsageList(api, cwd);
+  if (!listed.ok)
     return usageContractMissing(listed.errorType, lookup)
       ? { status: "not_installed", providerCount: 0 }
-      : unavailableUsageStatus(listed.error, metadata);
-  }
+      : unavailableUsageStatus(
+          listed.error,
+          lookup.status === "found" ? lookup.metadata : {},
+        );
 
+  // A cold plugin list can miss the plugin that answers the RPC; refresh the
+  // metadata after success instead of leaving the source as Unknown.
+  const found =
+    lookup.status === "found" ? lookup : await lookupUsagePlugin(api, cwd);
   const providerCount = listed.providers.length;
   return {
     status: providerCount > 0 ? "active" : "no_accounts",
-    ...metadata,
+    ...(found.status === "found" ? found.metadata : {}),
     providerCount,
   };
 }

@@ -2,16 +2,14 @@ import { fileURLToPath } from "node:url";
 import {
   AGENT_OPTION_ID,
   DEFAULT_AGENT,
-  SESSION_OPTIONS_STATE_KIND,
 } from "../../shared/settings-contract.ts";
 import { errorMessage } from "../../shared/errors.ts";
-import { dynamicToolCallRouter, emit } from "../bridge/bridge-runtime.ts";
+import { dynamicToolCallRouter } from "../bridge/bridge-runtime.ts";
 import {
   startDynamicToolsMcpProxy,
   type DynamicToolCallResult,
 } from "../bridge/dynamic-tools-mcp.ts";
 import {
-  agentSessionOption,
   modelId,
   modelRefFromOptions,
   resolveModelVariant,
@@ -444,45 +442,6 @@ export async function ensureSessionAgent(
 }
 
 /**
- * The agent BB's Agent row should show. During a plan turn it names the agent
- * the next ordinary turn returns to, matching `planAgentTransition`.
- */
-export function agentOptionChoice(
-  session: Pick<
-    SessionState,
-    "agent" | "agentChoice" | "planMode" | "agentBeforePlan"
-  >,
-): string | undefined {
-  return session.planMode
-    ? (session.agentChoice ?? session.agentBeforePlan)
-    : (session.agentChoice ?? session.agent);
-}
-
-/**
- * Tell BB which agent this thread is on, so `bb thread options` and the
- * composer can show and change it after the thread exists. The model list only
- * offers the option before a thread does.
- */
-export async function publishAgentOption(session: SessionState) {
-  const agents = await openCodeServer
-    .primaryAgents(session.cwd)
-    .catch(() => undefined);
-  if (!agents) return;
-  const option = agentSessionOption(agents, agentOptionChoice(session));
-  const options = option ? [option] : [];
-  const serialized = JSON.stringify(options);
-  if (session.publishedAgentOptions === serialized) return;
-  session.publishedAgentOptions = serialized;
-  emit(session.bbThreadId, [
-    {
-      kind: "extension.state",
-      extensionKind: SESSION_OPTIONS_STATE_KIND,
-      payload: { options },
-    },
-  ]);
-}
-
-/**
  * Decide which OpenCode agent a turn needs. BB's plan mode maps to OpenCode's
  * `plan` agent for one turn; the next ordinary turn returns to the agent picked
  * through the `agent` session option.
@@ -555,6 +514,6 @@ export async function prepareTurn(
   session.agentChoice = nativeAgentChoice(opts) ?? session.agentChoice;
   const agent = planAgentTransition(session, planMode, newTurn);
   if (agent) await ensureSessionAgent(session, agent);
-  void publishAgentOption(session);
+  void openCodeServer.publishAgentOption(session);
   await ensureSessionModel(session, turnModelRef(session, options));
 }

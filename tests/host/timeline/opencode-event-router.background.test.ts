@@ -17,6 +17,46 @@ import {
 import { nextTick } from "../../support/async.ts";
 import type { OpenCodeRecord } from "../../../src/host/types.ts";
 
+// OpenCode's not-found guards only check `_tag`.
+const shellNotFound = () => ({ _tag: "ShellNotFoundError" });
+const sessionNotFound = () => ({ _tag: "SessionNotFoundError" });
+
+function shellInfo(overrides: OpenCodeRecord = {}) {
+  return { id: "shell_1", status: "exited", ...overrides };
+}
+
+function childSession(overrides: OpenCodeRecord = {}) {
+  return {
+    id: "ses_child",
+    time: { created: 1, updated: 2 },
+    ...overrides,
+  };
+}
+
+const shellOutput = (output: string) => ({ data: { output } });
+
+type Api = Parameters<typeof backgroundFixture>[0];
+
+async function reconcile(
+  api: Api,
+  start: (
+    event: ReturnType<typeof backgroundFixture>["event"],
+  ) => Promise<unknown>,
+) {
+  const { emitted, event, router, session } = backgroundFixture(api);
+  await start(event);
+  await router.finish(session, "completed");
+  const before = emitted.length;
+  await router.reconcileBackgroundTasks(session);
+  return { close: backgroundTaskClose(emitted, before) };
+}
+
+const reconcileShell = (api: Api) =>
+  reconcile(api, (event) => startShellTask(event, { command: "true" }));
+
+const reconcileSubagent = (api: Api) =>
+  reconcile(api, (event) => startSubagentTask(event, { background: true }));
+
 test("maps an explicit background shell to one local_bash task row", async () => {
   const { emitted, event, session } = backgroundFixture();
 
@@ -232,37 +272,271 @@ test("does not create a background task for a denied subagent", async () => {
   assert.match(delegation?.item.summary ?? "", /Native subagents/);
 });
 
-test("reconciles a completion missed while the event stream was down", async () => {
-  const api = createFakeOpenCodeApi({
-    message: {
-      list: async () => ({
-        data: [
-          {
-            id: "msg_1",
-            type: "synthetic",
-            text: '<shell id="shell_1" state="completed" command="true">\nok\n</shell>',
-            metadata: {
-              source: "shell",
-              shellID: "shell_1",
-              state: "completed",
-              exit: 0,
-            },
+test("maps reconciled shell status and exit codes", async (t) => {
+  const scenarios = [
+    {
+      name: "exited zero",
+      status: "exited",
+      exit: 0,
+      close: "completed",
+      task: "completed",
+      error: undefined,
+    },
+    {
+      name: "exited non-zero",
+      status: "exited",
+      exit: 7,
+      close: "failed",
+      task: "failed",
+      error: /Exited with code 7/,
+    },
+    {
+      name: "timeout",
+      status: "timeout",
+      exit: undefined,
+      close: "failed",
+      task: "failed",
+      error: /timed out/,
+    },
+    {
+      name: "killed",
+      status: "killed",
+      exit: undefined,
+      close: "interrupted",
+      task: "stopped",
+      error: undefined,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { close } = await reconcileShell(
+        createFakeOpenCodeApi({
+          shell: {
+            get: async () => ({
+              data: shellInfo({ status: scenario.status, exit: scenario.exit }),
+            }),
+            output: async () => shellOutput("output"),
           },
-        ],
-      }),
+        }),
+      );
+
+      assert.equal(close?.status, scenario.close);
+      assert.equal(close?.item?.taskStatus, scenario.task);
+      assert.equal(close?.item?.summary, "output");
+      if (scenario.error)
+        assert.match(close?.item?.error ?? "", scenario.error);
+    });
+  }
+});
+
+test("keeps running or unavailable shells open", async (t) => {
+  const scenarios = [
+    {
+      name: "running",
+      get: async () => ({ data: shellInfo({ status: "running" }) }),
+    },
+    {
+      name: "get failure",
+      get: async () => {
+        throw new Error("shell service unavailable");
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { close } = await reconcileShell(
+        createFakeOpenCodeApi({ shell: { get: scenario.get } }),
+      );
+
+      assert.equal(close, undefined);
+    });
+  }
+});
+
+test("settles a missing shell as stopped", async () => {
+  const { close } = await reconcileShell(
+    createFakeOpenCodeApi({
+      shell: {
+        get: async () => {
+          throw shellNotFound();
+        },
+      },
+    }),
+  );
+
+  assert.equal(close?.status, "interrupted");
+  assert.match(close?.item?.error ?? "", /no longer available/);
+});
+
+test("settles a missed subagent completion from its outcome", async (t) => {
+  const scenarios = [
+    {
+      outcome: "succeeded",
+      close: "completed",
+      task: "completed",
+      error: undefined,
+    },
+    {
+      outcome: "failed",
+      close: "failed",
+      task: "failed",
+      error: /Background task failed/,
+    },
+    {
+      outcome: "interrupted",
+      close: "interrupted",
+      task: "stopped",
+      error: undefined,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.outcome, async () => {
+      const { close } = await reconcileSubagent(
+        createFakeOpenCodeApi({
+          session: {
+            get: async () => childSession({ outcome: scenario.outcome }),
+          },
+        }),
+      );
+
+      assert.equal(close?.status, scenario.close);
+      assert.equal(close?.item?.taskStatus, scenario.task);
+      assert.equal(close?.item?.summary, undefined);
+      if (scenario.error)
+        assert.match(close?.item?.error ?? "", scenario.error);
+    });
+  }
+});
+
+test("falls through a stale outcome on a busy child", async (t) => {
+  const scenarios = [
+    { name: "active", active: { ses_child: {} }, close: undefined },
+    {
+      name: "inactive",
+      active: {},
+      close: "interrupted",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { close } = await reconcileSubagent(
+        createFakeOpenCodeApi({
+          session: {
+            get: async () =>
+              childSession({
+                outcome: "succeeded",
+                time: { created: 1, updated: 3, busy: 3, idle: 2 },
+              }),
+            active: async () => scenario.active,
+          },
+        }),
+      );
+
+      assert.equal(close?.status, scenario.close);
+      if (scenario.close)
+        assert.match(close?.item?.error ?? "", /no longer running/);
+    });
+  }
+});
+
+test("settles an inactive child from its late outcome", async () => {
+  let reads = 0;
+  const { close } = await reconcileSubagent(
+    createFakeOpenCodeApi({
+      session: {
+        get: async () => {
+          reads += 1;
+          return reads === 1
+            ? childSession({ time: { created: 1, updated: 3, busy: 3 } })
+            : childSession({
+                outcome: "succeeded",
+                time: { created: 1, updated: 4, busy: 3, idle: 4 },
+              });
+        },
+        active: async () => ({}),
+      },
+    }),
+  );
+
+  assert.equal(close?.status, "completed");
+  assert.equal(close?.item?.taskStatus, "completed");
+});
+
+test("settles an inactive child without an outcome as stopped", async () => {
+  const { close } = await reconcileSubagent(
+    createFakeOpenCodeApi({
+      session: {
+        get: async () => childSession(),
+        active: async () => ({}),
+      },
+    }),
+  );
+
+  assert.equal(close?.status, "interrupted");
+  assert.match(close?.item?.error ?? "", /no longer running/);
+});
+
+test("settles a missing subagent session as stopped", async () => {
+  const { close } = await reconcileSubagent(
+    createFakeOpenCodeApi({
+      session: {
+        get: async () => {
+          throw sessionNotFound();
+        },
+      },
+    }),
+  );
+
+  assert.equal(close?.status, "interrupted");
+  assert.match(close?.item?.error ?? "", /no longer available/);
+});
+
+test("leaves a subagent open on other session.get failures", async () => {
+  const { close } = await reconcileSubagent(
+    createFakeOpenCodeApi({
+      session: {
+        get: async () => {
+          throw new Error("session service unavailable");
+        },
+      },
+    }),
+  );
+
+  assert.equal(close, undefined);
+});
+
+test("keeps reconciling other tasks after a session.active failure", async () => {
+  const api = createFakeOpenCodeApi({
+    shell: {
+      get: async () => {
+        throw shellNotFound();
+      },
+    },
+    session: {
+      get: async () => childSession(),
+      active: async () => {
+        throw new Error("active failed");
+      },
     },
   });
   const { emitted, event, router, session } = backgroundFixture(api);
 
+  await startSubagentTask(event, { background: true });
   await startShellTask(event, { command: "true" });
   await router.finish(session, "completed");
   const before = emitted.length;
   await router.reconcileBackgroundTasks(session);
 
-  const close = backgroundTaskClose(emitted, before);
-  assert.equal(close?.status, "completed");
-  assert.equal(close?.item.summary, "ok");
+  assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, false);
   assert.equal(session.backgroundTasks.get("bg:call_shell")?.settled, true);
+  assert.equal(
+    backgroundTaskClose(emitted, before)?.key?.providerItemId,
+    "bg:call_shell",
+  );
 });
 
 test("converts a running foreground subagent into a background task row", async () => {

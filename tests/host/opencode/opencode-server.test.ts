@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import {
   OpenCodeServer,
   sessions,
@@ -15,6 +15,7 @@ import {
   type BackgroundTaskRecord,
   type SessionState,
 } from "../../../src/host/types.ts";
+import { immediate } from "../../support/async.ts";
 
 const NO_USAGE = {
   input: 0,
@@ -38,6 +39,29 @@ function stubBackground(server: OpenCodeServer, calls: string[]) {
       },
     }),
   });
+}
+
+function skillServer(list: () => Promise<{ data: unknown[] }>) {
+  const server = new OpenCodeServer();
+  server.setConfiguredSkillRoots([
+    {
+      id: "one",
+      path: "/skills",
+      skills: [{ name: "review", description: "Review changes" }],
+    },
+  ]);
+  Object.assign(server, {
+    api: createFakeOpenCodeApi({ skill: { list } }),
+  });
+  return server;
+}
+
+function agentServer(list: () => Promise<{ data: unknown[] }>) {
+  const server = new OpenCodeServer();
+  Object.assign(server, {
+    api: createFakeOpenCodeApi({ agent: { list } }),
+  });
+  return server;
 }
 
 test("follows checkpoint cursors even when a page is shorter than the requested limit", async () => {
@@ -257,6 +281,49 @@ test("caches the command catalog until a command.updated event", async () => {
   assert.equal(calls, 2);
 });
 
+test("republishes agent options after agent.updated for the event location", async () => {
+  const server = agentServer(async () => ({
+    data: [{ id: "build" }, { id: "reviewer" }],
+  }));
+  const matching = createTestSession({
+    bbThreadId: "thr_agent_match",
+    providerThreadId: "ses_agent_match",
+    cwd: "/repo",
+  });
+  const other = createTestSession({
+    bbThreadId: "thr_agent_other",
+    providerThreadId: "ses_agent_other",
+    cwd: "/other",
+  });
+  sessions.clear();
+  sessions.set(matching.bbThreadId, matching);
+  sessions.set(other.bbThreadId, other);
+  // The bridge notification is not under test; keep it out of the reporter.
+  mock.method(process.stdout, "write", () => true);
+  try {
+    await server.handleEvent({
+      type: "agent.updated",
+      location: { directory: "/repo" },
+      data: {},
+    });
+    await immediate();
+
+    const options = JSON.parse(
+      matching.publishedAgentOptions ?? "[]",
+    ) as Array<{
+      values?: Array<{ id?: string }>;
+    }>;
+    assert.deepEqual(
+      options[0]?.values?.map((value) => value.id),
+      ["build", "reviewer"],
+    );
+    assert.equal(other.publishedAgentOptions, undefined);
+  } finally {
+    mock.restoreAll();
+    sessions.clear();
+  }
+});
+
 test("forwards archive state and consumes its own archive event", async () => {
   const updates: Record<string, unknown>[] = [];
   const server = new OpenCodeServer();
@@ -414,4 +481,54 @@ test("reloads a session registered after the first host lookup", async (t) => {
   );
   assert.deepEqual(await host.backgroundSession("thr_second"), { ok: true });
   assert.deepEqual(calls, ["ses_first", "ses_second"]);
+});
+
+test("retries an empty native skill list with the cold catalog budget", async () => {
+  // Empty until the first retry, like a cold Location.
+  let calls = 0;
+  const server = skillServer(async () => {
+    calls += 1;
+    return {
+      data:
+        calls === 1
+          ? []
+          : [{ id: "review", location: "/skills/review/SKILL.md" }],
+    };
+  });
+
+  assert.equal(
+    await server.nativeSkillsReady("/repo", new Set(["review"])),
+    true,
+  );
+  assert.equal(calls, 2);
+});
+
+test("stops fast when the native skill list fails", async () => {
+  let calls = 0;
+  const server = skillServer(async () => {
+    calls += 1;
+    throw new Error("skill list failed");
+  });
+
+  assert.equal(
+    await server.nativeSkillsReady("/repo", new Set(["review"])),
+    false,
+  );
+  assert.equal(calls, 1);
+});
+
+test("retries an empty agent list once for primary agents", async () => {
+  let calls = 0;
+  const server = agentServer(async () => {
+    calls += 1;
+    return {
+      data: calls === 1 ? [] : [{ id: "build" }, { id: "plan" }],
+    };
+  });
+
+  assert.deepEqual(await server.primaryAgents("/repo"), [
+    { id: "build" },
+    { id: "plan" },
+  ]);
+  assert.equal(calls, 2);
 });
