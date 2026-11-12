@@ -43,7 +43,6 @@ replacing OpenCode instructions, and cancelling provider interactions from BB.
 
 Open Settings → OpenCode v2 in BB.
 
-- **Status** shows each host's OpenCode version, usage source, and updates.
 - **Disable provider subagents** makes agents delegate through BB. Off by
   default.
 - **Register BB skills natively in OpenCode** adds a `plugins` entry owned by
@@ -51,6 +50,8 @@ Open Settings → OpenCode v2 in BB.
   which OpenCode installs from GitHub, and writes a per-workspace catalog. Off
   by default. Other OpenCode clients opening the same workspace see the skills;
   the host and OpenCode must be co-located.
+- **Status** shows each host's OpenCode version and updates, and the status of
+  the BB skills and usage plugins.
 
 The plugin keeps a `bb_opencode2_*` deny rule in the global OpenCode config so
 BB tools stay out of OpenCode's own sessions. OpenCode applies config changes

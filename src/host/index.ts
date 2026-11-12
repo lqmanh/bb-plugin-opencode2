@@ -176,6 +176,10 @@ export default experimental_defineHostEntry({
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
       return openCodeServer.setNativeSkillsEnabled(input.enabled);
     },
+    async "nativeSkills/status"(_input, context) {
+      openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      return openCodeServer.nativeSkillsStatus();
+    },
     async getStatus(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
       const cwd = process.cwd();

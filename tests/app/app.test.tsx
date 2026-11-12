@@ -6,6 +6,7 @@ import {
   opencodeSettingsRpcContract,
   type HostStatus,
   type OpenCodeStatus,
+  type SkillsPluginStatus,
   type UsageSourceStatus,
 } from "../../src/shared/settings-contract.ts";
 
@@ -23,13 +24,22 @@ function makeHost(
   hostName: string,
   status: Partial<OpenCodeStatus> = {},
   usage: Partial<UsageSourceStatus> = {},
+  skills: Partial<SkillsPluginStatus> = {},
 ): HostStatus {
   return {
     hostId: hostName,
     hostName,
     status: { ...baseStatus, status: "ready", ...status },
+    skills: { status: "active", version: "1.6.0", ...skills },
     usage: { status: "active", providerCount: 0, ...usage },
   };
+}
+
+function skillsHost(
+  hostName: string,
+  skills: Partial<SkillsPluginStatus>,
+): HostStatus {
+  return makeHost(hostName, {}, {}, skills);
 }
 
 async function mountSettings(
@@ -59,7 +69,6 @@ describe("OpenCode settings", () => {
           "laptop",
           { latestVersion: "2.2.8" },
           {
-            sourceType: "local",
             source: "/tmp/opencode-usage",
             providerCount: 2,
           },
@@ -71,10 +80,9 @@ describe("OpenCode settings", () => {
     expect(
       await slot.findByText(/OpenCode 2\.2\.7 · 2\.2\.8 available/),
     ).toBeTruthy();
-    expect(slot.getAllByText("Ready")).toHaveLength(2);
-    expect(
-      slot.getByText(/\/tmp\/opencode-usage · local · 2 providers/),
-    ).toBeTruthy();
+    expect(slot.getAllByText("Ready")).toHaveLength(3);
+    expect(slot.getByText("opencode-bb-skills 1.6.0")).toBeTruthy();
+    expect(slot.getByText(/\/tmp\/opencode-usage · 2 providers/)).toBeTruthy();
     expect(slot.queryByText("Active")).toBeNull();
     expect(slot.queryByText("Models")).toBeNull();
     expect(slot.queryByRole("switch")).toBeNull();
@@ -85,7 +93,7 @@ describe("OpenCode settings", () => {
     });
   });
 
-  it("uses one status vocabulary and labels unknown usage sources", async () => {
+  it("uses one status vocabulary and defaults the usage source name", async () => {
     const getStatus = vi.fn(async () => ({
       hosts: [
         makeHost("ready-host", {}, { providerCount: 2 }),
@@ -116,8 +124,8 @@ describe("OpenCode settings", () => {
       within((await slot.findByText(name)).parentElement as HTMLElement);
 
     const ready = await hostRow("ready-host");
-    expect(ready.getAllByText("Ready")).toHaveLength(2);
-    expect(ready.getByText(/Unknown · 2 providers/)).toBeTruthy();
+    expect(ready.getAllByText("Ready")).toHaveLength(3);
+    expect(ready.getByText(/opencode-usage · 2 providers/)).toBeTruthy();
     expect(ready.queryByRole("link")).toBeNull();
 
     const update = await hostRow("update-host");
@@ -136,6 +144,68 @@ describe("OpenCode settings", () => {
     const down = await hostRow("down-host");
     expect(down.getAllByText("Unavailable")).toHaveLength(2);
     expect(down.getByText("usage backend down")).toBeTruthy();
+  });
+
+  it("shows skills plugin status and detail", async () => {
+    const devHost = makeHost("skills-dev");
+    devHost.skills = { status: "active", packageSpec: "/tmp/dev-skills" };
+    const getStatus = vi.fn(async () => ({
+      hosts: [
+        skillsHost("skills-update", {
+          status: "outdated",
+          packageSpec: "github:expected#v1.6.0",
+          configuredPackage: "github:old#v1.0.0",
+        }),
+        skillsHost("skills-location", {
+          status: "outdated",
+          packageSpec: "github:expected#v1.6.0",
+          locationsDir: "/expected",
+          configuredLocationsDir: "/stale",
+        }),
+        skillsHost("skills-unconfigured", { status: "not_configured" }),
+        skillsHost("skills-missing", { status: "not_loaded" }),
+        devHost,
+        skillsHost("skills-failed", {
+          status: "failed",
+          error: "plugin failed to load",
+        }),
+      ],
+    }));
+    const slot = await mountSettings(getStatus);
+    const hostRow = async (name: string) =>
+      within((await slot.findByText(name)).parentElement as HTMLElement);
+
+    const update = await hostRow("skills-update");
+    expect(update.getByText("Update needed")).toBeTruthy();
+    expect(update.getByText("opencode-bb-skills 1.6.0")).toBeTruthy();
+    expect(
+      update.getByText(
+        "configured github:old#v1.0.0 · expected github:expected#v1.6.0",
+      ),
+    ).toBeTruthy();
+
+    const location = await hostRow("skills-location");
+    expect(location.getByText("Update needed")).toBeTruthy();
+    expect(location.getByText("opencode-bb-skills 1.6.0")).toBeTruthy();
+    expect(
+      location.getByText("locationsDir /stale · expected /expected"),
+    ).toBeTruthy();
+
+    const dev = await hostRow("skills-dev");
+    expect(dev.getByText("/tmp/dev-skills")).toBeTruthy();
+
+    const unconfigured = await hostRow("skills-unconfigured");
+    expect(unconfigured.getByText("Setup needed")).toBeTruthy();
+    expect(unconfigured.getByText("not configured")).toBeTruthy();
+
+    const missing = await hostRow("skills-missing");
+    expect(missing.getByText("Setup needed")).toBeTruthy();
+    expect(missing.getByText("not loaded")).toBeTruthy();
+
+    const failed = await hostRow("skills-failed");
+    expect(failed.getByText("Unavailable")).toBeTruthy();
+    expect(failed.getByText("opencode-bb-skills 1.6.0")).toBeTruthy();
+    expect(failed.getByText("plugin failed to load")).toBeTruthy();
   });
 
   it("registers a menu action that backgrounds active OpenCode tools", async () => {

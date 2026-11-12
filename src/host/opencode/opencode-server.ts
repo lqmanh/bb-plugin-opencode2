@@ -12,6 +12,7 @@ import { errorMessage } from "../../shared/errors.ts";
 import {
   SESSION_OPTIONS_STATE_KIND,
   type NativeSkillsStatus,
+  type SkillsPluginStatus,
 } from "../../shared/settings-contract.ts";
 import { emit } from "../bridge/bridge-runtime.ts";
 import { pluginRuntimeDir } from "../plugin-paths.ts";
@@ -30,6 +31,7 @@ import {
   type SessionState,
   type UsageTotals,
 } from "../types.ts";
+import { coldList } from "./cold-list.ts";
 import {
   agentOptionChoice,
   agentSessionOption,
@@ -37,6 +39,9 @@ import {
   type ModelCatalogEntry,
 } from "./models.ts";
 import {
+  BB_SKILLS_PLUGIN_PATH,
+  BB_SKILLS_PLUGIN_VERSION,
+  bbSkillsPluginOverride,
   bbSkillsPluginPackage,
   isBbSkillsPluginPackage,
   nativeSkillsLocationsDir,
@@ -51,6 +56,7 @@ import {
   ensureBbToolsRule,
   ensurePluginEntry,
   globalConfigPath,
+  readPluginEntry,
   removePluginEntriesFromConfig,
 } from "./opencode-config.ts";
 import {
@@ -63,6 +69,7 @@ import {
   isSupportedVersion,
   resetLatestVersionCache,
 } from "./opencode-version.ts";
+import { lookupPlugin } from "./plugin-lookup.ts";
 
 type RecordValue = OpenCodeRecord;
 
@@ -70,7 +77,6 @@ const MCP_REGISTRY_FILE = "opencode2-mcp-registry.json";
 const SESSION_REGISTRY_FILE = "opencode2-session-registry.json";
 
 const CATALOG_TTL_MS = 60_000;
-const CATALOG_COLD_RETRIES = 10;
 const CATALOG_COLD_RETRY_MS = 300;
 const SKILLS_READY_RETRIES = 3;
 const SKILLS_RELOAD_INTERVAL_MS = 30_000;
@@ -236,6 +242,57 @@ export class OpenCodeServer {
     return this.configuredSkillRealRoots;
   }
 
+  async nativeSkillsStatus(): Promise<SkillsPluginStatus> {
+    const dataDir = this.dataDir;
+    const packageSpec = bbSkillsPluginPackage();
+    const override = bbSkillsPluginOverride();
+    const base = {
+      packageSpec,
+      ...(override ? {} : { version: BB_SKILLS_PLUGIN_VERSION }),
+    };
+    if (!dataDir)
+      return {
+        status: "failed",
+        ...base,
+        error: "Host data directory is not set",
+      };
+
+    const locationsDir = nativeSkillsLocationsDir(dataDir);
+    const matchesPackage = (spec: string) =>
+      isBbSkillsPluginPackage(spec) || spec === override;
+    const entry = await readPluginEntry(globalConfigPath(), matchesPackage);
+    if (!entry) return { status: "not_configured", ...base };
+
+    if (!override) {
+      const configuredLocationsDir =
+        typeof entry.options?.locationsDir === "string"
+          ? entry.options.locationsDir
+          : undefined;
+      if (
+        entry.package !== packageSpec ||
+        configuredLocationsDir !== locationsDir
+      )
+        return {
+          status: "outdated",
+          ...base,
+          locationsDir,
+          configuredPackage: entry.package,
+          ...(configuredLocationsDir ? { configuredLocationsDir } : {}),
+        };
+    }
+
+    const lookup = await lookupPlugin(
+      () => this.api(),
+      process.cwd(),
+      BB_SKILLS_PLUGIN_PATH,
+      matchesPackage,
+    );
+    if (lookup.status === "error" || lookup.status === "failed")
+      return { status: "failed", ...base, error: lookup.error };
+    if (lookup.status === "missing") return { status: "not_loaded", ...base };
+    return { status: "active", ...base };
+  }
+
   async setNativeSkillsEnabled(enabled: boolean): Promise<NativeSkillsStatus> {
     const dataDir = this.dataDir;
     if (!dataDir) {
@@ -372,7 +429,7 @@ export class OpenCodeServer {
     // retrying ten times only delays every caller.
     let skills: NativeSkill[];
     try {
-      skills = await this.coldList(() => this.nativeSkills(cwd));
+      skills = await coldList(() => this.nativeSkills(cwd));
     } catch {
       return false;
     }
@@ -689,23 +746,6 @@ export class OpenCodeServer {
     return result;
   }
 
-  /**
-   * A location OpenCode has not loaded yet answers with an empty list for a
-   * few hundred milliseconds, so retry briefly before trusting it.
-   */
-  private async coldList<T>(load: () => Promise<T[]>): Promise<T[]> {
-    let items: T[] = [];
-    for (let attempt = 0; attempt < CATALOG_COLD_RETRIES; attempt++) {
-      if (attempt > 0)
-        await new Promise((resolve) =>
-          setTimeout(resolve, CATALOG_COLD_RETRY_MS),
-        );
-      items = await load();
-      if (items.length > 0) break;
-    }
-    return items;
-  }
-
   private modelCatalogs: CatalogCache<OpenCodeModelCatalog> = new Map();
 
   /**
@@ -724,7 +764,7 @@ export class OpenCodeServer {
       async () => {
         const api = await this.api();
         const location = { directory: cwd };
-        const models = await this.coldList(async () => {
+        const models = await coldList(async () => {
           const list = await api.model.list({ location });
           return (Array.isArray(list.data) ? list.data : [])
             .map(inputRecord)
@@ -779,7 +819,7 @@ export class OpenCodeServer {
       false,
       async () => {
         const api = await this.api();
-        const data = await this.coldList(async () => {
+        const data = await coldList(async () => {
           const list = await api.command.list({ location: { directory: cwd } });
           return Array.isArray(list.data) ? list.data : [];
         });
@@ -986,7 +1026,7 @@ export class OpenCodeServer {
    */
   async primaryAgents(cwd: string): Promise<PrimaryAgent[]> {
     const api = await this.api();
-    const data = await this.coldList(async () => {
+    const data = await coldList(async () => {
       const result = await api.agent.list({ location: { directory: cwd } });
       return Array.isArray(result.data) ? result.data : [];
     });

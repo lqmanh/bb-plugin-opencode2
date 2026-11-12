@@ -33,7 +33,6 @@ export const openCodeStatusSchema = z
 export const usageSourceStatusSchema = z
   .object({
     status: z.enum(["active", "no_accounts", "unavailable", "not_installed"]),
-    sourceType: z.enum(["package", "local", "builtin", "sdk"]).optional(),
     source: z.string().min(1).optional(),
     version: z.string().min(1).optional(),
     providerCount: z.number().int().nonnegative(),
@@ -45,10 +44,31 @@ export type UsageSourceStatus = z.infer<typeof usageSourceStatusSchema>;
 
 export function unavailableUsageStatus(
   error: string,
-  metadata: Pick<UsageSourceStatus, "sourceType" | "source" | "version"> = {},
+  metadata: Pick<UsageSourceStatus, "source" | "version"> = {},
 ): UsageSourceStatus {
   return { status: "unavailable", ...metadata, providerCount: 0, error };
 }
+
+export const skillsPluginStatusSchema = z
+  .object({
+    status: z.enum([
+      "off",
+      "not_configured",
+      "outdated",
+      "failed",
+      "not_loaded",
+      "active",
+    ]),
+    packageSpec: z.string().min(1).optional(),
+    version: z.string().min(1).optional(),
+    configuredPackage: z.string().min(1).optional(),
+    locationsDir: z.string().min(1).optional(),
+    configuredLocationsDir: z.string().min(1).optional(),
+    error: z.string().optional(),
+  })
+  .strict();
+
+export type SkillsPluginStatus = z.infer<typeof skillsPluginStatusSchema>;
 
 export const hostStatusSchema = z
   .object({
@@ -56,6 +76,7 @@ export const hostStatusSchema = z
     hostName: z.string(),
     status: openCodeStatusSchema.optional(),
     error: z.string().optional(),
+    skills: skillsPluginStatusSchema,
     usage: usageSourceStatusSchema,
   })
   .strict();
@@ -143,6 +164,10 @@ export const opencodeHostContract = defineRpcContract({
   "nativeSkills/configure": {
     input: z.object({ enabled: z.boolean() }).strict(),
     output: nativeSkillsConfigureResultSchema,
+  },
+  "nativeSkills/status": {
+    input: z.object({}).strict(),
+    output: skillsPluginStatusSchema,
   },
   backgroundSession: {
     input: backgroundThreadRequestSchema,

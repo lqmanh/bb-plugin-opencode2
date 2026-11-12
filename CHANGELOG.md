@@ -5,10 +5,16 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A BB skills plugin status row in Settings.
+
 ### Changed
 
 - Requires OpenCode 2.2.7 or newer.
 - Background tasks reconcile each task through `shell.get` and `session.get`.
+- Settings detects the `opencode-usage` plugin by ID; other implementations of
+  its RPC still supply Provider usage but show as Not installed in Settings.
 
 ### Fixed
 
@@ -16,6 +22,8 @@ All notable changes to this plugin are documented here. The format follows
   installed, list no agents, or report native skills as not ready.
 - `agent.updated` now refreshes the Agent option.
 - A failed usage plugin now reports its error.
+- A failed update of the usage plugin no longer hides its working version in
+  Settings.
 
 ## [1.6.0] - 2026-11-05
 

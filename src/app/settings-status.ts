@@ -1,5 +1,6 @@
 import type {
   OpenCodeStatus,
+  SkillsPluginStatus,
   UsageSourceStatus,
 } from "../shared/settings-contract.ts";
 
@@ -27,6 +28,15 @@ const OPEN_CODE_STATUS: Record<OpenCodeStatus["status"], ComponentStatus> = {
   unknown: "unavailable",
 };
 
+const SKILLS_STATUS: Record<SkillsPluginStatus["status"], ComponentStatus> = {
+  active: "ready",
+  off: "off",
+  not_configured: "setup_needed",
+  not_loaded: "setup_needed",
+  outdated: "update_needed",
+  failed: "unavailable",
+};
+
 const USAGE_SOURCE_STATUS: Record<
   UsageSourceStatus["status"],
   ComponentStatus
@@ -51,4 +61,10 @@ export function usageStatusDisplay(
   status: UsageSourceStatus["status"],
 ): StatusDisplay {
   return statusDisplay(USAGE_SOURCE_STATUS[status]);
+}
+
+export function skillsStatusDisplay(
+  status: SkillsPluginStatus["status"],
+): StatusDisplay {
+  return statusDisplay(SKILLS_STATUS[status]);
 }

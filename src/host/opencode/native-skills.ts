@@ -13,6 +13,7 @@ import {
 import { join, resolve } from "node:path";
 import { pluginRuntimeDir } from "../plugin-paths.ts";
 import { writeJsonFileAtomic } from "../session/persistence.ts";
+import { isPluginDirSpec } from "./plugin-lookup.ts";
 
 /**
  * Pinned `opencode-bb-skills` version (tag `v<version>`), independent of this
@@ -70,20 +71,20 @@ export function pathUnderRoots(
  * `BB_OPENCODE_BB_SKILLS_PACKAGE` overrides it for development.
  */
 export function bbSkillsPluginPackage(env = process.env): string {
-  const override = env.BB_OPENCODE_BB_SKILLS_PACKAGE?.trim();
-  if (override) return override;
-  return `${BB_SKILLS_REPOSITORY}#v${BB_SKILLS_PLUGIN_VERSION}::path:${BB_SKILLS_PLUGIN_PATH}`;
+  return (
+    bbSkillsPluginOverride(env) ??
+    `${BB_SKILLS_REPOSITORY}#v${BB_SKILLS_PLUGIN_VERSION}::path:${BB_SKILLS_PLUGIN_PATH}`
+  );
+}
+
+export function bbSkillsPluginOverride(env = process.env): string | undefined {
+  return env.BB_OPENCODE_BB_SKILLS_PACKAGE?.trim() || undefined;
 }
 
 /** Whether a configured package spec is `opencode-bb-skills`. */
 export function isBbSkillsPluginPackage(packageSpec: string): boolean {
+  if (isPluginDirSpec(packageSpec, BB_SKILLS_PLUGIN_PATH)) return true;
   const spec = packageSpec.trim().replaceAll("\\", "/");
-  const local = spec.replace(/\/+$/u, "");
-  if (
-    local === BB_SKILLS_PLUGIN_PATH ||
-    local.endsWith(`/${BB_SKILLS_PLUGIN_PATH}`)
-  )
-    return true;
   const pathMarker = `::path:${BB_SKILLS_PLUGIN_PATH}`;
   const markerIndex = spec.indexOf(pathMarker);
   if (markerIndex < 0) return false;

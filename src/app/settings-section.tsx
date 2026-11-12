@@ -12,10 +12,12 @@ import {
   opencodeSettingsRpcContract,
   type HostStatus,
   type OpenCodeStatus,
+  type SkillsPluginStatus,
   type UsageSourceStatus,
 } from "../shared/settings-contract.ts";
 import {
   openCodeStatusDisplay,
+  skillsStatusDisplay,
   usageStatusDisplay,
   type StatusTone,
 } from "./settings-status.ts";
@@ -67,33 +69,24 @@ function StatusRow({
   detail,
   tone,
   label,
+  note,
 }: {
   detail: ReactNode;
   tone: StatusTone;
   label: string;
+  note?: string;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="min-w-0 text-sm text-muted-foreground">{detail}</div>
-      <StatusBadge tone={tone} label={label} />
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 text-sm text-muted-foreground">{detail}</div>
+        <StatusBadge tone={tone} label={label} />
+      </div>
+      {note ? (
+        <div className="text-xs text-muted-foreground">{note}</div>
+      ) : null}
     </div>
   );
-}
-
-function usageSourceText(usage: UsageSourceStatus) {
-  switch (usage.sourceType) {
-    case "package":
-    case undefined:
-      return usage.source
-        ? `${usage.source}${usage.version ? ` ${usage.version}` : ""}`
-        : "Unknown";
-    case "local":
-      return usage.source ? `${usage.source} · local` : "Unknown";
-    case "builtin":
-      return "Built-in";
-    case "sdk":
-      return "SDK";
-  }
 }
 
 function usageSourceLabel(usage: UsageSourceStatus) {
@@ -113,17 +106,48 @@ function usageSourceLabel(usage: UsageSourceStatus) {
     usage.providerCount > 0
       ? ` · ${usage.providerCount} ${usage.providerCount === 1 ? "provider" : "providers"}`
       : "";
+  const source = usage.source
+    ? `${usage.source}${usage.version ? ` ${usage.version}` : ""}`
+    : "opencode-usage";
   return (
     <span>
-      {usageSourceText(usage)}
+      {source}
       {count}
     </span>
   );
 }
 
+function skillsName(skills: SkillsPluginStatus) {
+  return skills.version
+    ? `opencode-bb-skills ${skills.version}`
+    : (skills.packageSpec ?? "opencode-bb-skills");
+}
+
+function skillsNote(skills: SkillsPluginStatus) {
+  switch (skills.status) {
+    case "not_configured":
+      return "not configured";
+    case "not_loaded":
+      return "not loaded";
+    case "outdated": {
+      if (
+        skills.configuredPackage &&
+        skills.configuredPackage !== skills.packageSpec
+      )
+        return `configured ${skills.configuredPackage} · expected ${skills.packageSpec}`;
+      return `locationsDir ${skills.configuredLocationsDir ?? "not set"} · expected ${skills.locationsDir ?? "not set"}`;
+    }
+    case "failed":
+      return skills.error ?? "failed";
+    default:
+      return undefined;
+  }
+}
+
 function HostStatusRow({ host }: { host: HostStatus }) {
   const status = host.status;
   const openCodeDisplay = openCodeStatusDisplay(status?.status);
+  const skillsDisplay = skillsStatusDisplay(host.skills.status);
   const usageDisplay = usageStatusDisplay(host.usage.status);
   return (
     <div className="flex flex-col gap-1.5">
@@ -134,13 +158,17 @@ function HostStatusRow({ host }: { host: HostStatus }) {
         label={openCodeDisplay.label}
       />
       <StatusRow
-        detail={<>Usage source: {usageSourceLabel(host.usage)}</>}
+        detail={skillsName(host.skills)}
+        tone={skillsDisplay.tone}
+        label={skillsDisplay.label}
+        note={skillsNote(host.skills)}
+      />
+      <StatusRow
+        detail={usageSourceLabel(host.usage)}
         tone={usageDisplay.tone}
         label={usageDisplay.label}
+        note={host.usage.error}
       />
-      {host.usage.error ? (
-        <div className="text-xs text-muted-foreground">{host.usage.error}</div>
-      ) : null}
     </div>
   );
 }

@@ -91,6 +91,17 @@ function matchingPluginEntries(array: Node, matches: PluginMatcher) {
   });
 }
 
+/** Read the first matching plugin entry without writing the config. */
+export async function readPluginEntry(
+  path: string,
+  matches: PluginMatcher,
+): Promise<PluginEntry | undefined> {
+  const { text } = await readConfig(path);
+  const plugins = requiredArray(parseDocument(text), "plugins");
+  if (!plugins) return undefined;
+  return matchingPluginEntries(plugins, matches)[0]?.value;
+}
+
 function samePluginEntry(left: PluginEntry, right: PluginEntry): boolean {
   return (
     left.package === right.package &&

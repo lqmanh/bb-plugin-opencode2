@@ -1,4 +1,3 @@
-import type { OpenCodeClient } from "@opencode/client";
 import type { ProviderUsageResult } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
 import {
@@ -12,6 +11,7 @@ import {
 } from "../../shared/settings-contract.ts";
 import { errorMessage } from "../../shared/errors.ts";
 import type { OpenCodeApi } from "../types.ts";
+import { isPluginDirSpec, lookupPlugin } from "./plugin-lookup.ts";
 
 const USAGE_RPC_ID = "opencode-usage";
 // OpenCode answers an unregistered RPC ID with RpcError type "rpc.unavailable".
@@ -36,64 +36,11 @@ const usageRpcGetSchema = z
   })
   .strict();
 
-type PluginInfo = Awaited<
-  ReturnType<OpenCodeClient["plugin"]["list"]>
->["data"][number];
-
-type UsagePluginMetadata = {
-  sourceType: "package" | "local" | "builtin" | "sdk";
-  source?: string;
-  version?: string;
-};
-
-type UsagePluginLookup =
-  | { status: "found"; metadata: UsagePluginMetadata }
-  | { status: "missing" }
-  | { status: "failed"; metadata: UsagePluginMetadata; error: string }
-  | { status: "unconfirmed" };
-
-function pluginMetadata(plugin: PluginInfo): UsagePluginMetadata {
-  switch (plugin.source.type) {
-    case "package":
-      return {
-        sourceType: "package",
-        source: plugin.source.target,
-        ...(plugin.source.version ? { version: plugin.source.version } : {}),
-      };
-    case "local":
-      return { sourceType: "local", source: plugin.source.path };
-    case "builtin":
-      return { sourceType: "builtin" };
-    case "sdk":
-      return { sourceType: "sdk" };
-  }
-}
-
-function isUsagePlugin(plugin: PluginInfo): boolean {
-  if (plugin.id === USAGE_RPC_ID) return true;
-  if (plugin.source.type !== "package") return false;
+function isUsagePluginSpec(spec: string): boolean {
+  const value = spec.trim();
   return (
-    plugin.source.target === USAGE_RPC_ID ||
-    plugin.source.target.startsWith(`${USAGE_RPC_ID}@`)
+    value.startsWith(`${USAGE_RPC_ID}@`) || isPluginDirSpec(value, USAGE_RPC_ID)
   );
-}
-
-async function lookupUsagePlugin(
-  api: OpenCodeApi,
-  cwd: string,
-): Promise<UsagePluginLookup> {
-  try {
-    const client = await api();
-    const listed = await client.plugin.list({ location: { directory: cwd } });
-    const selected = listed.data.find(isUsagePlugin);
-    if (!selected) return { status: "missing" };
-    const metadata = pluginMetadata(selected);
-    return selected.state.status === "failed"
-      ? { status: "failed", metadata, error: selected.state.error }
-      : { status: "found", metadata };
-  } catch {
-    return { status: "unconfirmed" };
-  }
 }
 
 async function callUsageRpc(
@@ -113,8 +60,7 @@ async function callUsageRpc(
 }
 
 type UsageFetch<T> =
-  | { ok: true; providers: T[] }
-  | { ok: false; error: string; errorType?: string };
+  { ok: true; providers: T[] } | { ok: false; error: string };
 
 const usageRetrySuppressedUntil = new Map<string, number>();
 
@@ -158,7 +104,6 @@ async function fetchUsage<T>(
       return {
         ok: false,
         error: `opencode-usage.${method} failed: ${errorMessage(error)}`,
-        errorType,
       };
     }
   }
@@ -195,40 +140,24 @@ export async function listProviderUsage(
     : unavailableUsageList(result.error);
 }
 
-function usageContractMissing(
-  errorType: string | undefined,
-  lookup: UsagePluginLookup,
-): boolean {
-  return errorType === RPC_NOT_REGISTERED && lookup.status === "missing";
-}
-
 export async function usageSourceStatus(
   api: OpenCodeApi,
   cwd = process.cwd(),
 ): Promise<UsageSourceStatus> {
-  // Look up the plugin first: a listed-but-failed plugin aborts before the RPC,
-  // and a cold plugin list is what makes the first RPC unavailable.
-  const lookup = await lookupUsagePlugin(api, cwd);
+  const lookup = await lookupPlugin(api, cwd, USAGE_RPC_ID, isUsagePluginSpec);
+  if (lookup.status === "missing")
+    return { status: "not_installed", providerCount: 0 };
+  if (lookup.status === "error") return unavailableUsageStatus(lookup.error);
   if (lookup.status === "failed")
     return unavailableUsageStatus(lookup.error, lookup.metadata);
 
   const listed = await fetchUsageList(api, cwd);
-  if (!listed.ok)
-    return usageContractMissing(listed.errorType, lookup)
-      ? { status: "not_installed", providerCount: 0 }
-      : unavailableUsageStatus(
-          listed.error,
-          lookup.status === "found" ? lookup.metadata : {},
-        );
+  if (!listed.ok) return unavailableUsageStatus(listed.error, lookup.metadata);
 
-  // A cold plugin list can miss the plugin that answers the RPC; refresh the
-  // metadata after success instead of leaving the source as Unknown.
-  const found =
-    lookup.status === "found" ? lookup : await lookupUsagePlugin(api, cwd);
   const providerCount = listed.providers.length;
   return {
     status: providerCount > 0 ? "active" : "no_accounts",
-    ...(found.status === "found" ? found.metadata : {}),
+    ...lookup.metadata,
     providerCount,
   };
 }

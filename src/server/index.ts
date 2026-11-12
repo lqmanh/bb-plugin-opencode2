@@ -89,21 +89,32 @@ export default function plugin(bb: BbPluginApi) {
   });
 
   async function getStatus() {
-    const hosts = (await bb.sdk.hosts.list()).filter(
-      (item) => item.status === "connected",
-    );
+    const [hostList, config] = await Promise.all([
+      bb.sdk.hosts.list(),
+      settings.get(),
+    ]);
+    const hosts = hostList.filter((item) => item.status === "connected");
+    const nativeSkills = config.nativeSkills === true;
     const results = await Promise.all(
       hosts.map(async (item): Promise<HostStatus> => {
-        const [opencodeStatus, usageStatus] = await Promise.allSettled([
-          host.call("getStatus", {}, { hostId: item.id }),
-          host.call("usage/status", {}, { hostId: item.id }),
-        ]);
+        const [opencodeStatus, usageStatus, skillsStatus] =
+          await Promise.allSettled([
+            host.call("getStatus", {}, { hostId: item.id }),
+            host.call("usage/status", {}, { hostId: item.id }),
+            nativeSkills
+              ? host.call("nativeSkills/status", {}, { hostId: item.id })
+              : Promise.resolve({ status: "off" as const }),
+          ]);
         return {
           hostId: item.id,
           hostName: item.name,
           ...(opencodeStatus.status === "fulfilled"
             ? { status: opencodeStatus.value }
             : { error: errorMessage(opencodeStatus.reason) }),
+          skills:
+            skillsStatus.status === "fulfilled"
+              ? skillsStatus.value
+              : { status: "failed", error: errorMessage(skillsStatus.reason) },
           usage:
             usageStatus.status === "fulfilled"
               ? usageStatus.value

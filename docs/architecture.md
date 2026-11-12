@@ -57,10 +57,10 @@ docs/           Developer documentation
 
 ## Design decisions
 
-- **Settings status rows are host-global and contract-first.** They are
-  read-only and describe each configured host without selecting a workspace,
-  reading catalogs, or calling `skill.list`. Usage health comes from the
-  `opencode-usage` RPC contract; `plugin.list` only supplies display metadata.
+- **Settings status rows are read-only and checked per host.** They describe
+  each configured host without selecting a workspace, reading catalogs, or
+  calling `skill.list`. The status of the BB skills and usage plugins comes from
+  `plugin.list`; usage data comes from the `opencode-usage` RPC.
 - **Native skills use a standalone OpenCode plugin.** `opencode-bb-skills` is
   pinned to its own version (`BB_SKILLS_PLUGIN_VERSION`), not this plugin's. It
   reads a per-workspace catalog under this plugin's data root, shared by the

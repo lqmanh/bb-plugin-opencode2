@@ -8,7 +8,11 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import { createFakeOpenCodeClient } from "../support/opencode-client.fixture.ts";
 import plugin from "../../src/server/index.ts";
-import { immediate } from "../support/async.ts";
+import {
+  drainRetries,
+  retryWithMockTimers,
+  withMockTimers,
+} from "../support/async.ts";
 import {
   aggregateUsageSnapshots,
   getProviderUsage,
@@ -52,6 +56,15 @@ const usagePlugin = {
   source: { type: "package", target: "opencode-usage", version: "1.2.3" },
   features: { rpc: true },
   state: { status: "active" },
+};
+
+const readyStatus = {
+  status: "ready" as const,
+  statusMessage: null,
+  installedVersion: "2.2.7",
+  latestVersion: "2.2.7",
+  minimumSupportedVersion: "2.2.7",
+  loginCommand: "opencode2 auth login",
 };
 
 const rpcNotRegistered = {
@@ -104,34 +117,6 @@ function fakeApi(options: FakeApiOptions): {
 
 function sourceStatus(options: FakeApiOptions, cwd = "/repo") {
   return usageSourceStatus(fakeApi(options).api, cwd);
-}
-
-/** Run a call through its retry delays under fake timers. */
-async function drainRetries<T>(pending: Promise<T>): Promise<T> {
-  let settled = false;
-  const done = () => {
-    settled = true;
-  };
-  pending.then(done, done);
-  for (let attempt = 0; attempt < 50; attempt++) {
-    await immediate();
-    if (settled) break;
-    mock.timers.tick(1_000);
-  }
-  return pending;
-}
-
-async function withMockTimers<T>(run: () => Promise<T>): Promise<T> {
-  mock.timers.enable({ apis: ["setTimeout", "Date"] });
-  try {
-    return await run();
-  } finally {
-    mock.timers.reset();
-  }
-}
-
-function retryWithMockTimers<T>(run: () => Promise<T>): Promise<T> {
-  return withMockTimers(() => drainRetries(run()));
 }
 
 function snapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
@@ -190,7 +175,6 @@ test("reports the opencode-usage source status", async () => {
   const active = fakeApi({ plugins: [usagePlugin], output: { providers } });
   assert.deepEqual(await usageSourceStatus(active.api, cwd), {
     status: "active",
-    sourceType: "package",
     source: "opencode-usage",
     version: "1.2.3",
     providerCount: 2,
@@ -204,7 +188,6 @@ test("reports the opencode-usage source status", async () => {
     ),
     {
       status: "no_accounts",
-      sourceType: "package",
       source: "opencode-usage",
       version: "1.2.3",
       providerCount: 0,
@@ -216,8 +199,9 @@ test("reports the opencode-usage source status", async () => {
       {
         plugins: [
           {
-            ...usagePlugin,
             source: { type: "local", path: "/tmp/opencode-usage" },
+            features: { server: true },
+            state: { status: "active" },
           },
         ],
         output: { providers },
@@ -226,75 +210,98 @@ test("reports the opencode-usage source status", async () => {
     ),
     {
       status: "active",
-      sourceType: "local",
       source: "/tmp/opencode-usage",
       providerCount: 2,
     },
   );
+});
 
-  assert.deepEqual(
-    await retryWithMockTimers(() =>
-      sourceStatus({ rpcError: rpcNotRegistered }, cwd),
-    ),
-    {
+test("reports not installed when the usage plugin is missing", () =>
+  retryWithMockTimers(async () => {
+    const api = fakeApi({ output: { providers } });
+    assert.deepEqual(await usageSourceStatus(api.api, "/usage-missing"), {
       status: "not_installed",
       providerCount: 0,
-    },
-  );
+    });
+    assert.ok(api.pluginCalls.length > 1);
+    assert.equal(api.rpcCalls.length, 0);
+  }));
 
-  const failed = await sourceStatus(
-    {
-      plugins: [usagePlugin],
-      rpcError: { type: "internal", message: "quota backend down" },
-    },
-    cwd,
-  );
-  assert.partialDeepStrictEqual(failed, {
-    status: "unavailable",
-    sourceType: "package",
-    version: "1.2.3",
-    providerCount: 0,
+test("shows not installed for a different plugin ID while provider usage works", () =>
+  retryWithMockTimers(async () => {
+    const plugins = [
+      {
+        id: "custom-usage",
+        source: { type: "local", path: "/tmp/custom-usage" },
+        features: { server: true },
+        state: { status: "active" },
+      },
+    ];
+    const settings = fakeApi({ plugins, output: { providers } });
+    assert.deepEqual(await usageSourceStatus(settings.api, "/usage-custom"), {
+      status: "not_installed",
+      providerCount: 0,
+    });
+    assert.equal(settings.rpcCalls.length, 0);
+
+    const provider = fakeApi({ plugins, output: { providers } });
+    assert.deepEqual(await listProviderUsage(provider.api, "/usage-custom"), {
+      available: true,
+      providers,
+    });
+  }));
+
+test("retries a cold plugin list until the usage plugin appears", async () => {
+  const api = fakeApi({
+    plugins: (call) => (call === 0 ? [] : [usagePlugin]),
+    output: { providers },
   });
-  assert.match(failed.error ?? "", /quota backend down/);
-});
-
-test("reports a custom usage implementation without plugin metadata", async () => {
-  assert.deepEqual(await sourceStatus({ output: { providers } }), {
-    status: "active",
-    providerCount: 2,
-  });
-
-  const failed = await sourceStatus({
-    rpcError: { type: "internal", message: "custom usage failed" },
-  });
-  assert.equal(failed.status, "unavailable");
-});
-
-test("treats a listed opencode-usage plugin as installed when its RPC fails", async () => {
   assert.partialDeepStrictEqual(
     await retryWithMockTimers(() =>
-      sourceStatus(
-        { plugins: [usagePlugin], rpcError: rpcNotRegistered },
-        "/usage-listed",
-      ),
+      usageSourceStatus(api.api, "/usage-cold-plugin"),
     ),
-    {
-      status: "unavailable",
-      sourceType: "package",
-      version: "1.2.3",
-    },
+    { status: "active", providerCount: 2 },
   );
+  assert.equal(api.pluginCalls.length, 2);
+  assert.equal(api.rpcCalls.length, 1);
+});
+
+test("does not retry a failed plugin list", async () => {
+  const pluginError = new Error("plugin list failed");
+  const api = fakeApi({ pluginError });
+  assert.partialDeepStrictEqual(
+    await usageSourceStatus(api.api, "/usage-plugin-error"),
+    { status: "unavailable", error: "plugin list failed" },
+  );
+  assert.equal(api.pluginCalls.length, 1);
+  assert.equal(api.rpcCalls.length, 0);
+});
+
+test("matches id-less failed entries by source and prefers active", async () => {
+  const failed = {
+    source: { type: "package", target: "opencode-usage@0.5.14" },
+    features: { rpc: true },
+    state: { status: "failed", error: "usage plugin crashed" },
+  };
+  const active = fakeApi({
+    plugins: [failed, usagePlugin],
+    output: { providers },
+  });
+  assert.partialDeepStrictEqual(
+    await usageSourceStatus(active.api, "/usage-active-wins"),
+    { status: "active", providerCount: 2 },
+  );
+
+  const failedOnly = fakeApi({ plugins: [failed] });
+  assert.partialDeepStrictEqual(
+    await usageSourceStatus(failedOnly.api, "/usage-failed"),
+    { status: "unavailable", error: "usage plugin crashed" },
+  );
+  assert.equal(failedOnly.rpcCalls.length, 0);
 });
 
 test("does not retry invalid payloads or untyped failures", async () => {
-  const plugins = [
-    {
-      id: "custom-usage",
-      source: { type: "local", path: "/tmp/custom-usage" },
-      features: { server: true },
-      state: { status: "active" },
-    },
-  ];
+  const plugins = [usagePlugin];
 
   const invalidApi = fakeApi({ plugins, output: { invalid: true } });
   const invalid = await usageSourceStatus(invalidApi.api, "/usage-no-retry");
@@ -312,71 +319,30 @@ test("does not retry invalid payloads or untyped failures", async () => {
   assert.equal(untypedApi.rpcCalls.length, 1);
 });
 
-test("retries a cold rpc.unavailable after refreshing plugin metadata", async (t) => {
-  const scenarios = [
-    {
-      name: "empty plugin list",
-      api: () =>
-        fakeApi({
-          plugins: (call) => (call === 0 ? [] : [usagePlugin]),
-          output: { providers },
-          rpcError: (call: number) =>
-            call === 0 ? rpcNotRegistered : undefined,
-        }),
-    },
-    {
-      name: "failed plugin lookup",
-      api: () =>
-        fakeApi({
-          pluginError: new Error("plugin list failed"),
-          output: { providers },
-          rpcError: (call: number) =>
-            call === 0 ? rpcNotRegistered : undefined,
-        }),
-    },
-  ];
-
-  for (const scenario of scenarios) {
-    await t.test(scenario.name, async () => {
-      const api = scenario.api();
-      assert.partialDeepStrictEqual(
-        await retryWithMockTimers(() =>
-          usageSourceStatus(api.api, `/cold-${scenario.name}`),
-        ),
-        { status: "active", providerCount: 2 },
-      );
-      assert.equal(api.rpcCalls.length, 2);
-    });
-  }
-});
-
-test("stops on a listed usage plugin that failed", async () => {
+test("retries a cold rpc.unavailable for provider usage", async () => {
   const api = fakeApi({
-    plugins: [
-      {
-        ...usagePlugin,
-        state: { status: "failed", error: "usage plugin crashed" },
-      },
-    ],
-    rpcError: rpcNotRegistered,
+    output: { providers },
+    rpcError: (call: number) => (call === 0 ? rpcNotRegistered : undefined),
   });
-
-  assert.partialDeepStrictEqual(await usageSourceStatus(api.api, "/failed"), {
-    status: "unavailable",
-    error: "usage plugin crashed",
-  });
-  assert.equal(api.rpcCalls.length, 0);
+  assert.deepEqual(
+    await retryWithMockTimers(() =>
+      listProviderUsage(api.api, "/usage-rpc-cold"),
+    ),
+    { available: true, providers },
+  );
+  assert.equal(api.rpcCalls.length, 2);
 });
 
 test("suppresses retries per cwd for 5 minutes", () =>
   withMockTimers(async () => {
     const cwd = "/usage-retry-cache";
-    const settings = fakeApi({ plugins: [], rpcError: rpcNotRegistered });
-    assert.deepEqual(await drainRetries(usageSourceStatus(settings.api, cwd)), {
-      status: "not_installed",
-      providerCount: 0,
+    const first = fakeApi({ rpcError: rpcNotRegistered });
+    assert.deepEqual(await drainRetries(listProviderUsage(first.api, cwd)), {
+      available: false,
+      providers: [],
+      error: "opencode-usage.list failed: RPC is unavailable: opencode-usage",
     });
-    assert.ok(settings.rpcCalls.length > 1);
+    assert.ok(first.rpcCalls.length > 1);
 
     // The bridge usage path shares the suppression.
     const bridge = fakeApi({ rpcError: rpcNotRegistered });
@@ -395,6 +361,45 @@ test("suppresses retries per cwd for 5 minutes", () =>
     );
     assert.ok(refreshed.rpcCalls.length > 1);
   }));
+
+test("loads the skills plugin status when native skills is enabled", async () => {
+  const skills = {
+    status: "active" as const,
+    packageSpec:
+      "github:lqmanh/bb-plugin-opencode2#v1.6.0::path:opencode-bb-skills",
+    version: "1.6.0",
+    locationsDir:
+      "/data/plugins/opencode2/runtime/opencode-bb-skills/locations",
+  };
+  const usage = { status: "not_installed" as const, providerCount: 0 };
+  const { harness, hostCalls } = await loadProviderWithSkills(skills);
+
+  assert.deepEqual(await harness.callRpc("getStatus", {}), {
+    hosts: [
+      {
+        hostId: "host_1",
+        hostName: "Host One",
+        status: readyStatus,
+        skills,
+        usage,
+      },
+    ],
+  });
+  assert.ok(hostCalls.some((call) => call.method === "nativeSkills/status"));
+});
+
+test("reports a rejected skills status call", async () => {
+  const { harness } = await loadProviderWithSkills(
+    new Error("skills host failed"),
+  );
+  const result = (await harness.callRpc("getStatus", {})) as {
+    hosts: Array<{ skills: unknown }>;
+  };
+  assert.deepEqual(result.hosts[0]?.skills, {
+    status: "failed",
+    error: "skills host failed",
+  });
+});
 
 test("gets one snapshot, propagates bypassCache, and rejects unusable responses", async () => {
   const get = fakeApi({ output: { providers: [snapshot()] } });
@@ -631,10 +636,12 @@ test("maps snapshots to source usage windows and errors", () => {
 
 async function loadProvider(
   respond: (call: ExperimentalFakeHostRpcCall) => unknown,
+  settings: Record<string, boolean> = {},
 ) {
   const hostCalls: ExperimentalFakeHostRpcCall[] = [];
   const fake = createFakePluginHost({
     pluginId: "opencode2",
+    settings,
     experimental_callHostRpc: async (call) => {
       hostCalls.push(call);
       return respond(call);
@@ -647,18 +654,28 @@ async function loadProvider(
   return { harness: fake.harness, hostCalls };
 }
 
+async function loadProviderWithSkills(skills: unknown) {
+  return loadProvider(
+    (call) => {
+      switch (call.method) {
+        case "getStatus":
+          return readyStatus;
+        case "usage/status":
+          return { status: "not_installed", providerCount: 0 };
+        case "nativeSkills/status":
+          if (skills instanceof Error) throw skills;
+          return skills;
+        default:
+          assert.fail(`Unexpected method ${call.method}`);
+      }
+    },
+    { nativeSkills: true },
+  );
+}
+
 test("serves usage through the registered RPCs", async () => {
-  const status = {
-    status: "ready" as const,
-    statusMessage: null,
-    installedVersion: "2.2.7",
-    latestVersion: "2.2.7",
-    minimumSupportedVersion: "2.2.7",
-    loginCommand: "opencode2 auth login",
-  };
   const usage = {
     status: "active" as const,
-    sourceType: "package" as const,
     source: "opencode-usage",
     version: "0.4.0",
     providerCount: 2,
@@ -671,7 +688,7 @@ test("serves usage through the registered RPCs", async () => {
       case "usage/get":
         return snapshot();
       case "getStatus":
-        return status;
+        return readyStatus;
       case "usage/status":
         return usage;
       default:
@@ -747,11 +764,16 @@ test("serves usage through the registered RPCs", async () => {
       {
         hostId: "host_1",
         hostName: "Host One",
-        status,
+        status: readyStatus,
+        skills: { status: "off" },
         usage,
       },
     ],
   });
+  assert.equal(
+    hostCalls.some((call) => call.method === "nativeSkills/status"),
+    false,
+  );
 
   const unavailable = await loadProvider(() => ({
     available: false,

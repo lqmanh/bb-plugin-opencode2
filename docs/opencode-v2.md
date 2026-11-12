@@ -115,19 +115,17 @@ meter stay parent-only. Child usage survives the turn and is rebuilt
 monotonically after reconnect or resume. A background subagent's task row
 carries `usage` only when the child has recorded usage; it is omitted otherwise.
 
-Settings reports the usage source through the `opencode-usage` RPC contract, not
-the plugin package. Any implementation with `list`/`get` works; `opencode-usage`
-is only the default. Status comes from the contract, while `plugin.list`
-supplies display metadata. A working implementation with no metadata shows an
-unknown source. A listed usage plugin whose state is `failed` reports
-Unavailable with that plugin's error. A cold `rpc.unavailable` is retried for
-about 1.5s before classification; after a failed round, later calls skip retries
-for 5 minutes, or until a successful call clears it. The `opencode-usage`
-install link appears only when the contract is missing: `rpc.unavailable` and a
-successful `plugin.list` with no usage plugin. `rpc.unavailable` alone is not
-enough because it also covers a closing RPC service. Every other failure reports
-Unavailable. `features.rpc` is not used because it marks a package's `./rpc`
-entrypoint, not a registered RPC. These checks are host-global and read-only.
+Settings reports the usage source via a `plugin.list` lookup for
+`opencode-usage`. The lookup matches the plugin ID first, then the source for
+entries without an ID; an active entry wins over a failed one. A missing plugin
+shows Not installed with the install link, and Settings makes no RPC call. A
+failed plugin or a failed `plugin.list` shows Unavailable with the error. For a
+found plugin, Settings calls `opencode-usage/list` and shows Ready, Setup needed
+(no accounts), or Unavailable. Usage fetching calls the RPC directly and retries
+a cold `rpc.unavailable`; after a failed retry round, later calls skip retries
+for 5 minutes or until one succeeds. An implementation with a different ID
+serves Provider usage but shows Not installed in Settings. These checks are
+read-only.
 
 ## Archive and lifecycle
 
@@ -156,8 +154,8 @@ version. BB keeps its own caches and updates them on its own schedule.
 ## Cold locations
 
 Since 2.2.7, OpenCode does not wait for plugins in request handlers. A cold
-location can briefly return empty `agent.list` and `skill.list` results; those
-reads are retried.
+location can briefly return empty `agent.list` and `skill.list` results and
+leave plugins out of `plugin.list`; those reads are retried.
 
 ## Native skills plugin
 
@@ -199,6 +197,17 @@ Limits:
 - For local development, set `BB_OPENCODE_BB_SKILLS_PACKAGE` to a local path or
   a branch spec such as
   `github:lqmanh/bb-plugin-opencode2#main::path:opencode-bb-skills`.
+
+Settings reads this config entry and looks the plugin up in `plugin.list`, with
+the same matching and cold retry as the usage source. It shows:
+
+- Off when the setting is off;
+- Setup needed when the config entry is missing or the plugin is not loaded;
+- Update needed when the pinned package or `locationsDir` differs;
+- Unavailable when the plugin or `plugin.list` failed;
+- Ready when the plugin is active.
+
+A development override never shows Update needed. These checks are read-only.
 
 If the skills plugin or a skill file is missing, the config is read-only, or a
 catalog is invalid, this plugin attaches the skill's `SKILL.md` instead.
