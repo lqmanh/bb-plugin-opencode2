@@ -13,8 +13,6 @@ its own tool execution; BB provides the thread, timeline, and UI.
 
 ## Install
 
-From the BB plugin store, or:
-
 ```sh
 bb plugin install git:https://github.com/lqmanh/bb-plugin-opencode2.git
 ```
@@ -30,14 +28,12 @@ bb plugin install git:https://github.com/lqmanh/bb-plugin-opencode2.git
   Mode; `bb` on `PATH` in shells.
 - **Skills:** OpenCode's skills in BB's `/` menu, plus opt-in native BB skills
   through [`opencode-bb-skills`](opencode-bb-skills/).
+- **References:** OpenCode references in the composer's `@` menu.
 - **Timeline and usage:** reads, searches, commands, diffs, background tasks,
   session usage, and provider usage from
   [opencode-usage](https://github.com/lqmanh/opencode-usage).
 - **Recovery:** reconnects settle turns from OpenCode's state; external archive,
   deletion, or moves produce a clear error.
-
-Not supported: thread goals, service tiers, per-prompt native tool filtering,
-replacing OpenCode instructions, and cancelling provider interactions from BB.
 
 ## Settings
 

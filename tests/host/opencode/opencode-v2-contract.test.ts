@@ -17,6 +17,7 @@ import {
   planFormQuestions,
   planPermissionModeForTurn,
   promptBody,
+  referenceMentions,
   resolveModelVariant,
   selectedCommandMention,
   sessionPermissionRules,
@@ -24,6 +25,13 @@ import {
   withoutCommandMention,
   workspacePath,
 } from "../../support/host-api.js";
+import { encodeReferenceId } from "../../../src/shared/references.ts";
+
+const docsReferenceItemId = `reference:${encodeReferenceId({
+  hostId: "host_1",
+  directory: "/repo",
+  alias: "docs",
+})}`;
 
 test("accept-edits asks for everything except reads, searches, and edits", () => {
   const rules = sessionPermissionRules({
@@ -825,6 +833,89 @@ test("keeps native-only skill mentions native", () => {
   assert.deepEqual(body.skills, [
     { id: "unslop", mention: { start: 0, end: 7, text: "/unslop" } },
   ]);
+});
+
+test("attaches reference mentions as directory files with aligned offsets", () => {
+  const itemId = docsReferenceItemId;
+  const input = [
+    { type: "text", text: "hello" },
+    {
+      type: "text",
+      text: " @docs and more",
+      mentions: [
+        {
+          start: 1,
+          end: 6,
+          resource: {
+            kind: "plugin",
+            pluginId: "opencode2",
+            itemId,
+            label: "docs",
+          },
+        },
+      ],
+    },
+  ];
+
+  assert.deepEqual(
+    [...referenceMentions(input)],
+    [[itemId, { hostId: "host_1", directory: "/repo", alias: "docs" }]],
+  );
+  assert.deepEqual(
+    promptBody(input, {
+      referenceFiles: new Map([
+        [
+          itemId,
+          { alias: "docs", path: "/refs/docs", description: "Product docs" },
+        ],
+      ]),
+    }).files,
+    [
+      {
+        uri: "file:///refs/docs",
+        name: "docs",
+        description: "Product docs",
+        mention: { start: 7, end: 12, text: "@docs" },
+      },
+    ],
+  );
+});
+
+test("leaves unresolved or unowned reference mentions as plain text", () => {
+  const referenceFiles = new Map([
+    [
+      docsReferenceItemId,
+      { alias: "docs", path: "/refs/docs", description: "Product docs" },
+    ],
+  ]);
+  const input = (pluginId: string) => [
+    {
+      type: "text",
+      text: "@docs",
+      mentions: [
+        {
+          start: 0,
+          end: 5,
+          resource: {
+            kind: "plugin",
+            pluginId,
+            itemId: docsReferenceItemId,
+            label: "docs",
+          },
+        },
+      ],
+    },
+  ];
+
+  assert.deepEqual(promptBody(input("another-plugin"), { referenceFiles }), {
+    text: "@docs",
+  });
+  assert.deepEqual(
+    promptBody(input("opencode2"), { referenceFiles: new Map() }),
+    {
+      text: "@docs",
+    },
+  );
 });
 
 test("can ignore this plugin's catalog roots in the composer's native roots", async () => {

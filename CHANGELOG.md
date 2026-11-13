@@ -8,6 +8,7 @@ All notable changes to this plugin are documented here. The format follows
 ### Added
 
 - A BB skills plugin status row in Settings.
+- OpenCode references in the composer's `@` menu.
 
 ### Changed
 

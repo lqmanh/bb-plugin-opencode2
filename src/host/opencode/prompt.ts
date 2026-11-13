@@ -14,6 +14,12 @@ import {
   type OpenCodePermissionReply,
   type OpenCodeRecord,
 } from "../types.ts";
+import { OPENCODE_PROVIDER_ID } from "../../shared/settings-contract.ts";
+import {
+  referenceTargetFromMentionItemId,
+  type ReferenceFile,
+  type ReferenceTarget,
+} from "../../shared/references.ts";
 import { pathUnderRoots } from "./native-skills.ts";
 
 type RecordValue = OpenCodeRecord;
@@ -176,6 +182,45 @@ export function withoutCommandMention(
   }) as RecordValue[];
 }
 
+function mentionRange(
+  mention: RecordValue,
+): { start: number; end: number } | undefined {
+  const { start, end } = mention;
+  if (
+    typeof start !== "number" ||
+    !Number.isFinite(start) ||
+    typeof end !== "number" ||
+    !Number.isFinite(end) ||
+    end < start
+  )
+    return undefined;
+  return { start, end };
+}
+
+function referenceItemId(mention: RecordValue): string | undefined {
+  const resource = inputRecord(mention.resource);
+  if (resource.kind !== "plugin" || resource.pluginId !== OPENCODE_PROVIDER_ID)
+    return undefined;
+  return stringValue(resource.itemId);
+}
+
+/** The reference targets in this input, keyed by mention item id. */
+export function referenceMentions(
+  input: readonly RecordValue[],
+): Map<string, ReferenceTarget> {
+  const targets = new Map<string, ReferenceTarget>();
+  for (const part of input) {
+    if (part.type !== "text" || !Array.isArray(part.mentions)) continue;
+    for (const mention of part.mentions) {
+      const itemId = referenceItemId(inputRecord(mention));
+      if (!itemId) continue;
+      const target = referenceTargetFromMentionItemId(itemId);
+      if (target) targets.set(itemId, target);
+    }
+  }
+  return targets;
+}
+
 export function promptBody(
   input: RecordValue[],
   opts?: {
@@ -184,6 +229,7 @@ export function promptBody(
     nativeSkills?: ReadonlyMap<string, string | undefined>;
     nativeSkillRoots?: ReadonlySet<string>;
     skillFiles?: ReadonlyMap<string, string>;
+    referenceFiles?: ReadonlyMap<string, ReferenceFile>;
   },
 ): Pick<SessionPromptInput, "text" | "files" | "skills"> {
   const text: string[] = [];
@@ -212,19 +258,29 @@ export function promptBody(
     if (sawText) textOffset += 1;
     const mentions = Array.isArray(part.mentions) ? part.mentions : [];
     for (const mention of mentions) {
+      const itemId = referenceItemId(inputRecord(mention));
+      if (itemId) {
+        const file = opts?.referenceFiles?.get(itemId);
+        const range = mentionRange(mention);
+        if (file && range) {
+          files.push({
+            uri: pathToFileURL(file.path).href,
+            name: file.alias,
+            ...(file.description ? { description: file.description } : {}),
+            mention: {
+              start: textOffset + range.start,
+              end: textOffset + range.end,
+              text: part.text.slice(range.start, range.end),
+            },
+          });
+        }
+        continue;
+      }
       const resource = skillMentionResource(mention);
       if (!resource) continue;
       const id = stringValue(resource.name);
-      const start =
-        typeof mention.start === "number" && Number.isFinite(mention.start)
-          ? mention.start
-          : undefined;
-      const end =
-        typeof mention.end === "number" && Number.isFinite(mention.end)
-          ? mention.end
-          : undefined;
-      if (!id || start === undefined || end === undefined || end < start)
-        continue;
+      const range = mentionRange(mention);
+      if (!id || !range) continue;
       // BB offers two kinds of skill: its own configured roots, and the
       // agent's native skills (OpenCode's own discovery, which this plugin lists
       // through resolveNativeRoots). Anything else is plain text.
@@ -236,9 +292,9 @@ export function promptBody(
         opts?.nativeSkills !== undefined;
       if (hasSkillSets && !configured && !native && !hasFile) continue;
       const promptMention = {
-        start: textOffset + start,
-        end: textOffset + end,
-        text: part.text.slice(start, end),
+        start: textOffset + range.start,
+        end: textOffset + range.end,
+        text: part.text.slice(range.start, range.end),
       };
       const nativeIsBb = pathUnderRoots(
         opts?.nativeSkills?.get(id),

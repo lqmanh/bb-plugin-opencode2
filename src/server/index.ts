@@ -22,6 +22,7 @@ import {
   usageResourceFromSnapshot,
   usageResources,
 } from "./provider-usage.ts";
+import { registerReferenceMentions } from "./references.ts";
 
 export default function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
@@ -44,6 +45,7 @@ export default function plugin(bb: BbPluginApi) {
   });
 
   const host = bb.hosts.experimental_client({ contract: opencodeHostContract });
+  registerReferenceMentions(bb, host);
 
   async function connectedHostIds(signal?: AbortSignal) {
     return (await bb.sdk.hosts.list({ signal }))

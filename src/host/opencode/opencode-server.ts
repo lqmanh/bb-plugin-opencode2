@@ -6,14 +6,19 @@ import {
 } from "@opencode/client";
 import { Service } from "@opencode/client/service";
 import { realpathSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { errorMessage } from "../../shared/errors.ts";
 import {
   SESSION_OPTIONS_STATE_KIND,
   type NativeSkillsStatus,
+  type ReferenceInfo,
   type SkillsPluginStatus,
 } from "../../shared/settings-contract.ts";
+import type {
+  ReferenceFile,
+  ReferenceTarget,
+} from "../../shared/references.ts";
 import { emit } from "../bridge/bridge-runtime.ts";
 import { pluginRuntimeDir } from "../plugin-paths.ts";
 import { writeJsonFileAtomic } from "../session/persistence.ts";
@@ -240,6 +245,60 @@ export class OpenCodeServer {
 
   bbCatalogRoots(): ReadonlySet<string> {
     return this.configuredSkillRealRoots;
+  }
+
+  async references(cwd: string): Promise<ReferenceInfo[]> {
+    const client = await this.api();
+    const listed = await client.reference.list({
+      location: { directory: cwd },
+    });
+    return listed.data.map((reference) => ({
+      name: reference.name,
+      path: reference.path,
+      ...(reference.description ? { description: reference.description } : {}),
+      ...(reference.hidden ? { hidden: true } : {}),
+    }));
+  }
+
+  async reference(
+    cwd: string,
+    alias: string,
+  ): Promise<ReferenceInfo | undefined> {
+    return (await this.references(cwd)).find(
+      (reference) => reference.name === alias,
+    );
+  }
+
+  async referenceFiles(
+    cwd: string,
+    targets: ReadonlyMap<string, ReferenceTarget>,
+  ): Promise<Map<string, ReferenceFile>> {
+    const files = new Map<string, ReferenceFile>();
+    if (targets.size === 0) return files;
+    try {
+      const byAlias = new Map(
+        (await this.references(cwd)).map((reference) => [
+          reference.name,
+          reference,
+        ]),
+      );
+      for (const [itemId, target] of targets) {
+        const reference = byAlias.get(target.alias);
+        if (!reference) continue;
+        const info = await stat(reference.path).catch(() => undefined);
+        if (!info?.isDirectory()) continue;
+        files.set(itemId, {
+          alias: reference.name,
+          path: reference.path,
+          ...(reference.description
+            ? { description: reference.description }
+            : {}),
+        });
+      }
+      return files;
+    } catch {
+      return files;
+    }
   }
 
   async nativeSkillsStatus(): Promise<SkillsPluginStatus> {

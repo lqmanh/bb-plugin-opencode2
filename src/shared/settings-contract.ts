@@ -156,6 +156,17 @@ export type NativeSkillsStatus = z.infer<
   typeof nativeSkillsConfigureResultSchema
 >;
 
+export const referenceInfoSchema = z
+  .object({
+    name: z.string().min(1),
+    path: z.string().min(1),
+    description: z.string().optional(),
+    hidden: z.boolean().optional(),
+  })
+  .strict();
+
+export type ReferenceInfo = z.infer<typeof referenceInfoSchema>;
+
 export const opencodeHostContract = defineRpcContract({
   getStatus: {
     input: z.object({}).strict(),
@@ -168,6 +179,21 @@ export const opencodeHostContract = defineRpcContract({
   "nativeSkills/status": {
     input: z.object({}).strict(),
     output: skillsPluginStatusSchema,
+  },
+  "references/list": {
+    input: z.object({ directory: z.string().min(1) }).strict(),
+    output: z
+      .object({ references: z.array(referenceInfoSchema).max(10_000) })
+      .strict(),
+  },
+  "references/get": {
+    input: z
+      .object({
+        directory: z.string().min(1),
+        alias: z.string().min(1),
+      })
+      .strict(),
+    output: z.object({ reference: referenceInfoSchema.nullable() }).strict(),
   },
   backgroundSession: {
     input: backgroundThreadRequestSchema,

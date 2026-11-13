@@ -60,6 +60,7 @@ import {
   hasCommandMention,
   hasSkillMention,
   promptBody,
+  referenceMentions,
   selectedCommandMention,
   withoutCommandMention,
 } from "../opencode/prompt.ts";
@@ -200,15 +201,19 @@ async function prepareTurnInput(
     : promptInput;
   // Only a turn that mentions a skill needs the native registry. Fetch it
   // lazily so ordinary turns do not pay for an extra round trip.
-  const nativeSkills = hasSkillMention(bodyInput)
-    ? await openCodeServer.nativeSkillsState(session.cwd)
-    : undefined;
+  const [nativeSkills, referenceFiles] = await Promise.all([
+    hasSkillMention(bodyInput)
+      ? openCodeServer.nativeSkillsState(session.cwd)
+      : undefined,
+    openCodeServer.referenceFiles(session.cwd, referenceMentions(bodyInput)),
+  ]);
   const body = promptBody(bodyInput, {
     configuredSkillNames,
     disableSubagents: session.disableSubagents,
     nativeSkills,
     nativeSkillRoots: openCodeServer.bbCatalogRoots(),
     skillFiles: configuredSkillFiles,
+    referenceFiles,
   });
   return { command, body };
 }

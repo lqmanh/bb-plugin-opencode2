@@ -106,6 +106,25 @@ text; other mentions keep their offsets. Unknown commands stay ordinary text.
 the previous agent afterward. Steering keeps plan mode. Edit, write, and patch
 stay denied even under full permission mode.
 
+## References
+
+OpenCode references are aliases in `opencode.json` that point at directories
+outside the workspace. In OpenCode v2 threads and in the new-thread composer,
+`@` lists visible references from `reference.list`. Existing threads on other
+providers list none. Search uses the thread's environment directory, or the
+project's default source in the new-thread composer.
+
+The agent gets a picked reference in two ways. For every provider, this plugin
+adds a short context (alias, absolute path, description). In OpenCode v2
+threads, the host also attaches the directory as a `files` entry with the alias
+as `name`, so OpenCode gives the agent its one-level listing. If the alias is
+gone, the plugin sends a short not-found note. If the directory is not there
+yet, the context is still sent and the native attachment is skipped.
+
+In the new-thread composer, references come from the project's default checkout.
+If the thread then runs in a worktree whose OpenCode config lacks the alias, the
+agent gets the context but no native attachment.
+
 ## Usage
 
 `session.usage.updated` carries cumulative session totals and USD cost. Native

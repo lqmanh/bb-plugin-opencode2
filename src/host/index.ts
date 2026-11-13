@@ -68,6 +68,7 @@ export {
   hasSkillMention,
   permissionReplyBody,
   promptBody,
+  referenceMentions,
   sameDynamicTools,
   selectedCommandMention,
   SUBAGENT_DISABLED_TOOL_ERROR,
@@ -179,6 +180,18 @@ export default experimental_defineHostEntry({
     async "nativeSkills/status"(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
       return openCodeServer.nativeSkillsStatus();
+    },
+    async "references/list"(input, context) {
+      openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      return { references: await openCodeServer.references(input.directory) };
+    },
+    async "references/get"(input, context) {
+      openCodeServer.setDataDir(context.experimental_paths.dataDir);
+      return {
+        reference:
+          (await openCodeServer.reference(input.directory, input.alias)) ??
+          null,
+      };
     },
     async getStatus(_input, context) {
       openCodeServer.setDataDir(context.experimental_paths.dataDir);
