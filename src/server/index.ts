@@ -15,7 +15,6 @@ import {
   unavailableUsageStatus,
   type HostStatus,
 } from "../shared/settings-contract.ts";
-import { registerBackgroundCompletionNotifications } from "./background-notifications.ts";
 import {
   parseUsageResourceId,
   providerUsageRpcContract,
@@ -260,8 +259,6 @@ export default function plugin(bb: BbPluginApi) {
       nativeSkills: settings.nativeSkills === true,
     }),
   });
-
-  registerBackgroundCompletionNotifications(bb);
 
   bb.log.info("registered OpenCode v2 provider");
 }

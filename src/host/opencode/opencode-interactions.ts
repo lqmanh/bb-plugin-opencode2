@@ -334,12 +334,6 @@ function activeInteraction(session: SessionState) {
   return session.active?.interaction;
 }
 
-function turnId(context: InteractionContext) {
-  return context.providerTurnId
-    ? { providerTurnId: context.providerTurnId }
-    : {};
-}
-
 export class OpenCodeInteractions {
   private readonly interactions: InteractionRequest;
 
@@ -544,7 +538,7 @@ export class OpenCodeInteractions {
           kind: "item.open",
           key: itemKey(key, "tool"),
           item,
-          ...turnId(context),
+          providerTurnId: context.providerTurnId,
         },
       ]);
     }
@@ -624,7 +618,7 @@ export class OpenCodeInteractions {
         status,
         ...(status === "completed" ? { resultText: text } : {}),
         item,
-        ...turnId(context),
+        providerTurnId: context.providerTurnId,
       },
     ]);
   }

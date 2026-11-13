@@ -26,16 +26,19 @@ function stopClient(calls: string[]) {
   };
 }
 
-const session = createTestSession({ providerThreadId: "ses_1" });
-
 test("interrupt stops background work before the parent session", async () => {
   const calls: string[] = [];
+  const session = createTestSession({ providerThreadId: "ses_1" });
+  session.pendingReportIds = new Set(["msg_report"]);
   await stopSessionForIntent(session, "interrupt", stopClient(calls));
   assert.deepEqual(calls, ["stop-background", "interrupt:ses_1", "finish"]);
+  assert.equal(session.suppressReportWake, true);
+  assert.equal(session.pendingReportIds.size, 0);
 });
 
 test("release leaves provider work alone but stops local tracking", async () => {
   const calls: string[] = [];
+  const session = createTestSession({ providerThreadId: "ses_1" });
   await stopSessionForIntent(session, "release", stopClient(calls));
   assert.deepEqual(calls, ["clear"]);
 });

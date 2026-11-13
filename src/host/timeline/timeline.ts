@@ -164,6 +164,17 @@ export function boundedTimelineDelta(delta: RecordValue): RecordValue {
   }) as RecordValue;
 }
 
+/**
+ * A run OpenCode woke without a BB prompt has a null turn id. Drop it, so BB
+ * scopes the delta to the open turn.
+ */
+export function omitNullTurnId(delta: RecordValue): RecordValue {
+  if (!("providerTurnId" in delta) || typeof delta.providerTurnId === "string")
+    return delta;
+  const { providerTurnId: _, ...rest } = delta;
+  return rest;
+}
+
 export function timelineDeltasForEmission(values: RecordValue[]) {
   return values.map(boundedTimelineDelta);
 }
@@ -213,7 +224,7 @@ export function manualCompactionStartDeltas(
 }
 
 export function manualCompactionOutcomeDeltas(input: {
-  providerTurnId: string;
+  providerTurnId: string | null;
   messageId: string;
   status: "completed" | "failed" | "interrupted";
   error?: string;
@@ -241,7 +252,7 @@ export function manualCompactionOutcomeDeltas(input: {
 }
 
 export function providerFailureDeltas(input: {
-  providerTurnId: string;
+  providerTurnId: string | null;
   error: string;
   providerCheckpointId?: string;
 }): RecordValue[] {

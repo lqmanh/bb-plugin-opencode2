@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { createFakeOpenCodeApi } from "../../support/opencode-client.fixture.ts";
 import {
   backgroundFixture,
@@ -12,9 +12,10 @@ import {
   permissionApi,
   startShellTask,
   startSubagentTask,
+  subagentReport,
   usagePayload,
 } from "./opencode-event-router.fixture.ts";
-import { nextTick } from "../../support/async.ts";
+import { nextTick, withMockTimers } from "../../support/async.ts";
 import type { OpenCodeRecord } from "../../../src/host/types.ts";
 
 // OpenCode's not-found guards only check `_tag`.
@@ -55,7 +56,7 @@ const reconcileShell = (api: Api) =>
   reconcile(api, (event) => startShellTask(event, { command: "true" }));
 
 const reconcileSubagent = (api: Api) =>
-  reconcile(api, (event) => startSubagentTask(event, { background: true }));
+  reconcile(api, (event) => startSubagentTask(event));
 
 test("maps an explicit background shell to one local_bash task row", async () => {
   const { emitted, event, session } = backgroundFixture();
@@ -100,23 +101,15 @@ test("maps an explicit background shell to one local_bash task row", async () =>
   assert.equal(session.backgroundTasks.get("bg:call_shell")?.settled, true);
 });
 
-test("maps an explicit background subagent and reads child usage at completion", async () => {
+test("maps a subagent call and reads child usage at its final report", async () => {
   const { emitted, event, session } = backgroundFixture();
 
-  await startSubagentTask(event, { background: true });
+  await startSubagentTask(event);
   await event("session.usage.updated", {
     sessionID: "ses_child",
     tokens: usagePayload(1, 2, 3, 4, 5),
   });
-  await event("session.synthetic", {
-    text: '<subagent sessionID="ses_child" state="completed" description="List files">\nDone.\n</subagent>',
-    metadata: {
-      source: "subagent",
-      childID: "ses_child",
-      agent: "explore",
-      state: "completed",
-    },
-  });
+  await subagentReport(event, { text: "Done." });
 
   const open = backgroundTaskOpen(emitted);
   assert.equal(open?.item.taskType, "local_agent");
@@ -193,7 +186,7 @@ test("routes a background child permission after the parent turn ends", async ()
     },
   });
 
-  await startSubagentTask(event, { background: true });
+  await startSubagentTask(event);
   await router.finish(session, "completed");
   await event("permission.asked", {
     sessionID: "ses_child",
@@ -226,7 +219,7 @@ test("routes a background child form with the child session id and task parentRe
     },
   });
 
-  await startSubagentTask(event, { background: true });
+  await startSubagentTask(event);
   await router.finish(session, "completed");
   await event("form.created", {
     sessionID: "ses_child",
@@ -257,7 +250,7 @@ test("does not create a background task for a denied subagent", async () => {
     disableSubagents: true,
   });
 
-  await startSubagentTask(event, { background: true, success: false });
+  await startSubagentTask(event, { success: false });
   await event("session.tool.failed", {
     id: "call_sub",
     error: { message: "Native subagents are disabled" },
@@ -525,7 +518,7 @@ test("keeps reconciling other tasks after a session.active failure", async () =>
   });
   const { emitted, event, router, session } = backgroundFixture(api);
 
-  await startSubagentTask(event, { background: true });
+  await startSubagentTask(event);
   await startShellTask(event, { command: "true" });
   await router.finish(session, "completed");
   const before = emitted.length;
@@ -539,17 +532,72 @@ test("keeps reconciling other tasks after a session.active failure", async () =>
   );
 });
 
-test("converts a running foreground subagent into a background task row", async () => {
-  const { emitted, event } = backgroundFixture();
+test("keeps a task open through a running report and settles on the final one", async () => {
+  const { emitted, event, session } = backgroundFixture();
 
-  await startSubagentTask(event, { background: false, progress: true });
+  await startSubagentTask(event);
+  await withMockTimers(async () => {
+    await event("session.execution.succeeded", { sessionID: "ses_child" });
+    await subagentReport(event, { state: "running", text: "child started" });
+    mock.timers.tick(1_100);
+  });
 
-  const delegation = delegationClose(emitted);
-  assert.equal(delegation?.status, "completed");
-  assert.equal(delegation?.item.summary, "Moved to background");
-  const taskOpen = backgroundTaskOpen(emitted);
-  assert.equal(taskOpen?.item.taskType, "local_agent");
-  assert.equal(taskOpen?.item.familyId, "bg:call_sub");
+  assert.equal(backgroundTaskClose(emitted), undefined);
+  assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, false);
+
+  await subagentReport(event, { text: "Done." });
+
+  const close = backgroundTaskClose(emitted);
+  assert.equal(close?.status, "completed");
+  assert.equal(close?.item.summary, "Done.");
+  assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, true);
+});
+
+test("opens a new task row when a follow-up job reports again", async () => {
+  const { emitted, event, session } = backgroundFixture();
+
+  await startSubagentTask(event, { callId: "call_first" });
+  await subagentReport(event, { text: "First." });
+  await startSubagentTask(event, {
+    callId: "call_second",
+    sessionID: "ses_child",
+  });
+  await subagentReport(event, { state: "running", text: "Second start." });
+  await subagentReport(event, { text: "Second." });
+
+  const opens = emitted.filter(
+    (delta) =>
+      delta.kind === "item.open" && delta.item?.type === "backgroundTask",
+  );
+  const closes = emitted.filter(
+    (delta) =>
+      delta.kind === "item.close" && delta.item?.type === "backgroundTask",
+  );
+  assert.deepEqual(
+    opens.map((delta) => delta.key.providerItemId),
+    ["bg:call_first", "bg:call_second"],
+  );
+  assert.deepEqual(
+    closes.map((delta) => delta.key.providerItemId),
+    ["bg:call_first", "bg:call_second"],
+  );
+  assert.equal(session.backgroundTasks.get("bg:call_first")?.settled, true);
+  assert.equal(session.backgroundTasks.get("bg:call_second")?.settled, true);
+});
+
+test("settles a child that goes idle without reporting", async () => {
+  const { emitted, event, session } = backgroundFixture();
+
+  await startSubagentTask(event);
+  await withMockTimers(async () => {
+    await event("session.execution.succeeded", { sessionID: "ses_child" });
+    assert.equal(backgroundTaskClose(emitted), undefined);
+    mock.timers.tick(1_100);
+  });
+
+  const close = backgroundTaskClose(emitted);
+  assert.equal(close?.status, "completed");
+  assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, true);
 });
 
 test("closes open background tasks as interrupted when the thread stops", async () => {

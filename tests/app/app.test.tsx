@@ -14,9 +14,9 @@ const mountedSlots: Array<{ lifecycle: { unmount(): void } }> = [];
 
 const baseStatus = {
   statusMessage: null,
-  installedVersion: "2.2.7",
-  latestVersion: "2.2.7",
-  minimumSupportedVersion: "2.2.7",
+  installedVersion: "2.3.0",
+  latestVersion: "2.3.0",
+  minimumSupportedVersion: "2.3.0",
   loginCommand: "opencode2 auth login",
 };
 
@@ -67,7 +67,7 @@ describe("OpenCode settings", () => {
       hosts: [
         makeHost(
           "laptop",
-          { latestVersion: "2.2.8" },
+          { latestVersion: "2.3.1" },
           {
             source: "/tmp/opencode-usage",
             providerCount: 2,
@@ -78,7 +78,7 @@ describe("OpenCode settings", () => {
     const slot = await mountSettings(getStatus);
 
     expect(
-      await slot.findByText(/OpenCode 2\.2\.7 · 2\.2\.8 available/),
+      await slot.findByText(/OpenCode 2\.3\.0 · 2\.3\.1 available/),
     ).toBeTruthy();
     expect(slot.getAllByText("Ready")).toHaveLength(3);
     expect(slot.getByText("opencode-bb-skills 1.6.0")).toBeTruthy();

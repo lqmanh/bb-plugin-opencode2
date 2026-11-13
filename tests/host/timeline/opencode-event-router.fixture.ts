@@ -210,7 +210,7 @@ export type SubagentStartOptions = {
   agent?: string;
   description?: string;
   prompt?: string;
-  background?: boolean;
+  sessionID?: string;
   progress?: boolean;
   success?: boolean;
   successText?: string;
@@ -223,7 +223,6 @@ export async function startSubagentTask(
 ) {
   const callId = options.callId ?? "call_sub";
   const childId = options.childId ?? "ses_child";
-  const background = options.background ?? true;
   await event("session.tool.input.started", { id: callId, name: "subagent" });
   await event("session.tool.called", {
     id: callId,
@@ -231,7 +230,7 @@ export async function startSubagentTask(
       agent: options.agent ?? "explore",
       description: options.description ?? "List files",
       prompt: options.prompt ?? "ls",
-      ...(background ? { background: true } : {}),
+      ...(options.sessionID ? { sessionID: options.sessionID } : {}),
     },
   });
   if (options.progress)
@@ -257,6 +256,46 @@ export async function startSubagentTask(
   return { callId, childId, succeed };
 }
 
+/** A synthetic inbox item, as OpenCode 2.3.0 delivers background reports. */
+async function enqueueSynthetic(
+  event: Event,
+  inboxID: string,
+  payload: OpenCodeRecord,
+) {
+  await event("session.inbox.enqueued", {
+    inboxID,
+    item: { type: "synthetic", payload, delivery: "steer" },
+  });
+}
+
+export type SubagentReportOptions = {
+  text?: string;
+  state?: "running" | "completed" | "error" | "cancelled";
+  inboxId?: string;
+};
+
+export async function subagentReport(
+  event: Event,
+  options: SubagentReportOptions = {},
+) {
+  const childId = "ses_child";
+  const state = options.state ?? "completed";
+  const text = options.text ?? "Done.";
+  const running =
+    state === "running"
+      ? "\n\nBackground work still running:\n- shell (shell_1): sleep 20"
+      : "";
+  await enqueueSynthetic(event, options.inboxId ?? `msg_${childId}_${state}`, {
+    text: `<subagent sessionID="${childId}" state="${state}" description="List files">\n${text}${running}\n</subagent>`,
+    metadata: {
+      source: "subagent",
+      childID: childId,
+      agent: "explore",
+      state: "completed",
+    },
+  });
+}
+
 export type ShellCompletionOptions = {
   via: "synthetic" | "session.shell.ended" | "shell.exited";
   shellId?: string;
@@ -278,7 +317,7 @@ export async function completeShell(
   const status = options.status ?? "exited";
   switch (options.via) {
     case "synthetic":
-      await event("session.synthetic", {
+      await enqueueSynthetic(event, `msg_${shellId}_${state}`, {
         text: `<shell id="${shellId}" state="${state}" command="${options.command ?? "true"}">\n${text}\n</shell>`,
         metadata: { source: "shell", shellID: shellId, state, exit },
       });

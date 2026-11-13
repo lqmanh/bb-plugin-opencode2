@@ -10,9 +10,8 @@ and session rules, with the last match winning. `session.update` replaces the
 session ruleset. Permission actions are tool names; MCP tools use
 `<server>_<tool>`.
 
-The bridge answers permission requests for the active turn and for background
-children after their parent turn. Foreground children without an active turn are
-ignored.
+The bridge answers permission requests for the active turn, including a run
+woken by a report, and for background children after their parent turn.
 
 ## Events
 
@@ -27,8 +26,9 @@ ignored.
   Their content ends with `Exit code: N` or `Exit code: N (SIGTERM)`.
 - Edit success carries patches in `metadata.files`; write success has no patch,
   so write rows show only path and kind.
-- Native subagents use `metadata.sessionID` for the child session. Results are
-  wrapped in `<subagent sessionID="…" state="…">`.
+- Native subagents use `metadata.sessionID` for the child session. Reports are
+  wrapped in `<subagent sessionID="…" state="…">` and arrive as synthetic
+  `session.inbox.enqueued` items. No `session.synthetic` event is emitted.
 - `mcp.status.changed` carries the server name; read `mcp.list` for status.
 - Compaction also appears as `session.next.compaction.*` or a compaction
   `session.message.updated`.
@@ -37,17 +37,27 @@ ignored.
 
 A background shell succeeds with `metadata.status: "running"` and
 `metadata.shellID`. `session.shell.started`/`shell.created` carry its output
-file. Completion is a `session.synthetic` `<shell …>` or
-`session.shell.ended`/`shell.exited`.
+file. Completion arrives as a synthetic `session.inbox.enqueued` item with a
+`<shell …>` wrapper; `session.shell.ended` and `shell.exited` also settle it.
 
-A background subagent succeeds with `metadata.status: "running"` and the child
-`metadata.sessionID`. Completion is a parent `session.synthetic` `<subagent …>`.
-Its child-session usage, permissions, and forms survive the spawning turn.
+Every subagent runs in the background. Its call returns a `sessionID` at once
+and opens a `local_agent` task row. OpenCode reports through a synthetic
+`session.inbox.enqueued` item with a `<subagent …>` wrapper. A report tagged
+`state="running"` keeps the row open while the child's own background work runs;
+its `metadata.state` already says `completed`. The final report settles the row.
+A follow-up to an idle child starts a new job and reports again.
 
-Both render as thread-scoped `backgroundTask` rows. A foreground tool that
-OpenCode backgrounds is closed and replaced by one task row. Fast completions
-are buffered until the shell or child ID is known; duplicate and late
-completions are ignored.
+Each report wakes the parent. When no BB turn is active, the plugin opens one
+with `turn.open` and no input row, so its reply, tools, permissions, and forms
+reach BB. A BB message sent meanwhile steers into that turn. After an interrupt,
+reports from stopped children settle their task rows but do not open a turn
+until the next user action. A child that finishes without a report
+(`notify: false`) settles after a short grace period.
+
+Both kinds render as thread-scoped `backgroundTask` rows. A foreground shell
+that OpenCode backgrounds is closed and replaced by one task row. Fast
+completions are buffered until the shell or child ID is known; duplicate and
+late completions are ignored.
 
 After a reconnect, and when a thread starts, resumes, or forks, unsettled tasks
 reconcile per task. Shell tasks use `shell.get` for terminal status and exit;
@@ -254,16 +264,17 @@ minor releases. Used APIs have no fallback; check them on every OpenCode bump.
 ### Known gaps
 
 - Command turns without an inbox message have no rewind checkpoint.
+- A run woken by a report has no turn diff; per-tool file-change rows still show
+  its edits.
 - Background task rows do not survive a worker restart; BB settles them as
   interrupted and the plugin does not recreate them.
-- A shell that disappears after an OpenCode restart settles as stopped without
-  its exit code or output; `shell.get` returns `ShellNotFoundError`.
+- Background shells survive turn handoffs but not `opencode service restart` or
+  `stop` (#62978); a vanished shell settles as stopped without its exit code or
+  output.
+- A subagent started by another subagent is counted in usage, but its output,
+  permissions, and forms are not shown.
 - Reconciled subagent rows have no summary; the session API exposes no result
   text.
-- Idle completion only marks the thread unread; a transcript message needs BB
-  core support.
-- Foreground subagent forms are handled only while the parent turn is active;
-  background children keep a task-scoped context.
 - Turn reconciliation is covered by unit tests only; a dropped event stream was
   never reproduced live.
 - Unknown OpenCode events are dropped rather than forwarded as diagnostics.

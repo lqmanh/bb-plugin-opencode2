@@ -63,10 +63,6 @@ export type InteractionContext = {
   ownPermissionReplies: Set<string>;
 };
 
-export type TurnInteractionContext = InteractionContext & {
-  providerTurnId: string;
-};
-
 export type BackgroundTaskRecord = {
   id: string;
   callId: string;
@@ -78,27 +74,26 @@ export type BackgroundTaskRecord = {
   shellId?: string;
   childSessionId?: string;
   outputFile?: string;
+  /** A child that may finish without reporting; settle after it goes idle. */
+  settleTimer?: ReturnType<typeof setTimeout>;
 };
 
 /** A native subagent session, shared with background-task support. */
 export type ChildSessionRecord = {
   parentThreadId: string;
   parentProviderThreadId: string;
-  callId: string;
   usage?: {
     tokens: UsageTotals;
     cost?: number;
   };
-  terminal: boolean;
   backgroundTaskId?: string;
-  background?: boolean;
 };
 
-export function createInteractionContext<T extends string | null>(input: {
-  providerTurnId: T;
+export function createInteractionContext(input: {
+  providerTurnId: string | null;
   formSessionId: string;
   background: boolean;
-}): InteractionContext & { providerTurnId: T } {
+}): InteractionContext {
   return {
     providerTurnId: input.providerTurnId,
     formSessionId: input.formSessionId,
@@ -117,7 +112,7 @@ export function createInteractionContext<T extends string | null>(input: {
 }
 
 export type ActiveTurn = {
-  interaction: TurnInteractionContext;
+  interaction: InteractionContext;
   startedAt: number;
   /** Set once OpenCode accepted the prompt; reconciliation waits for it. */
   promptDelivered?: boolean;
@@ -147,7 +142,7 @@ export type ActiveTurn = {
 };
 
 export function createActiveTurn(
-  providerTurnId: string,
+  providerTurnId: string | null,
   formSessionId: string,
 ): ActiveTurn {
   return {
@@ -161,6 +156,11 @@ export function createActiveTurn(
     pendingInput: new Map(),
     touchedFiles: new Map(),
   };
+}
+
+/** A run OpenCode woke without a BB prompt, such as a subagent report. */
+export function createProviderTurn(formSessionId: string): ActiveTurn {
+  return { ...createActiveTurn(null, formSessionId), promptDelivered: true };
 }
 
 export type SessionState = {
@@ -212,17 +212,33 @@ export type SessionState = {
   pendingBackgroundCompletions: Map<string, OpenCodeRecord>;
   /** Full output files for OpenCode shells, keyed by shell ID. */
   shellOutputFiles: Map<string, string>;
+  /** Synthetic inbox IDs that may wake a parent run. */
+  pendingReportIds: Set<string>;
+  /** Reports settle rows but do not open a turn until the next user action. */
+  suppressReportWake: boolean;
 };
 
 export function createSessionBackgroundState(): Pick<
   SessionState,
-  "backgroundTasks" | "pendingBackgroundCompletions" | "shellOutputFiles"
+  | "backgroundTasks"
+  | "pendingBackgroundCompletions"
+  | "shellOutputFiles"
+  | "pendingReportIds"
+  | "suppressReportWake"
 > {
   return {
     backgroundTasks: new Map(),
     pendingBackgroundCompletions: new Map(),
     shellOutputFiles: new Map(),
+    pendingReportIds: new Set(),
+    suppressReportWake: false,
   };
+}
+
+/** Forget pending reports; `suppress` keeps later ones from opening a turn. */
+export function resetReportWake(session: SessionState, suppress: boolean) {
+  session.pendingReportIds.clear();
+  session.suppressReportWake = suppress;
 }
 
 export function isSubagentTool(name: string): boolean {

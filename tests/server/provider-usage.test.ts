@@ -61,9 +61,9 @@ const usagePlugin = {
 const readyStatus = {
   status: "ready" as const,
   statusMessage: null,
-  installedVersion: "2.2.7",
-  latestVersion: "2.2.7",
-  minimumSupportedVersion: "2.2.7",
+  installedVersion: "2.3.0",
+  latestVersion: "2.3.0",
+  minimumSupportedVersion: "2.3.0",
   loginCommand: "opencode2 auth login",
 };
 

@@ -33,6 +33,7 @@ import {
   itemKey,
   itemKeyForOpenItem,
   manualCompactionOutcomeDeltas,
+  omitNullTurnId,
   providerFailureDeltas,
 } from "./timeline.ts";
 import { rememberBounded } from "../../shared/collections.ts";
@@ -48,7 +49,7 @@ import {
   contentText,
   diffFileChanges,
   dynamicToolRow,
-  isBackgroundToolInput,
+  isBackgroundShellInput,
   metadataFileChanges,
   parseBackgroundCompletion,
   toolRow,
@@ -61,9 +62,11 @@ import {
   DELETED_SESSION_MESSAGE,
   MOVED_SESSION_MESSAGE,
   createInteractionContext,
+  createProviderTurn,
   inputRecord,
   isSubagentTool,
   parseInputText,
+  resetReportWake,
   stringValue,
   type ActiveTurn,
   type BackgroundTaskRecord,
@@ -86,6 +89,14 @@ const CHILD_RECONCILE_PAGE_SIZE = 100;
 const CHILD_RECONCILE_MAX_PAGES = 5;
 const CHILD_RECONCILE_MAX_CHILDREN = 500;
 const CHILD_RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** A child report follows its idle execution event almost immediately. */
+const CHILD_REPORT_GRACE_MS = 1_000;
+/** A child's terminal execution events and the task state each one implies. */
+const CHILD_SETTLE_STATES: Record<string, BackgroundCompletion["state"]> = {
+  "session.execution.succeeded": "completed",
+  "session.execution.failed": "error",
+  "session.execution.interrupted": "cancelled",
+};
 
 /**
  * OpenCode v2 reports a shell tool's exit status as `metadata.exit` on
@@ -385,9 +396,6 @@ function retryErrorCategory(error: RecordValue) {
   return undefined;
 }
 
-const CHILD_EVENT_PATTERN =
-  /^(permission\.asked|session\.(text|reasoning|tool)\.)/;
-
 /** The subagent's final report, without OpenCode's wrapper tag. */
 export function subagentSummary(text: string): string {
   return text
@@ -421,7 +429,7 @@ export class OpenCodeEventRouter {
     string,
     { session: SessionState; taskId: string }
   >();
-  /** Provider item ID -> the delegation call it is nested under. */
+  /** Provider item ID -> the background task row it is nested under. */
   private readonly parentRefs = new Map<string, string>();
   /** Set while handling a child-session event. */
   private childParentRef?: string;
@@ -447,8 +455,6 @@ export class OpenCodeEventRouter {
   private registerChildSession(
     childId: string,
     parent: SessionState,
-    callId: string,
-    options: { terminal?: boolean; updateCallId?: boolean } = {},
   ): ChildSessionRecord {
     const existing = this.childSessions.get(childId);
     if (existing) {
@@ -460,16 +466,11 @@ export class OpenCodeEventRouter {
       }
       existing.parentThreadId = parent.bbThreadId;
       existing.parentProviderThreadId = parent.providerThreadId;
-      if (options.updateCallId && callId) existing.callId = callId;
-      else if (!existing.callId && callId) existing.callId = callId;
-      if (options.terminal !== undefined) existing.terminal = options.terminal;
       return existing;
     }
     const record: ChildSessionRecord = {
       parentThreadId: parent.bbThreadId,
       parentProviderThreadId: parent.providerThreadId,
-      callId,
-      terminal: options.terminal ?? false,
     };
     this.childSessions.set(childId, record);
     this.addChildIndex(parent.providerThreadId, childId);
@@ -522,23 +523,21 @@ export class OpenCodeEventRouter {
       const task = session.backgroundTasks.get(taskId);
       if (task) return task;
     }
-    for (const task of session.backgroundTasks.values())
-      if (task.childSessionId === childId) return task;
-    return undefined;
+    let settled: BackgroundTaskRecord | undefined;
+    for (const task of session.backgroundTasks.values()) {
+      if (task.childSessionId !== childId) continue;
+      if (!task.settled) return task;
+      settled ??= task;
+    }
+    return settled;
   }
 
   private markBackgroundChild(
     session: SessionState,
     childId: string,
-    callId: string,
     task: BackgroundTaskRecord,
-    terminal = false,
   ) {
-    const record = this.registerChildSession(childId, session, callId, {
-      terminal,
-      updateCallId: true,
-    });
-    record.background = true;
+    const record = this.registerChildSession(childId, session);
     record.backgroundTaskId = task.id;
     task.childSessionId = childId;
     task.interaction.formSessionId = childId;
@@ -550,7 +549,7 @@ export class OpenCodeEventRouter {
     callId: string,
     name: string,
     input: unknown,
-    providerTurnId?: string,
+    providerTurnId: string | null = null,
   ) {
     const existing = this.backgroundTaskForCall(session, callId);
     if (existing) return existing;
@@ -580,7 +579,7 @@ export class OpenCodeEventRouter {
         kind: "item.open",
         key: itemKey(task.id, "tool"),
         item,
-        ...(providerTurnId ? { providerTurnId } : {}),
+        providerTurnId,
       },
     ]);
     this.applyPendingBackgroundCompletion(session, task);
@@ -622,7 +621,7 @@ export class OpenCodeEventRouter {
     } else {
       const childId = stringValue(raw.sessionID);
       if (!childId) return;
-      this.markBackgroundChild(session, childId, task.callId, task);
+      this.markBackgroundChild(session, childId, task);
     }
     this.emitBackgroundProgress(session, task);
     this.applyPendingBackgroundCompletion(session, task);
@@ -673,7 +672,6 @@ export class OpenCodeEventRouter {
     session: SessionState,
     context: InteractionContext,
     status: "completed" | "interrupted" | "failed",
-    providerTurnId?: string,
   ) {
     context.abortController.abort();
     for (const [, formId] of context.openQuestions)
@@ -689,7 +687,7 @@ export class OpenCodeEventRouter {
           key: itemKeyForOpenItem(id, item),
           status,
           item,
-          ...(providerTurnId ? { providerTurnId } : {}),
+          providerTurnId: context.providerTurnId,
         },
       ]);
       this.parentRefs.delete(id);
@@ -703,6 +701,7 @@ export class OpenCodeEventRouter {
     completion: BackgroundCompletion,
   ) {
     if (task.settled) return;
+    this.cancelSettleTimer(task);
     task.settled = true;
     if (task.shellId) this.shellTaskOwners.delete(task.shellId);
     this.closeInteractionContext(
@@ -744,7 +743,6 @@ export class OpenCodeEventRouter {
     if (task.kind === "subagent" && task.childSessionId) {
       const child = this.childSessions.get(task.childSessionId);
       if (child) {
-        child.terminal = true;
         const usage = backgroundTaskUsage(
           child.usage?.tokens,
           task.startedAt,
@@ -776,6 +774,7 @@ export class OpenCodeEventRouter {
 
   clearBackgroundTasks(session: SessionState) {
     for (const task of session.backgroundTasks.values()) {
+      this.cancelSettleTimer(task);
       if (task.shellId) this.shellTaskOwners.delete(task.shellId);
       for (const id of task.interaction.opened.keys())
         this.parentRefs.delete(id);
@@ -788,11 +787,19 @@ export class OpenCodeEventRouter {
   clearSession(session: SessionState) {
     this.clearBackgroundTasks(session);
     this.clearChildSessions(session.providerThreadId);
+    resetReportWake(session, false);
   }
 
-  private handleSynthetic(session: SessionState, data: RecordValue) {
-    const completion = parseBackgroundCompletion(data);
-    if (!completion) return;
+  private cancelSettleTimer(task: BackgroundTaskRecord) {
+    if (task.settleTimer === undefined) return;
+    clearTimeout(task.settleTimer);
+    task.settleTimer = undefined;
+  }
+
+  private handleBackgroundReport(
+    session: SessionState,
+    completion: BackgroundCompletion,
+  ) {
     const task =
       completion.kind === "shell"
         ? ((completion.shellId
@@ -805,8 +812,47 @@ export class OpenCodeEventRouter {
             session,
             completion.childId ?? completion.id,
           );
+    if (completion.state === "running") {
+      // The child reported while its own background work runs; a later report
+      // settles the task.
+      if (task) this.cancelSettleTimer(task);
+      return;
+    }
     if (task) this.settleBackgroundTask(session, task, completion);
     else this.bufferBackgroundCompletion(session, completion);
+  }
+
+  private openProviderTurn(session: SessionState) {
+    const active = createProviderTurn(session.providerThreadId);
+    session.active = active;
+    this.emit(session.bbThreadId, [{ kind: "turn.open" }]);
+    return active;
+  }
+
+  /**
+   * A report normally follows a child's idle execution event. Settle anyway
+   * when the child finishes without reporting (`notify: false`), unless a
+   * report arrives first.
+   */
+  private scheduleChildSettle(
+    session: SessionState,
+    childId: string,
+    state: BackgroundCompletion["state"],
+    data: RecordValue,
+  ) {
+    const task = this.backgroundTaskForChild(session, childId);
+    if (!task || task.settled) return;
+    this.cancelSettleTimer(task);
+    const error = stringValue(inputRecord(data.error).message) ?? "";
+    task.settleTimer = setTimeout(() => {
+      task.settleTimer = undefined;
+      this.settleBackgroundTask(
+        session,
+        task,
+        taskCompletion(task, state, error),
+      );
+    }, CHILD_REPORT_GRACE_MS);
+    task.settleTimer.unref?.();
   }
 
   private rememberShellOutput(
@@ -970,16 +1016,7 @@ export class OpenCodeEventRouter {
           visited.add(childId);
           queue.push(childId);
           discovered++;
-          const time = inputRecord(info.time);
-          const running = sessionRunning({
-            busy: typeof time.busy === "number" ? time.busy : undefined,
-            idle: typeof time.idle === "number" ? time.idle : undefined,
-          });
-          const existing = this.childSessions.get(childId);
-          const callId = existing?.callId ?? "";
-          const record = this.registerChildSession(childId, session, callId, {
-            terminal: !callId || (!running && info.outcome !== undefined),
-          });
+          const record = this.registerChildSession(childId, session);
           if (
             mergeChildUsage(
               record,
@@ -1152,14 +1189,15 @@ export class OpenCodeEventRouter {
 
   /**
    * Emit deltas, nesting items that belong to a native subagent under its
-   * delegation row. An item first opened while handling a child-session
+   * background task row. An item first opened while handling a child-session
    * event records its parent; later deltas for it (output, close, turn-end
    * cleanup) reuse that parent wherever they are emitted from.
    */
   private readonly emit = (threadId: string, deltas: RecordValue[]) => {
     this.emitTimeline(
       threadId,
-      deltas.map((delta) => {
+      deltas.map((raw) => {
+        const delta = omitNullTurnId(raw);
         const key = inputRecord(delta.key);
         const id = stringValue(key.providerItemId);
         if (!id) return delta;
@@ -1233,21 +1271,18 @@ export class OpenCodeEventRouter {
       this.handleChildUsage(child, data);
       return;
     }
-    if (child.backgroundTaskId) {
-      if (eventType === "permission.asked" && parent && childContext) {
-        void this.interactions.handlePermission(parent, data, childContext);
-      } else if (eventType.startsWith("session.execution.")) {
-        child.terminal = true;
-      }
-      return;
-    }
-    if (child.terminal || !CHILD_EVENT_PATTERN.test(eventType)) return;
-    if (!parent) return;
-    this.childParentRef = child.callId;
-    try {
-      await this.handleSessionEvent(parent, event, data);
-    } finally {
-      this.childParentRef = undefined;
+    // Subagent work stays in its task row, never in the parent turn.
+    if (!child.backgroundTaskId || !parent) return;
+    const settleState = CHILD_SETTLE_STATES[eventType];
+    if (eventType === "permission.asked" && childContext) {
+      void this.interactions.handlePermission(parent, data, childContext);
+    } else if (settleState) {
+      this.scheduleChildSettle(parent, sessionId, settleState, data);
+    } else if (eventType.startsWith("session.tool.")) {
+      // Nested subagents have no task row; register them only so their usage
+      // counts.
+      const nestedId = stringValue(inputRecord(data.metadata).sessionID);
+      if (nestedId) this.registerChildSession(nestedId, parent);
     }
   }
 
@@ -1256,7 +1291,7 @@ export class OpenCodeEventRouter {
     event: RecordValue,
     data: RecordValue,
   ): Promise<void> {
-    const active = session.active;
+    let active = session.active;
     const eventId = stringValue(data.id) ?? "";
     const eventType = stringValue(event.type) ?? "";
     const metadata = inputRecord(data.metadata);
@@ -1264,26 +1299,39 @@ export class OpenCodeEventRouter {
     const task = eventId
       ? this.backgroundTaskForCall(session, eventId)
       : undefined;
+    if (eventType === "session.inbox.enqueued") {
+      const item = inputRecord(data.item);
+      const inboxId = stringValue(data.inboxID);
+      if (item.type === "synthetic") {
+        if (inboxId && !session.suppressReportWake)
+          session.pendingReportIds.add(inboxId);
+        const report = parseBackgroundCompletion(item.payload);
+        if (report) this.handleBackgroundReport(session, report);
+      } else if (active) this.adoptCommandCheckpoint(active, inboxId);
+    }
+    if (
+      eventType === "session.inbox.delivered" ||
+      eventType === "session.inbox.cancelled"
+    ) {
+      const inboxId = stringValue(data.inboxID);
+      if (inboxId) session.pendingReportIds.delete(inboxId);
+    }
+    if (
+      eventType === "session.execution.started" &&
+      !active &&
+      session.pendingReportIds.size > 0 &&
+      !session.closing &&
+      !session.terminalError
+    )
+      active = this.openProviderTurn(session);
     if (
       childId &&
       (eventType === "session.tool.progress" ||
         eventType === "session.tool.success" ||
         eventType === "session.tool.failed")
     ) {
-      const live = active !== undefined;
-      const terminal =
-        !live ||
-        eventType === "session.tool.failed" ||
-        (eventType === "session.tool.success" &&
-          stringValue(metadata.status) !== "running");
-      if (task) {
-        this.markBackgroundChild(session, childId, eventId, task, terminal);
-      } else {
-        this.registerChildSession(childId, session, eventId, {
-          terminal,
-          updateCallId: live && eventType === "session.tool.progress",
-        });
-      }
+      if (task) this.markBackgroundChild(session, childId, task);
+      else this.registerChildSession(childId, session);
     }
     if (event.type === "permission.asked") {
       void this.interactions.handlePermission(session, data);
@@ -1311,10 +1359,6 @@ export class OpenCodeEventRouter {
     }
     if (event.type === "session.unarchived") {
       this.handleSessionUnarchived(session);
-      return;
-    }
-    if (eventType === "session.synthetic") {
-      this.handleSynthetic(session, data);
       return;
     }
     if (eventType === "session.shell.started") {
@@ -1466,10 +1510,12 @@ export class OpenCodeEventRouter {
         const input = inputRecord(
           data.input ?? parseInputText(active.pendingInput.get(eventId)),
         );
-        if (
-          isBackgroundToolInput(name, input) &&
-          !(isSubagentTool(name) && session.disableSubagents)
-        ) {
+        // Since 2.3.0 every subagent runs in the background, so it gets its
+        // task row as soon as the call is known.
+        const background =
+          (isSubagentTool(name) && !session.disableSubagents) ||
+          isBackgroundShellInput(name, input);
+        if (background) {
           this.openBackgroundTask(
             session,
             eventId,
@@ -1575,24 +1621,14 @@ export class OpenCodeEventRouter {
         return;
       }
       const foreground = active.interaction.opened.get(eventId);
-      const toolName =
-        foreground?.type === "command"
-          ? "bash"
-          : foreground?.type === "delegation"
-            ? "subagent"
-            : name;
+      const toolName = foreground?.type === "command" ? "bash" : name;
       const run =
         event.type === "session.tool.success"
           ? backgroundRunMetadata(toolName, metadata)
           : undefined;
       if (run) {
-        if (foreground) {
-          if (foreground.type === "command")
-            foreground.aggregatedOutput = "Moved to background";
-          else if (foreground.type === "delegation") {
-            foreground.summary = "Moved to background";
-            if (childId) foreground.childRef = childId;
-          }
+        if (foreground?.type === "command") {
+          foreground.aggregatedOutput = "Moved to background";
           active.interaction.opened.delete(eventId);
           this.emit(session.bbThreadId, [
             {
@@ -1743,9 +1779,6 @@ export class OpenCodeEventRouter {
           providerTurnId: active.interaction.providerTurnId,
         },
       ]);
-    }
-    if (event.type === "session.inbox.enqueued") {
-      this.adoptCommandCheckpoint(active, stringValue(data.inboxID));
     }
     if (event.type === "session.inbox.delivered") {
       const inboxId = stringValue(data.inboxID);
@@ -2148,8 +2181,6 @@ export class OpenCodeEventRouter {
     active.finishing = true;
     const context = active.interaction;
     context.abortController.abort();
-    for (const child of this.childRecords(session))
-      if (!child.backgroundTaskId) child.terminal = true;
     if (active.manualCompaction) {
       this.emit(
         session.bbThreadId,
@@ -2169,12 +2200,7 @@ export class OpenCodeEventRouter {
       session.dynamicToolScope,
       "OpenCode turn ended before the BB tool returned",
     );
-    this.closeInteractionContext(
-      session,
-      context,
-      status,
-      context.providerTurnId,
-    );
+    this.closeInteractionContext(session, context, status);
     context.settledTools.clear();
     active.pendingTools.clear();
     active.pendingInput.clear();

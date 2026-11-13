@@ -81,26 +81,17 @@ export function backgroundTaskTaskType(name: string) {
   return isSubagentTool(name) ? LOCAL_AGENT_TASK_TYPE : LOCAL_BASH_TASK_TYPE;
 }
 
-export function isBackgroundToolInput(name: string, rawInput: unknown) {
-  return (
-    inputRecord(rawInput).background === true &&
-    (isShellTool(name) || isSubagentTool(name))
-  );
+export function isBackgroundShellInput(name: string, rawInput: unknown) {
+  return inputRecord(rawInput).background === true && isShellTool(name);
 }
 
-/** The shell/child IDs a running tool success exposes for its task row. */
+/** The shell ID a running tool success exposes for its task row. */
 export function backgroundRunMetadata(name: string, rawMetadata: unknown) {
   const metadata = inputRecord(rawMetadata);
   if (stringValue(metadata.status) !== "running") return undefined;
-  if (isShellTool(name)) {
-    const shellId = stringValue(metadata.shellID);
-    return shellId ? { shellId } : undefined;
-  }
-  if (isSubagentTool(name)) {
-    const childId = stringValue(metadata.sessionID);
-    return childId ? { childId } : undefined;
-  }
-  return undefined;
+  if (!isShellTool(name)) return undefined;
+  const shellId = stringValue(metadata.shellID);
+  return shellId ? { shellId } : undefined;
 }
 
 export type BackgroundCompletion = {
@@ -109,7 +100,7 @@ export type BackgroundCompletion = {
   shellId?: string;
   jobId?: string;
   childId?: string;
-  state: "completed" | "error" | "cancelled";
+  state: "running" | "completed" | "error" | "cancelled";
   text: string;
   exit?: number;
   timeout?: boolean;
@@ -122,6 +113,8 @@ function tagAttribute(attributes: string, name: string) {
 
 export function completionState(value: unknown): BackgroundCompletion["state"] {
   switch (stringValue(value)?.toLowerCase()) {
+    case "running":
+      return "running";
     case "completed":
     case "succeeded":
       return "completed";
@@ -139,9 +132,11 @@ export function completionState(value: unknown): BackgroundCompletion["state"] {
 }
 
 /**
- * OpenCode reports background completion through `session.synthetic`: a
+ * OpenCode reports background work through a synthetic session inbox item: a
  * `<shell>` or `<subagent>` wrapper plus `metadata.source`. Parse both so a
  * missing metadata field or a future wrapper change still settles the task.
+ * A subagent report is `state="running"` while the child still has background
+ * work, even though the job itself is completed.
  */
 export function parseBackgroundCompletion(
   rawData: unknown,
@@ -180,7 +175,9 @@ export function parseBackgroundCompletion(
     ? "error"
     : text.includes("<task_result>")
       ? "completed"
-      : completionState(metadata.state ?? tagAttribute(attributes, "state"));
+      : /Background work still running/i.test(text)
+        ? "running"
+        : completionState(tagAttribute(attributes, "state") ?? metadata.state);
   const exit =
     typeof metadata.exit === "number" && Number.isFinite(metadata.exit)
       ? metadata.exit

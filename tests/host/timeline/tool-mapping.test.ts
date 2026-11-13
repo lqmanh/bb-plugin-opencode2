@@ -436,6 +436,24 @@ test("parses shell and subagent completion synthetics with tag fallbacks", () =>
 
   assert.deepEqual(
     parseBackgroundCompletion({
+      text: '<subagent sessionID="ses_child" state="running" description="List files">\nstarted\n</subagent>',
+      metadata: {
+        source: "subagent",
+        childID: "ses_child",
+        state: "completed",
+      },
+    }),
+    {
+      kind: "subagent",
+      id: "ses_child",
+      childId: "ses_child",
+      state: "running",
+      text: "started",
+    },
+  );
+
+  assert.deepEqual(
+    parseBackgroundCompletion({
       text: "<task_result>done</task_result>",
       metadata: { childID: "ses_child" },
     }),

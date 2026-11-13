@@ -85,6 +85,7 @@ import {
 import {
   createActiveTurn,
   inputRecord,
+  resetReportWake,
   stringValue,
   type OpenCodeRecord,
   type SessionState,
@@ -114,6 +115,9 @@ export async function stopSessionForIntent(
     client.clearBackgroundTasks(session);
     return;
   }
+  // Reports from the interrupted children settle their rows, but must not
+  // start a new turn until the user acts again.
+  resetReportWake(session, true);
   await client.stopBackgroundTasks(session);
   const api = await client.api().catch(() => undefined);
   if (api)
@@ -536,7 +540,9 @@ async function handle(request: RecordValue) {
         );
       if (session.terminalError) throw new Error(session.terminalError);
       if (session.active) throw new Error("An OpenCode turn is already active");
-      const active = createActiveTurn(nextTurnId(), session.providerThreadId);
+      resetReportWake(session, false);
+      const providerTurnId = nextTurnId();
+      const active = createActiveTurn(providerTurnId, session.providerThreadId);
       session.active = active;
       if (isManualCompactionTurn(params.input)) {
         const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -546,7 +552,7 @@ async function handle(request: RecordValue) {
           session.bbThreadId,
           manualCompactionStartDeltas(
             params.clientRequestId,
-            active.interaction.providerTurnId,
+            providerTurnId,
             messageId,
           ),
         );
@@ -579,12 +585,12 @@ async function handle(request: RecordValue) {
         // with "not accepted into exactly one turn".
         {
           kind: "turn.open",
-          providerTurnId: active.interaction.providerTurnId,
+          providerTurnId,
         },
         {
           kind: "input.accepted",
           clientRequestId: params.clientRequestId,
-          providerTurnId: active.interaction.providerTurnId,
+          providerTurnId,
         },
       ]);
       sendResult(request.id, { threadId: params.threadId });
@@ -665,18 +671,20 @@ async function handle(request: RecordValue) {
       const clientRequestId = stringValue(params.clientRequestId);
       if (!clientRequestId)
         throw new Error("Missing clientRequestId for steered input");
+      resetReportWake(session, false);
       // With steerMode "queue" BB keeps the follow-up row as "Steer pending"
       // until the bridge confirms acceptance, so always close the loop with
       // input.accepted (mirrors turn/start and the Codex bridge).
       let active = session.active;
       const openedTurn = !active;
       if (!active) {
-        active = createActiveTurn(nextTurnId(), session.providerThreadId);
+        const providerTurnId = nextTurnId();
+        active = createActiveTurn(providerTurnId, session.providerThreadId);
         session.active = active;
         emit(session.bbThreadId, [
           {
             kind: "turn.open",
-            providerTurnId: active.interaction.providerTurnId,
+            providerTurnId,
           },
         ]);
       }

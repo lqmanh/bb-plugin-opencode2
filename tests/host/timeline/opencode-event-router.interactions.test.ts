@@ -6,6 +6,7 @@ import {
   formApi,
   permissionApi,
   sessionFixture,
+  subagentReport,
 } from "./opencode-event-router.fixture.ts";
 import type { OpenCodeRecord } from "../../../src/host/types.ts";
 
@@ -250,6 +251,39 @@ test("skips a permission reply already answered in OpenCode", async () => {
   await nextTick();
 
   assert.deepEqual(replies, []);
+});
+
+test("routes a permission in a report-woken run", async () => {
+  const requests: OpenCodeRecord[] = [];
+  const replies: OpenCodeRecord[] = [];
+  const api = permissionApi(async (input: OpenCodeRecord) => {
+    replies.push(input);
+  });
+  const { event } = sessionFixture(
+    api,
+    {
+      requestInteraction: async (_method, params) => {
+        requests.push(params);
+        return { decision: "allow_once" };
+      },
+    },
+    { active: null },
+  );
+
+  await subagentReport(event, { inboxId: "msg_report" });
+  await event("session.execution.started");
+  await event("permission.asked", {
+    id: "per_1",
+    action: "shell",
+    message: "run?",
+  });
+  await nextTick();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].turnId, null);
+  assert.deepEqual(replies, [
+    { sessionID: "ses_1", requestID: "per_1", decision: "once" },
+  ]);
 });
 
 test("drops settlements from a turn abandoned without finish", async () => {

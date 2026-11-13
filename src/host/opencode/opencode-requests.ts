@@ -6,6 +6,7 @@ import {
   sanitizeInheritedChildProcessEnv,
   withoutBridgeRuntimeEnv,
 } from "@get-bb/plugin-sdk/provider-bridge";
+import { omitNullTurnId } from "../timeline/timeline.ts";
 import type { OpenCodeRecord } from "../types.ts";
 
 type RecordValue = OpenCodeRecord;
@@ -232,9 +233,13 @@ export function forkBoundaryRetainingThrough(
 
 export function steerAcceptedDelta(
   clientRequestId: string,
-  providerTurnId: string,
+  providerTurnId: string | null,
 ): RecordValue {
-  return { kind: "input.accepted", clientRequestId, providerTurnId };
+  return omitNullTurnId({
+    kind: "input.accepted",
+    clientRequestId,
+    providerTurnId,
+  });
 }
 
 export function revertTargetRetainingThrough(

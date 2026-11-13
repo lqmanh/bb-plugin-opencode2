@@ -41,7 +41,7 @@ service restart.
 
 ```text
 src/
-  server/       BB server entry, provider usage, background notifications
+  server/       BB server entry, provider usage, reference mentions
   host/
     bridge/     Provider bridge, dynamic tools, runtime transport
     opencode/   OpenCode service, config, requests, usage, models
@@ -68,9 +68,9 @@ docs/           Developer documentation
   Other clients opening the same workspace see them; other workspaces do not.
 - **Native subagents are enabled by default.** `subagentsDisabled` adds a
   session deny rule.
-- **Background work uses `backgroundTask` rows.** Explicit background shells and
-  subagents, plus foreground tools OpenCode backgrounds later, become one
-  thread-scoped row.
+- **Background work uses `backgroundTask` rows.** Each native subagent, each
+  background shell, and each foreground shell OpenCode backgrounds later becomes
+  one thread-scoped row.
 - **`session.background` is a user action.** It is session-wide and
   all-or-nothing, returns no count, is a no-op when nothing is blocking, and is
   never called automatically. The host worker resolves the session through a

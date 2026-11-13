@@ -256,8 +256,6 @@ test("merges child usage monotonically and normalizes malformed tokens", () => {
   const record: ChildSessionRecord = {
     parentThreadId: "bb-thread",
     parentProviderThreadId: "ses_parent",
-    callId: "call_sub",
-    terminal: false,
   };
   assert.equal(
     mergeChildUsage(record, usageTotals(usagePayload(5, 6, 7, 8, 9)), 0.75),
