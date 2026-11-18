@@ -95,10 +95,7 @@ export function sessionPermissionRules(input: {
       effect: "allow",
     });
   if (input.disableSubagents)
-    rules.push(
-      { action: "subagent", resource: "*", effect: "deny" },
-      { action: "task", resource: "*", effect: "deny" },
-    );
+    rules.push({ action: "subagent", resource: "*", effect: "deny" });
   // Session rules are merged after the agent's rules, so full mode's broad
   // allow would otherwise override the plan agent's edit deny.
   if (input.planMode)

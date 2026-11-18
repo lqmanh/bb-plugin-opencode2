@@ -7,7 +7,7 @@ its own tool execution; BB provides the thread, timeline, and UI.
 ## Requirements
 
 - BB 0.48.1 or newer
-- OpenCode v2.3.0 or newer (`opencode2` on the host's `PATH`)
+- OpenCode v2.3.1 or newer (`opencode2` on the host's `PATH`)
 - A model provider connected in OpenCode (`opencode2 auth login`)
 
 ## Install

@@ -455,6 +455,7 @@ export class OpenCodeEventRouter {
   private registerChildSession(
     childId: string,
     parent: SessionState,
+    topLevelTaskId?: string,
   ): ChildSessionRecord {
     const existing = this.childSessions.get(childId);
     if (existing) {
@@ -466,11 +467,14 @@ export class OpenCodeEventRouter {
       }
       existing.parentThreadId = parent.bbThreadId;
       existing.parentProviderThreadId = parent.providerThreadId;
+      if (topLevelTaskId && !existing.backgroundTaskId)
+        existing.topLevelTaskId = topLevelTaskId;
       return existing;
     }
     const record: ChildSessionRecord = {
       parentThreadId: parent.bbThreadId,
       parentProviderThreadId: parent.providerThreadId,
+      ...(topLevelTaskId ? { topLevelTaskId } : {}),
     };
     this.childSessions.set(childId, record);
     this.addChildIndex(parent.providerThreadId, childId);
@@ -539,6 +543,7 @@ export class OpenCodeEventRouter {
   ) {
     const record = this.registerChildSession(childId, session);
     record.backgroundTaskId = task.id;
+    delete record.topLevelTaskId;
     task.childSessionId = childId;
     task.interaction.formSessionId = childId;
     return record;
@@ -658,14 +663,12 @@ export class OpenCodeEventRouter {
     }
   }
 
-  private backgroundChildContext(
+  private taskForChildInteraction(
     session: SessionState,
     record: ChildSessionRecord,
   ) {
-    const task = record.backgroundTaskId
-      ? session.backgroundTasks.get(record.backgroundTaskId)
-      : undefined;
-    return task?.interaction;
+    const taskId = record.backgroundTaskId ?? record.topLevelTaskId;
+    return taskId ? session.backgroundTasks.get(taskId) : undefined;
   }
 
   private closeInteractionContext(
@@ -1233,15 +1236,21 @@ export class OpenCodeEventRouter {
     const session = this.sessionLookup.get(sessionId);
     const child = session ? undefined : this.childSessions.get(sessionId);
     const parent = child ? this.parentForChild(child) : undefined;
-    const childContext =
-      child && parent ? this.backgroundChildContext(parent, child) : undefined;
+    const childTask =
+      child && parent ? this.taskForChildInteraction(parent, child) : undefined;
+    const childContext = childTask?.interaction;
     if (eventType === "form.created") {
       if (session?.active) {
-        this.interactions.handleCreatedForm(session, form ?? {});
-      } else if (childContext && child && parent) {
-        this.childParentRef = child.backgroundTaskId;
+        this.interactions.handleCreatedForm(session, form ?? {}, sessionId);
+      } else if (childContext && childTask && parent) {
+        this.childParentRef = childTask.id;
         try {
-          this.interactions.handleCreatedForm(parent, form ?? {}, childContext);
+          this.interactions.handleCreatedForm(
+            parent,
+            form ?? {},
+            sessionId,
+            childContext,
+          );
         } finally {
           this.childParentRef = undefined;
         }
@@ -1271,18 +1280,20 @@ export class OpenCodeEventRouter {
       this.handleChildUsage(child, data);
       return;
     }
+    if (!parent || !childContext) return;
     // Subagent work stays in its task row, never in the parent turn.
-    if (!child.backgroundTaskId || !parent) return;
     const settleState = CHILD_SETTLE_STATES[eventType];
-    if (eventType === "permission.asked" && childContext) {
+    if (eventType === "permission.asked") {
       void this.interactions.handlePermission(parent, data, childContext);
     } else if (settleState) {
-      this.scheduleChildSettle(parent, sessionId, settleState, data);
+      // Only the top-level child's own execution settles its task.
+      if (child.backgroundTaskId)
+        this.scheduleChildSettle(parent, sessionId, settleState, data);
     } else if (eventType.startsWith("session.tool.")) {
-      // Nested subagents have no task row; register them only so their usage
-      // counts.
+      // Nested subagents have no task row; route their interactions to the
+      // top-level task and register them only so their usage counts.
       const nestedId = stringValue(inputRecord(data.metadata).sessionID);
-      if (nestedId) this.registerChildSession(nestedId, parent);
+      if (nestedId) this.registerChildSession(nestedId, parent, childTask?.id);
     }
   }
 
@@ -1942,34 +1953,13 @@ export class OpenCodeEventRouter {
   ) {
     const eventType = stringValue(type);
     if (!eventType) return false;
-    const message = inputRecord(data.message ?? data.info);
-    const messageId = stringValue(
-      data.messageID ?? data.messageId ?? data.id ?? message.id,
-    );
-    const reason = stringValue(data.reason ?? message.reason);
-    const status = stringValue(data.status ?? message.status);
-    const itemId = messageId ?? active.manualCompaction?.itemId;
-    const isStarted =
-      eventType === "session.next.compaction.started" ||
-      eventType === "session.compaction.started" ||
-      (eventType === "session.message.updated" &&
-        status === "running" &&
-        message.type === "compaction");
-    const isCompleted =
-      eventType === "session.next.compaction.ended" ||
-      eventType === "session.compaction.ended" ||
-      eventType === "session.compacted" ||
-      (eventType === "session.message.updated" &&
-        status === "completed" &&
-        message.type === "compaction");
-    const isFailed =
-      eventType === "session.compaction.failed" ||
-      (eventType === "session.message.updated" &&
-        status === "failed" &&
-        message.type === "compaction");
+    const isStarted = eventType === "session.compaction.started";
+    const isCompleted = eventType === "session.compaction.ended";
+    const isFailed = eventType === "session.compaction.failed";
     if (!isStarted && !isCompleted && !isFailed) return false;
 
     if (isStarted) {
+      const itemId = active.manualCompaction?.itemId;
       if (itemId && !active.interaction.opened.has(itemId)) {
         const item = { type: "compaction" };
         active.interaction.opened.set(itemId, item);
@@ -1987,19 +1977,10 @@ export class OpenCodeEventRouter {
     }
 
     const error =
-      stringValue(
-        data.error?.message ??
-          data.error ??
-          message.error?.message ??
-          message.error,
-      ) ?? "OpenCode context compaction failed";
+      stringValue(data.error?.message ?? data.error) ??
+      "OpenCode context compaction failed";
     const manualCompaction = active.manualCompaction;
-    const manual =
-      manualCompaction !== undefined &&
-      (itemId === manualCompaction.itemId ||
-        reason === "manual" ||
-        eventType === "session.compacted");
-    if (manual && manualCompaction) {
+    if (manualCompaction) {
       active.interaction.opened.delete(manualCompaction.itemId);
       this.emit(
         session.bbThreadId,
@@ -2020,22 +2001,6 @@ export class OpenCodeEventRouter {
       return true;
     }
 
-    if (itemId) {
-      const item = active.interaction.opened.get(itemId);
-      if (item) {
-        active.interaction.opened.delete(itemId);
-        this.emit(session.bbThreadId, [
-          {
-            kind: "item.close",
-            key: itemKey(itemId, "compaction"),
-            status: isCompleted ? "completed" : "failed",
-            item,
-            presentation: compactionPresentation,
-            providerTurnId: active.interaction.providerTurnId,
-          },
-        ]);
-      }
-    }
     if (isCompleted)
       this.emit(session.bbThreadId, [
         {

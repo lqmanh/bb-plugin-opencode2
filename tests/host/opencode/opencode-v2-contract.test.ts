@@ -96,11 +96,10 @@ test("each session sees only its own BB tool server, and subagents are denied", 
     dynamicToolServer: "bb_opencode2_abc",
     dynamicToolNames: ["bb_echo"],
   });
-  assert.deepEqual(rules.slice(-4), [
+  assert.deepEqual(rules.slice(-3), [
     { action: "bb_opencode2_*", resource: "*", effect: "deny" },
     { action: "bb_opencode2_abc_*", resource: "*", effect: "allow" },
     { action: "subagent", resource: "*", effect: "deny" },
-    { action: "task", resource: "*", effect: "deny" },
   ]);
   // Without BB tools, other threads' servers are still hidden.
   assert.deepEqual(

@@ -11,7 +11,8 @@ session ruleset. Permission actions are tool names; MCP tools use
 `<server>_<tool>`.
 
 The bridge answers permission requests for the active turn, including a run
-woken by a report, and for background children after their parent turn.
+woken by a report, and for background children after their parent turn. A
+subagent's own subagents use the top-level task row.
 
 ## Events
 
@@ -28,10 +29,8 @@ woken by a report, and for background children after their parent turn.
   so write rows show only path and kind.
 - Native subagents use `metadata.sessionID` for the child session. Reports are
   wrapped in `<subagent sessionID="…" state="…">` and arrive as synthetic
-  `session.inbox.enqueued` items. No `session.synthetic` event is emitted.
+  `session.inbox.enqueued` items.
 - `mcp.status.changed` carries the server name; read `mcp.list` for status.
-- Compaction also appears as `session.next.compaction.*` or a compaction
-  `session.message.updated`.
 
 ## Background tasks
 
@@ -42,10 +41,9 @@ file. Completion arrives as a synthetic `session.inbox.enqueued` item with a
 
 Every subagent runs in the background. Its call returns a `sessionID` at once
 and opens a `local_agent` task row. OpenCode reports through a synthetic
-`session.inbox.enqueued` item with a `<subagent …>` wrapper. A report tagged
-`state="running"` keeps the row open while the child's own background work runs;
-its `metadata.state` already says `completed`. The final report settles the row.
-A follow-up to an idle child starts a new job and reports again.
+`session.inbox.enqueued` item with a `<subagent …>` wrapper. The tag's `state`
+decides the row: `running` keeps it open while the child's background work runs;
+any final state settles it. A follow-up to an idle child reports again.
 
 Each report wakes the parent. When no BB turn is active, the plugin opens one
 with `turn.open` and no input row, so its reply, tools, permissions, and forms
@@ -257,7 +255,7 @@ minor releases. Used APIs have no fallback; check them on every OpenCode bump.
 | `experimental.config.update`                                                                                                       | Excluded | Only accepts `shell`; the global config is edited directly.                                                        |
 | `experimental.usage.limits`                                                                                                        | Excluded | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead.                                            |
 | `experimental.session.stats`, `import`, `export`                                                                                   | Excluded | No BB surface.                                                                                                     |
-| `experimental.artifacts.*`, `schedule.*`, `persistentPty.*`                                                                        | Excluded | No matching BB surface, or overlaps BB terminals.                                                                  |
+| `experimental.artifacts.*`, `experimental.automation.*`, `persistentPty.*`                                                         | Excluded | No matching BB surface, or overlaps BB terminals.                                                                  |
 | `experimental.generate.text`, `generate.image`, `decisions`, `voice.*`                                                             | Excluded | BB has its own services; not needed.                                                                               |
 | `experimental.integration.wellknown.add`, `file.write/watch/unwatch`, `media.get`, `migration.v1.status`, `session.log/wait/skill` | Excluded | Not needed, or overlaps BB APIs.                                                                                   |
 
@@ -271,8 +269,8 @@ minor releases. Used APIs have no fallback; check them on every OpenCode bump.
 - Background shells survive turn handoffs but not `opencode service restart` or
   `stop` (#62978); a vanished shell settles as stopped without its exit code or
   output.
-- A subagent started by another subagent is counted in usage, but its output,
-  permissions, and forms are not shown.
+- A subagent started by another subagent counts toward usage and shows its
+  permissions and forms under the top-level task row; its output is not shown.
 - Reconciled subagent rows have no summary; the session API exposes no result
   text.
 - Turn reconciliation is covered by unit tests only; a dropped event stream was

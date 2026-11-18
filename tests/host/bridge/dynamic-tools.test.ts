@@ -323,7 +323,7 @@ test("the stdio MCP child round trips a tool call through the loopback bridge", 
         params: {
           name: "lookup_weather",
           arguments: { city: "Oslo" },
-          _meta: { sessionID: "oc_session_1" },
+          _meta: { "ai.opencode/sessionID": "oc_session_1" },
         },
       })}\n`,
     );

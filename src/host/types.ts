@@ -54,6 +54,8 @@ export type InteractionContext = {
   abortController: AbortController;
   opened: Map<string, OpenCodeRecord>;
   openQuestions: Map<string, string>;
+  /** Session that owns an open form, which can be a nested child. */
+  formSessions: Map<string, string>;
   settledTools: Set<string>;
   questionWaiters: Map<string, { resolve(form?: OpenCodeRecord): void }>;
   earlyQuestionForms: Map<string, OpenCodeRecord>;
@@ -87,6 +89,8 @@ export type ChildSessionRecord = {
     cost?: number;
   };
   backgroundTaskId?: string;
+  /** The task a nested child's permissions and forms are shown under. */
+  topLevelTaskId?: string;
 };
 
 export function createInteractionContext(input: {
@@ -101,6 +105,7 @@ export function createInteractionContext(input: {
     abortController: new AbortController(),
     opened: new Map(),
     openQuestions: new Map(),
+    formSessions: new Map(),
     settledTools: new Set(),
     questionWaiters: new Map(),
     earlyQuestionForms: new Map(),
@@ -242,8 +247,7 @@ export function resetReportWake(session: SessionState, suppress: boolean) {
 }
 
 export function isSubagentTool(name: string): boolean {
-  const tool = name.toLowerCase();
-  return tool === "task" || tool === "subagent";
+  return name.toLowerCase() === "subagent";
 }
 
 export function stringValue(value: unknown): string | undefined {

@@ -1,6 +1,6 @@
 import { experimental_compareVersions as compareVersions } from "@get-bb/plugin-sdk/provider-bridge";
 
-export const MIN_OPENCODE_VERSION = "2.3.0";
+export const MIN_OPENCODE_VERSION = "2.3.1";
 
 export function isSupportedVersion(version: string) {
   return compareVersions(version, MIN_OPENCODE_VERSION) >= 0;

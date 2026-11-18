@@ -18,7 +18,7 @@ model, and work in BB's usual interface.
 
 ## Requirements
 
-- OpenCode v2.3.0 or newer, with `opencode2` on the host's `PATH`
+- OpenCode v2.3.1 or newer, with `opencode2` on the host's `PATH`
 - At least one model provider connected in OpenCode (`opencode2 auth login`)
 
 ## Good to know

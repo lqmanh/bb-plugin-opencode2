@@ -39,12 +39,8 @@ function shellCommand(input: OpenCodeRecord) {
 }
 
 function delegationLabel(input: OpenCodeRecord) {
-  const agent = firstInputString(input, ["agent", "subagent_type"]);
-  const description = firstInputString(input, [
-    "description",
-    "prompt",
-    "task",
-  ]);
+  const agent = firstInputString(input, ["agent"]);
+  const description = firstInputString(input, ["description", "prompt"]);
   return [agent, description].filter(Boolean).join(": ") || "OpenCode subagent";
 }
 
@@ -154,9 +150,7 @@ export function parseBackgroundCompletion(
         ? "shell"
         : subagentTag
           ? "subagent"
-          : text.includes("<task_result>") || text.includes("<task_error>")
-            ? "subagent"
-            : undefined;
+          : undefined;
   if (!kind) return undefined;
   const tag = kind === "shell" ? shellTag : subagentTag;
   const attributes = tag?.[1] ?? "";
@@ -171,13 +165,8 @@ export function parseBackgroundCompletion(
   const id =
     kind === "shell" ? (jobId ?? shellId ?? taggedId) : (childId ?? taggedId);
   if (!id) return undefined;
-  const state = text.includes("<task_error>")
-    ? "error"
-    : text.includes("<task_result>")
-      ? "completed"
-      : /Background work still running/i.test(text)
-        ? "running"
-        : completionState(tagAttribute(attributes, "state") ?? metadata.state);
+  const tagState = tagAttribute(attributes, "state");
+  const state = completionState(tagState ?? metadata.state);
   const exit =
     typeof metadata.exit === "number" && Number.isFinite(metadata.exit)
       ? metadata.exit

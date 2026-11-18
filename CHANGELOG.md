@@ -9,23 +9,22 @@ All notable changes to this plugin are documented here. The format follows
 
 - A BB skills plugin status row in Settings.
 - OpenCode references in the composer's `@` menu.
-- Subagent reports open a BB turn, so the agent's reply, tools, permissions, and
-  forms appear in the thread.
+- Subagent reports open a BB turn, including one that arrives as its parent turn
+  ends. Reports from children stopped by Stop wait for the next user action.
 
 ### Changed
 
-- Requires OpenCode 2.3.0 or newer.
-- Each subagent opens a background task row immediately and settles on its final
-  report; a report tagged `state="running"` keeps it open.
+- Requires OpenCode 2.3.1 or newer.
+- Each subagent opens a background task row; `state="running"` keeps it open and
+  a final state settles it, even when the answer quotes the running heading.
+  Subagents started by a subagent count toward usage, with permissions and forms
+  under the top-level task.
 - Settings finds the `opencode-usage` plugin by ID or package and prefers a
   working entry over a failed one; other implementations of its RPC still supply
   Provider usage but show as Not installed in Settings.
 
 ### Fixed
 
-- A subagent report that arrives as its parent turn ends still opens a BB turn.
-- Reports from children stopped by Stop no longer open a turn until the next
-  user action.
 - Cold-start races since OpenCode 2.2.7 could show the usage source as Not
   installed, list no agents, or report native skills as not ready.
 - `agent.updated` now refreshes the Agent option.

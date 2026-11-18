@@ -262,9 +262,7 @@ export async function handleDynamicToolsMcpRequest(
         return;
       }
       const meta = record(params._meta);
-      // OpenCode v2 namespaces the calling session; older builds sent
-      // `_meta.sessionID`.
-      const metaSessionId = meta["ai.opencode/sessionID"] ?? meta.sessionID;
+      const metaSessionId = meta["ai.opencode/sessionID"];
       const sessionId =
         typeof metaSessionId === "string" ? metaSessionId : undefined;
       if (sessionId !== runtime.sessionId) {

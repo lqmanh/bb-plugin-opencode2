@@ -152,11 +152,11 @@ test("leaves prompts unchanged and surfaces the subagent warning on failure", ()
   });
   assert.equal(on.text, "hello");
   assert.match(
-    toolFailureError("task", true, "Permission denied"),
+    toolFailureError("subagent", true, "Permission denied"),
     /Native subagents/,
   );
   assert.match(
-    toolFailureError("task", true, "Permission denied"),
+    toolFailureError("subagent", true, "Permission denied"),
     /Permission denied/,
   );
   assert.match(
@@ -164,7 +164,6 @@ test("leaves prompts unchanged and surfaces the subagent warning on failure", ()
     /Native subagents/,
   );
   assert.equal(toolFailureError("bash", true, "boom"), "boom");
-  assert.equal(toolFailureError("task", false, "boom"), "boom");
 });
 
 test("maps every BB permission mode to the matching OpenCode reply behavior", () => {
@@ -181,10 +180,6 @@ test("maps every BB permission mode to the matching OpenCode reply behavior", ()
 
 test("rejects native subagent permission requests before every automatic mode", () => {
   for (const permissionMode of ["accept-edits", "auto", "full"] as const) {
-    assert.equal(
-      automaticPermissionReply(permissionMode, true, "task"),
-      "reject",
-    );
     assert.equal(
       automaticPermissionReply(permissionMode, true, "subagent"),
       "reject",
@@ -398,7 +393,7 @@ test("maps background shells and subagents to visible task rows", () => {
   assert.equal("outputFile" in agent, false);
 });
 
-test("parses shell and subagent completion synthetics with tag fallbacks", () => {
+test("parses shell and subagent completion synthetics", () => {
   assert.deepEqual(
     parseBackgroundCompletion({
       text: '<shell id="job_1" state="completed" command="npm test">\nok\n</shell>',
@@ -449,20 +444,6 @@ test("parses shell and subagent completion synthetics with tag fallbacks", () =>
       childId: "ses_child",
       state: "running",
       text: "started",
-    },
-  );
-
-  assert.deepEqual(
-    parseBackgroundCompletion({
-      text: "<task_result>done</task_result>",
-      metadata: { childID: "ses_child" },
-    }),
-    {
-      kind: "subagent",
-      id: "ses_child",
-      childId: "ses_child",
-      state: "completed",
-      text: "<task_result>done</task_result>",
     },
   );
 

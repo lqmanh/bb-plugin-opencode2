@@ -5,17 +5,17 @@ import type {
   PluginMentionSearchContext,
 } from "@get-bb/plugin-sdk";
 import {
-  OPENCODE_PROVIDER_ID,
-  opencodeHostContract,
-  type ReferenceInfo,
-} from "../shared/settings-contract.ts";
-import {
   REFERENCE_PROVIDER_ID,
   decodeReferenceId,
   encodeReferenceId,
   referenceContext,
   referenceNotFound,
 } from "../shared/references.ts";
+import {
+  OPENCODE_PROVIDER_ID,
+  opencodeHostContract,
+  type ReferenceInfo,
+} from "../shared/settings-contract.ts";
 
 type ReferenceHost = ExperimentalHostClient<typeof opencodeHostContract>;
 type ReferenceLocation = { hostId: string; directory: string };

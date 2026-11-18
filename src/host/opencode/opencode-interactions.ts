@@ -507,9 +507,13 @@ export class OpenCodeInteractions {
   handleCreatedForm(
     session: SessionState,
     form: RecordValue,
+    formSessionId: string,
     context: InteractionContext | undefined = activeInteraction(session),
   ) {
     if (!context || context.abortController.signal.aborted) return;
+    const formId = stringValue(form.id);
+    if (!formId) return;
+    context.formSessions.set(formId, formSessionId);
     const callId = this.questionCallId(form);
     if (callId) {
       const waiter = context.questionWaiters.get(callId);
@@ -526,8 +530,6 @@ export class OpenCodeInteractions {
         return;
       }
     }
-    const formId = stringValue(form.id);
-    if (!formId) return;
     const key = `form:${formId}`;
     if (context.openQuestions.has(key) || context.settledTools.has(key)) return;
     if (!context.opened.has(key)) {
@@ -580,11 +582,14 @@ export class OpenCodeInteractions {
     formId: string,
     message?: string,
   ) {
+    const sessionId = context.formSessions.get(formId);
+    context.formSessions.delete(formId);
+    if (!sessionId) return;
     context.ownForms.add(formId);
     await this.api()
       .then((api) =>
         api.session.form.cancel({
-          sessionID: context.formSessionId,
+          sessionID: sessionId,
           formID: formId,
           ...(message ? { message } : {}),
         }),
@@ -609,6 +614,8 @@ export class OpenCodeInteractions {
     if (status === "completed") item.result = text;
     else item.error = text;
     context.opened.delete(callId);
+    const formId = context.openQuestions.get(callId);
+    if (formId) context.formSessions.delete(formId);
     context.openQuestions.delete(callId);
     context.settledTools.add(callId);
     this.emitTimeline(session.bbThreadId, [
@@ -690,6 +697,17 @@ export class OpenCodeInteractions {
       );
       return;
     }
+    const formSessionId = context.formSessions.get(formId);
+    if (!formSessionId) {
+      this.closeQuestion(
+        session,
+        context,
+        callId,
+        "failed",
+        "OpenCode did not report the question's session",
+      );
+      return;
+    }
     context.openQuestions.set(callId, formId);
     const settled = context.settledForms.get(formId);
     if (settled) {
@@ -759,7 +777,7 @@ export class OpenCodeInteractions {
       const api = await this.api();
       context.ownForms.add(formId);
       await api.session.form.reply({
-        sessionID: context.formSessionId,
+        sessionID: formSessionId,
         formID: formId,
         answer: mapped.answer,
       });

@@ -122,6 +122,94 @@ test("maps a subagent call and reads child usage at its final report", async () 
   assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, true);
 });
 
+test("settles a completed report whose answer quotes the running heading", async () => {
+  const { emitted, event, session } = backgroundFixture();
+
+  await startSubagentTask(event);
+  await subagentReport(event, {
+    state: "completed",
+    text: "The log said:\n\nBackground work still running:\n- shell (shell_1): sleep 20",
+  });
+
+  const close = backgroundTaskClose(emitted);
+  assert.equal(close?.status, "completed");
+  assert.equal(close?.item.taskStatus, "completed");
+  assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, true);
+});
+
+test("routes a nested child's permission and form to the top-level task", async () => {
+  const requests: OpenCodeRecord[] = [];
+  const permissionReplies: OpenCodeRecord[] = [];
+  const formReplies: OpenCodeRecord[] = [];
+  const api = createFakeOpenCodeApi({
+    permission: {
+      reply: async (input: OpenCodeRecord) => {
+        permissionReplies.push(input);
+      },
+    },
+    session: {
+      form: {
+        reply: async (input: OpenCodeRecord) => {
+          formReplies.push(input);
+        },
+      },
+    },
+  });
+  const { emitted, event, router, session } = backgroundFixture(api, {
+    requestInteraction: async (_method, params) => {
+      requests.push(params);
+      return params.payload?.kind === "approval"
+        ? { decision: "allow_once" }
+        : { kind: "user_answer", answers: { name: { freeText: "Ada" } } };
+    },
+  });
+
+  await startSubagentTask(event);
+  await event("session.tool.progress", {
+    sessionID: "ses_child",
+    id: "call_grand",
+    metadata: { sessionID: "ses_grand", status: "running" },
+  });
+  await event("permission.asked", {
+    sessionID: "ses_grand",
+    id: "per_1",
+    action: "read",
+    message: "read?",
+  });
+  await event("form.created", {
+    sessionID: "ses_grand",
+    form: {
+      id: "form_1",
+      metadata: { kind: "question", tool: { id: "call_q" } },
+      fields: [{ key: "name", type: "string", description: "Your name" }],
+    },
+  });
+  await nextTick();
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].turnId, null);
+  assert.deepEqual(permissionReplies, [
+    { sessionID: "ses_grand", requestID: "per_1", decision: "once" },
+  ]);
+  assert.equal(formReplies.length, 1);
+  assert.equal(formReplies[0].sessionID, "ses_grand");
+  const row = emitted.find(
+    (delta) =>
+      delta.key?.providerItemId === "form:form_1" &&
+      delta.kind === "item.close",
+  );
+  assert.equal(row?.key.parentRef, "bg:call_sub");
+
+  // The nested child's own execution must not settle the top-level task.
+  await withMockTimers(async () => {
+    await event("session.execution.succeeded", { sessionID: "ses_grand" });
+    mock.timers.tick(5_000);
+  });
+  assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, false);
+
+  await router.finish(session, "completed");
+});
+
 test("converts a running foreground shell into a background task row", async () => {
   const { emitted, event } = backgroundFixture();
 
