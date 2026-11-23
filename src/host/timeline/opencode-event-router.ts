@@ -396,14 +396,6 @@ function retryErrorCategory(error: RecordValue) {
   return undefined;
 }
 
-/** The subagent's final report, without OpenCode's wrapper tag. */
-export function subagentSummary(text: string): string {
-  return text
-    .replace(/^\s*<subagent\b[^>]*>\s*/, "")
-    .replace(/\s*<\/subagent>\s*$/, "")
-    .trim();
-}
-
 export type OpenCodeEventRouterHooks = {
   onSessionGone?: (
     session: SessionState,
@@ -1521,8 +1513,7 @@ export class OpenCodeEventRouter {
         const input = inputRecord(
           data.input ?? parseInputText(active.pendingInput.get(eventId)),
         );
-        // Since 2.3.0 every subagent runs in the background, so it gets its
-        // task row as soon as the call is known.
+        // Subagents always run in the background.
         const background =
           (isSubagentTool(name) && !session.disableSubagents) ||
           isBackgroundShellInput(name, input);
@@ -1688,7 +1679,7 @@ export class OpenCodeEventRouter {
       if (item.type === "delegation") {
         item.summary =
           event.type === "session.tool.success"
-            ? subagentSummary(output)
+            ? output.trim()
             : toolFailureError(
                 isSubagentTool(name) ? name : "subagent",
                 session.disableSubagents,

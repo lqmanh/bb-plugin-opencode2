@@ -127,46 +127,49 @@ export function completionState(value: unknown): BackgroundCompletion["state"] {
   }
 }
 
+const RESULT_OPEN = "<background-result ";
+const RESULT_CLOSE = "</background-result>";
+
 /**
- * OpenCode reports background work through a synthetic session inbox item: a
- * `<shell>` or `<subagent>` wrapper plus `metadata.source`. Parse both so a
- * missing metadata field or a future wrapper change still settles the task.
- * A subagent report is `state="running"` while the child still has background
- * work, even though the job itself is completed.
+ * Split OpenCode's `<background-result …>\n…\n</background-result>` wrapper.
+ * Attributes are not escaped (a command may contain `>`), so they end at the
+ * first `>\n`. String scans keep a malformed report from backtracking.
+ */
+function splitBackgroundResult(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(RESULT_OPEN) || !trimmed.endsWith(RESULT_CLOSE))
+    return undefined;
+  const end = trimmed.indexOf(">\n");
+  if (end < 0) return undefined;
+  return {
+    attributes: trimmed.slice(RESULT_OPEN.length, end),
+    body: trimmed.slice(end + 2, -RESULT_CLOSE.length).trim(),
+  };
+}
+
+/**
+ * Reads a synthetic background report into a task completion. Kind and IDs
+ * come from `metadata`; the tag's `state` wins because a subagent report is
+ * `running` while the child still has background work, even though its
+ * metadata says completed.
  */
 export function parseBackgroundCompletion(
   rawData: unknown,
 ): BackgroundCompletion | undefined {
   const data = inputRecord(rawData);
   const metadata = inputRecord(data.metadata);
+  const kind = stringValue(metadata.source);
+  if (kind !== "shell" && kind !== "subagent") return undefined;
   const text = stringValue(data.text) ?? "";
-  const shellTag = text.match(/<shell\b([^>]*)>([\s\S]*?)<\/shell>/i);
-  const subagentTag = text.match(/<subagent\b([^>]*)>([\s\S]*?)<\/subagent>/i);
-  const source = stringValue(metadata.source);
-  const kind =
-    source === "shell" || source === "subagent"
-      ? source
-      : shellTag
-        ? "shell"
-        : subagentTag
-          ? "subagent"
-          : undefined;
-  if (!kind) return undefined;
-  const tag = kind === "shell" ? shellTag : subagentTag;
-  const attributes = tag?.[1] ?? "";
-  const body = (tag?.[2] ?? text).trim();
+  const wrapper = splitBackgroundResult(text);
   const shellId = stringValue(metadata.shellID);
   const jobId = stringValue(metadata.jobID);
   const childId = stringValue(metadata.childID);
-  const taggedId = tagAttribute(
-    attributes,
-    kind === "shell" ? "id" : "sessionID",
-  );
-  const id =
-    kind === "shell" ? (jobId ?? shellId ?? taggedId) : (childId ?? taggedId);
+  const id = kind === "shell" ? (jobId ?? shellId) : childId;
   if (!id) return undefined;
-  const tagState = tagAttribute(attributes, "state");
-  const state = completionState(tagState ?? metadata.state);
+  const state = completionState(
+    tagAttribute(wrapper?.attributes ?? "", "state") ?? metadata.state,
+  );
   const exit =
     typeof metadata.exit === "number" && Number.isFinite(metadata.exit)
       ? metadata.exit
@@ -178,7 +181,7 @@ export function parseBackgroundCompletion(
     ...(jobId ? { jobId } : {}),
     ...(childId ? { childId } : {}),
     state,
-    text: body,
+    text: wrapper?.body ?? text.trim(),
     ...(exit !== undefined ? { exit } : {}),
     ...(metadata.timeout === true ? { timeout: true } : {}),
   };

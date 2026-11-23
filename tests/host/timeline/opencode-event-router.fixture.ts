@@ -256,7 +256,7 @@ export async function startSubagentTask(
   return { callId, childId, succeed };
 }
 
-/** A synthetic inbox item, as OpenCode 2.3.0 delivers background reports. */
+/** A synthetic inbox item carrying a background report. */
 async function enqueueSynthetic(
   event: Event,
   inboxID: string,
@@ -266,6 +266,10 @@ async function enqueueSynthetic(
     inboxID,
     item: { type: "synthetic", payload, delivery: "steer" },
   });
+}
+
+function backgroundResult(attributes: string, text: string) {
+  return `<background-result ${attributes}>\n${text}\n</background-result>`;
 }
 
 export type SubagentReportOptions = {
@@ -286,7 +290,10 @@ export async function subagentReport(
       ? "\n\nBackground work still running:\n- shell (shell_1): sleep 20"
       : "";
   await enqueueSynthetic(event, options.inboxId ?? `msg_${childId}_${state}`, {
-    text: `<subagent sessionID="${childId}" state="${state}" description="List files">\n${text}${running}\n</subagent>`,
+    text: backgroundResult(
+      `kind="subagent" sessionID="${childId}" state="${state}" description="List files"`,
+      `${text}${running}`,
+    ),
     metadata: {
       source: "subagent",
       childID: childId,
@@ -318,7 +325,10 @@ export async function completeShell(
   switch (options.via) {
     case "synthetic":
       await enqueueSynthetic(event, `msg_${shellId}_${state}`, {
-        text: `<shell id="${shellId}" state="${state}" command="${options.command ?? "true"}">\n${text}\n</shell>`,
+        text: backgroundResult(
+          `kind="shell" id="${shellId}" state="${state}" command="${options.command ?? "true"}"`,
+          text,
+        ),
         metadata: { source: "shell", shellID: shellId, state, exit },
       });
       return;

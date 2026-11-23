@@ -88,7 +88,7 @@ test("aggregates multiple and nested child sessions exactly once", async () => {
     content: [
       {
         type: "text",
-        text: '<subagent sessionID="ses_child2" state="completed">done</subagent>',
+        text: "done",
       },
     ],
     metadata: { sessionID: "ses_child2", status: "completed" },

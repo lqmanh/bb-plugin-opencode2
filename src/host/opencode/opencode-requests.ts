@@ -33,6 +33,16 @@ export const BB_TOOLS_DENY_RULE: PermissionRule = {
   effect: "deny",
 };
 
+/**
+ * Session rule that hides OpenCode automations, which run outside BB turns;
+ * BB has its own. The glob also hides an MCP server named `automation`.
+ */
+const AUTOMATION_DENY_RULE: PermissionRule = {
+  action: "automation_*",
+  resource: "*",
+  effect: "deny",
+};
+
 // OpenCode evaluates the agent ruleset and then the session ruleset, and the
 // last matching rule wins. v2's `build` agent allows every action, so without
 // session rules OpenCode never asks and BB's permission modes do nothing.
@@ -60,6 +70,7 @@ const ACCEPT_EDITS_ALLOWED_ACTIONS = [
  *   always allowed instead of prompting twice.
  * - Disabled native subagents are denied outright, which OpenCode reports to
  *   the model as a tool error instead of interrupting the turn.
+ * - OpenCode automations are always denied (see AUTOMATION_DENY_RULE).
  */
 export function sessionPermissionRules(input: {
   permissionMode?: string;
@@ -104,6 +115,7 @@ export function sessionPermissionRules(input: {
       { action: "write", resource: "*", effect: "deny" },
       { action: "patch", resource: "*", effect: "deny" },
     );
+  rules.push(AUTOMATION_DENY_RULE);
   return rules;
 }
 

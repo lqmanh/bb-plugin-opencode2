@@ -65,7 +65,10 @@ test("full mode allows everything and auto keeps OpenCode's agent rules", () => 
   );
   assert.deepEqual(
     sessionPermissionRules({ permissionMode: "auto", disableSubagents: false }),
-    [{ action: "bb_opencode2_*", resource: "*", effect: "deny" }],
+    [
+      { action: "bb_opencode2_*", resource: "*", effect: "deny" },
+      { action: "automation_*", resource: "*", effect: "deny" },
+    ],
   );
 });
 
@@ -96,10 +99,11 @@ test("each session sees only its own BB tool server, and subagents are denied", 
     dynamicToolServer: "bb_opencode2_abc",
     dynamicToolNames: ["bb_echo"],
   });
-  assert.deepEqual(rules.slice(-3), [
+  assert.deepEqual(rules.slice(-4), [
     { action: "bb_opencode2_*", resource: "*", effect: "deny" },
     { action: "bb_opencode2_abc_*", resource: "*", effect: "allow" },
     { action: "subagent", resource: "*", effect: "deny" },
+    { action: "automation_*", resource: "*", effect: "deny" },
   ]);
   // Without BB tools, other threads' servers are still hidden.
   assert.deepEqual(
@@ -107,6 +111,7 @@ test("each session sees only its own BB tool server, and subagents are denied", 
     [
       { action: "*", resource: "*", effect: "allow" },
       { action: "bb_opencode2_*", resource: "*", effect: "deny" },
+      { action: "automation_*", resource: "*", effect: "deny" },
     ],
   );
 });

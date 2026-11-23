@@ -8,7 +8,9 @@ shapes, not the semantics below. Docs: https://opencode.ai/v2/docs/build/client.
 Rules are `{action, resource, effect: allow|deny|ask}`. OpenCode merges agent
 and session rules, with the last match winning. `session.update` replaces the
 session ruleset. Permission actions are tool names; MCP tools use
-`<server>_<tool>`.
+`<server>_<tool>`. BB sessions deny `automation_*` in every permission mode,
+which also hides an MCP server named `automation`. OpenCode automations stay
+available outside BB.
 
 The bridge answers permission requests for the active turn, including a run
 woken by a report, and for background children after their parent turn. A
@@ -27,23 +29,21 @@ subagent's own subagents use the top-level task row.
   Their content ends with `Exit code: N` or `Exit code: N (SIGTERM)`.
 - Edit success carries patches in `metadata.files`; write success has no patch,
   so write rows show only path and kind.
-- Native subagents use `metadata.sessionID` for the child session. Reports are
-  wrapped in `<subagent sessionID="…" state="…">` and arrive as synthetic
-  `session.inbox.enqueued` items.
+- Native subagents use `metadata.sessionID` for the child session.
 - `mcp.status.changed` carries the server name; read `mcp.list` for status.
 
 ## Background tasks
 
 A background shell succeeds with `metadata.status: "running"` and
-`metadata.shellID`. `session.shell.started`/`shell.created` carry its output
-file. Completion arrives as a synthetic `session.inbox.enqueued` item with a
-`<shell …>` wrapper; `session.shell.ended` and `shell.exited` also settle it.
+`metadata.shellID`; `session.shell.started`/`shell.created` carry its output
+file. Completion is a synthetic `session.inbox.enqueued` item wrapped in
+`<background-result kind="shell" …>`, or `session.shell.ended` / `shell.exited`.
 
-Every subagent runs in the background. Its call returns a `sessionID` at once
-and opens a `local_agent` task row. OpenCode reports through a synthetic
-`session.inbox.enqueued` item with a `<subagent …>` wrapper. The tag's `state`
-decides the row: `running` keeps it open while the child's background work runs;
-any final state settles it. A follow-up to an idle child reports again.
+Every subagent runs in the background and opens a `local_agent` task row
+immediately. Its report is a synthetic `session.inbox.enqueued` item wrapped in
+`<background-result kind="subagent" …>`. The tag's `state` decides the row:
+`running` keeps it open; any final state settles it. A follow-up to an idle
+child reports again.
 
 Each report wakes the parent. When no BB turn is active, the plugin opens one
 with `turn.open` and no input row, so its reply, tools, permissions, and forms
@@ -255,7 +255,8 @@ minor releases. Used APIs have no fallback; check them on every OpenCode bump.
 | `experimental.config.update`                                                                                                       | Excluded | Only accepts `shell`; the global config is edited directly.                                                        |
 | `experimental.usage.limits`                                                                                                        | Excluded | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead.                                            |
 | `experimental.session.stats`, `import`, `export`                                                                                   | Excluded | No BB surface.                                                                                                     |
-| `experimental.artifacts.*`, `experimental.automation.*`, `persistentPty.*`                                                         | Excluded | No matching BB surface, or overlaps BB terminals.                                                                  |
+| `experimental.automation.*`                                                                                                        | Excluded | BB has its own automations.                                                                                        |
+| `experimental.artifacts.*`, `persistentPty.*`                                                                                      | Excluded | No matching BB surface, or overlaps BB terminals.                                                                  |
 | `experimental.generate.text`, `generate.image`, `decisions`, `voice.*`                                                             | Excluded | BB has its own services; not needed.                                                                               |
 | `experimental.integration.wellknown.add`, `file.write/watch/unwatch`, `media.get`, `migration.v1.status`, `session.log/wait/skill` | Excluded | Not needed, or overlaps BB APIs.                                                                                   |
 

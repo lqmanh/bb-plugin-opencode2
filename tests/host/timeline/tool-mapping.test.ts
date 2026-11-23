@@ -393,10 +393,13 @@ test("maps background shells and subagents to visible task rows", () => {
   assert.equal("outputFile" in agent, false);
 });
 
-test("parses shell and subagent completion synthetics", () => {
+test("parses background completion reports", () => {
+  // OpenCode does not escape attributes, so a command may contain `>`.
+  const shellText =
+    '<background-result kind="shell" id="job_1" state="completed" command="npm test 2>&1">\nok\n</background-result>';
   assert.deepEqual(
     parseBackgroundCompletion({
-      text: '<shell id="job_1" state="completed" command="npm test">\nok\n</shell>',
+      text: shellText,
       metadata: {
         source: "shell",
         shellID: "shell_1",
@@ -418,12 +421,13 @@ test("parses shell and subagent completion synthetics", () => {
 
   assert.deepEqual(
     parseBackgroundCompletion({
-      text: '<subagent sessionID="ses_child" state="error" description="List files">\nboom\n</subagent>',
-      metadata: { source: "subagent" },
+      text: '<background-result kind="subagent" sessionID="ses_child" state="error" description="List files">\nboom\n</background-result>',
+      metadata: { source: "subagent", childID: "ses_child" },
     }),
     {
       kind: "subagent",
       id: "ses_child",
+      childId: "ses_child",
       state: "error",
       text: "boom",
     },
@@ -431,7 +435,7 @@ test("parses shell and subagent completion synthetics", () => {
 
   assert.deepEqual(
     parseBackgroundCompletion({
-      text: '<subagent sessionID="ses_child" state="running" description="List files">\nstarted\n</subagent>',
+      text: '<background-result kind="subagent" sessionID="ses_child" state="running" description="List files">\nstarted\n</background-result>',
       metadata: {
         source: "subagent",
         childID: "ses_child",
@@ -444,6 +448,25 @@ test("parses shell and subagent completion synthetics", () => {
       childId: "ses_child",
       state: "running",
       text: "started",
+    },
+  );
+
+  assert.deepEqual(
+    parseBackgroundCompletion({
+      text: `<background-result kind="subagent" sessionID="ses_child" state="completed" description="Compare a > b">\nThe shell said:\n${shellText}\n</background-result>`,
+      metadata: {
+        source: "subagent",
+        childID: "ses_child",
+        agent: "subagent",
+        state: "completed",
+      },
+    }),
+    {
+      kind: "subagent",
+      id: "ses_child",
+      childId: "ses_child",
+      state: "completed",
+      text: `The shell said:\n${shellText}`,
     },
   );
 

@@ -14,11 +14,13 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Changed
 
-- Requires OpenCode 2.3.1 or newer.
+- Requires OpenCode 2.4.1 or newer.
 - Each subagent opens a background task row; `state="running"` keeps it open and
-  a final state settles it, even when the answer quotes the running heading.
-  Subagents started by a subagent count toward usage, with permissions and forms
-  under the top-level task.
+  a final state settles it, even when metadata says completed. Subagents started
+  by a subagent count toward usage and show permissions and forms under the
+  top-level task.
+- BB sessions deny OpenCode automations (`automation_*`); OpenCode automations
+  stay available outside BB.
 - Settings finds the `opencode-usage` plugin by ID or package and prefers a
   working entry over a failed one; other implementations of its RPC still supply
   Provider usage but show as Not installed in Settings.
