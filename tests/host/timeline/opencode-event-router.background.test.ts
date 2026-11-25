@@ -9,7 +9,9 @@ import {
   delegationClose,
   emptyApi,
   formApi,
+  imageTaskClose,
   permissionApi,
+  startImageTask,
   startShellTask,
   startSubagentTask,
   subagentReport,
@@ -688,16 +690,21 @@ test("settles a child that goes idle without reporting", async () => {
   assert.equal(session.backgroundTasks.get("bg:call_sub")?.settled, true);
 });
 
-test("closes open background tasks as interrupted when the thread stops", async () => {
+test("closes open task rows as interrupted when the thread stops", async () => {
   const { emitted, event, router, session } = backgroundFixture();
 
   await startShellTask(event, { command: "sleep 1" });
+  await startImageTask(event);
   router.interruptBackgroundTasks(session, "Thread stopped");
 
   const close = backgroundTaskClose(emitted);
   assert.equal(close?.status, "interrupted");
   assert.equal(close?.item.taskStatus, "stopped");
   assert.equal(session.backgroundTasks.get("bg:call_shell")?.settled, true);
+
+  const image = imageTaskClose(emitted);
+  assert.equal(image?.status, "interrupted");
+  assert.equal(session.backgroundTasks.get("bg:call_image")?.settled, true);
 });
 
 test("closes a background shell when OpenCode reports it exited", async (t) => {

@@ -381,9 +381,10 @@ test("backgrounds the OpenCode session for a live or persisted thread", async ()
   assert.deepEqual(calls, ["ses_live"]);
 });
 
-test("stops running background shells and child sessions once", async () => {
+test("stops running background shells, child sessions, and image jobs once", async () => {
   const removed: string[] = [];
   const interrupted: string[] = [];
+  const canceled: string[] = [];
   const closed: string[] = [];
   const server = new OpenCodeServer();
   const tasks = new Map([
@@ -405,6 +406,15 @@ test("stops running background shells and child sessions once", async () => {
         settled: false,
       },
     ],
+    [
+      "bg:image",
+      {
+        id: "bg:image",
+        kind: "image",
+        jobId: "image_1",
+        settled: false,
+      },
+    ],
   ]);
   const session = createTestSession({
     providerThreadId: "ses_parent",
@@ -422,6 +432,13 @@ test("stops running background shells and child sessions once", async () => {
           interrupted.push(sessionID);
         },
       },
+      experimental: {
+        job: {
+          cancel: async ({ id }: { id: string }) => {
+            canceled.push(id);
+          },
+        },
+      },
     }),
     eventRouter: {
       interruptBackgroundTasks: (_session: SessionState, reason: string) => {
@@ -436,6 +453,7 @@ test("stops running background shells and child sessions once", async () => {
 
   assert.deepEqual(removed, ["shell_1"]);
   assert.deepEqual(interrupted, ["ses_child"]);
+  assert.deepEqual(canceled, ["image_1"]);
   assert.deepEqual(closed, ["Thread stopped"]);
 });
 

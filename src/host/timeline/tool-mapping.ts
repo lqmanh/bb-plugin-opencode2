@@ -8,6 +8,7 @@ import {
   experimental_toolPresentation as toolPresentation,
   experimental_webFetchPresentation as webFetchPresentation,
   experimental_webSearchPresentation as webSearchPresentation,
+  experimental_withTitle as withTitle,
   LOCAL_BASH_TASK_TYPE,
   type DynamicTool,
 } from "@get-bb/plugin-sdk/provider-bridge";
@@ -17,6 +18,7 @@ import {
   isSubagentTool,
   stringValue,
   usageTotal,
+  type BackgroundCompletionState,
   type OpenCodeRecord,
   type UsageTotals,
 } from "../types.ts";
@@ -26,12 +28,17 @@ type RecordValue = OpenCodeRecord;
 const MAX_TOUCHED_PATHS = 16;
 
 export const LOCAL_AGENT_TASK_TYPE = "local_agent";
+export const LOCAL_IMAGE_TASK_TYPE = "local_image";
 export const BACKGROUND_TASK_PREFIX = "bg:";
 
 function isShellTool(name: string) {
   return ["bash", "shell", "exec", "run", "command"].includes(
     name.toLowerCase(),
   );
+}
+
+export function isImageTool(name: string) {
+  return name.toLowerCase() === "generate_image";
 }
 
 function shellCommand(input: OpenCodeRecord) {
@@ -51,6 +58,8 @@ export function backgroundTaskKey(callId: string) {
 export function backgroundTaskDescription(name: string, rawInput: unknown) {
   const input = inputRecord(rawInput);
   if (isShellTool(name)) return shellCommand(input) || "Shell command";
+  if (isImageTool(name))
+    return firstInputString(input, ["prompt"]) ?? "Image generation";
   return delegationLabel(input);
 }
 
@@ -74,6 +83,7 @@ export function backgroundTaskItem(args: {
 }
 
 export function backgroundTaskTaskType(name: string) {
+  if (isImageTool(name)) return LOCAL_IMAGE_TASK_TYPE;
   return isSubagentTool(name) ? LOCAL_AGENT_TASK_TYPE : LOCAL_BASH_TASK_TYPE;
 }
 
@@ -91,13 +101,14 @@ export function backgroundRunMetadata(name: string, rawMetadata: unknown) {
 }
 
 export type BackgroundCompletion = {
-  kind: "shell" | "subagent";
+  kind: "shell" | "subagent" | "image";
   id: string;
   shellId?: string;
   jobId?: string;
   childId?: string;
-  state: "running" | "completed" | "error" | "cancelled";
+  state: BackgroundCompletionState;
   text: string;
+  path?: string;
   exit?: number;
   timeout?: boolean;
 };
@@ -159,31 +170,106 @@ export function parseBackgroundCompletion(
   const data = inputRecord(rawData);
   const metadata = inputRecord(data.metadata);
   const kind = stringValue(metadata.source);
-  if (kind !== "shell" && kind !== "subagent") return undefined;
+  if (kind !== "shell" && kind !== "subagent" && kind !== "generate_image")
+    return undefined;
   const text = stringValue(data.text) ?? "";
   const wrapper = splitBackgroundResult(text);
   const shellId = stringValue(metadata.shellID);
   const jobId = stringValue(metadata.jobID);
   const childId = stringValue(metadata.childID);
-  const id = kind === "shell" ? (jobId ?? shellId) : childId;
+  const completionKind = kind === "generate_image" ? "image" : kind;
+  const id =
+    completionKind === "image"
+      ? jobId
+      : completionKind === "shell"
+        ? (jobId ?? shellId)
+        : childId;
   if (!id) return undefined;
   const state = completionState(
     tagAttribute(wrapper?.attributes ?? "", "state") ?? metadata.state,
   );
+  const body = wrapper?.body ?? text.trim();
+  const path =
+    completionKind === "image" ? savedImagePathFromReport(body) : undefined;
   const exit =
     typeof metadata.exit === "number" && Number.isFinite(metadata.exit)
       ? metadata.exit
       : undefined;
   return {
-    kind,
+    kind: completionKind,
     id,
     ...(shellId ? { shellId } : {}),
     ...(jobId ? { jobId } : {}),
     ...(childId ? { childId } : {}),
     state,
-    text: wrapper?.body ?? text.trim(),
+    text: body,
+    ...(path ? { path } : {}),
     ...(exit !== undefined ? { exit } : {}),
     ...(metadata.timeout === true ? { timeout: true } : {}),
+  };
+}
+
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+
+export function savedImagePath(stem: string | undefined, cwd: string) {
+  if (!stem) return undefined;
+  const file = isAbsolute(stem) ? stem : resolve(cwd, stem);
+  const lower = file.toLowerCase();
+  if (IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext)))
+    return statSync(file, { throwIfNoEntry: false })?.isFile()
+      ? file
+      : undefined;
+  for (const ext of IMAGE_EXTENSIONS)
+    if (statSync(file + ext, { throwIfNoEntry: false })?.isFile())
+      return file + ext;
+  return undefined;
+}
+
+function savedImagePathFromReport(text: string) {
+  const marker = "Saved image: ";
+  const index = text.indexOf(marker);
+  if (index < 0) return undefined;
+  const start = index + marker.length;
+  const end = text.indexOf("\n", start);
+  let value = text.slice(start, end < 0 ? undefined : end).trim();
+  const model = value.lastIndexOf(" (");
+  if (model > 0) value = value.slice(0, model);
+  value = value.replace(/\.$/, "").trim();
+  return value || undefined;
+}
+
+export function imageToolResult(rawMetadata: unknown, rawOutput?: unknown) {
+  const metadata = inputRecord(rawMetadata);
+  const output = inputRecord(rawOutput);
+  return {
+    jobId: stringValue(metadata.jobID) ?? stringValue(output.id),
+    stem: stringValue(metadata.path) ?? stringValue(output.path),
+  };
+}
+
+const IMAGE_GENERATION_PRESENTATION = {
+  label: { pending: "Generating image", completed: "Generated image" },
+  icon: { glyph: "Palette" },
+};
+
+export function imageGenerationPresentation(title?: string) {
+  return withTitle(
+    IMAGE_GENERATION_PRESENTATION,
+    presentationTitle(title ?? ""),
+  );
+}
+
+export function imageGenerationRow(rawInput: unknown) {
+  const prompt = stringValue(inputRecord(rawInput).prompt);
+  return {
+    item: {
+      type: "imageGeneration",
+      prompt: prompt ?? null,
+      path: null,
+      error: null,
+      transparentBackground: false,
+    },
+    presentation: imageGenerationPresentation(prompt),
   };
 }
 

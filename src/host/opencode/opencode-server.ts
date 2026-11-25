@@ -979,6 +979,8 @@ export class OpenCodeServer {
           });
         else if (task.childSessionId)
           await api.session.interrupt({ sessionID: task.childSessionId });
+        else if (task.kind === "image" && task.jobId)
+          await api.experimental.job.cancel({ id: task.jobId });
       }),
     );
     this.eventRouter.interruptBackgroundTasks(session, "Thread stopped");

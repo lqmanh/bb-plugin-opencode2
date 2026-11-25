@@ -65,10 +65,13 @@ export type InteractionContext = {
   ownPermissionReplies: Set<string>;
 };
 
+export type BackgroundCompletionState =
+  "running" | "completed" | "error" | "cancelled";
+
 export type BackgroundTaskRecord = {
   id: string;
   callId: string;
-  kind: "shell" | "subagent";
+  kind: "shell" | "subagent" | "image";
   startedAt: number;
   settled: boolean;
   item: OpenCodeRecord;
@@ -76,8 +79,19 @@ export type BackgroundTaskRecord = {
   shellId?: string;
   childSessionId?: string;
   outputFile?: string;
+  /** The OpenCode job ID for an image task. */
+  jobId?: string;
+  /** The save stem from an image tool result, without its extension. */
+  imageStem?: string;
   /** A child that may finish without reporting; settle after it goes idle. */
   settleTimer?: ReturnType<typeof setTimeout>;
+};
+
+/** A completed image waiting for delivery to the agent. */
+export type PendingImageReport = {
+  jobId: string;
+  path: string;
+  delivered?: boolean;
 };
 
 /** A native subagent session, shared with background-task support. */
@@ -217,6 +231,10 @@ export type SessionState = {
   pendingBackgroundCompletions: Map<string, OpenCodeRecord>;
   /** Full output files for OpenCode shells, keyed by shell ID. */
   shellOutputFiles: Map<string, string>;
+  /** Image completions waiting to render in the turn that receives them. */
+  pendingImageReports: Map<string, PendingImageReport>;
+  /** Image job IDs whose result row was already emitted. */
+  emittedImageReports: Set<string>;
   /** Synthetic inbox IDs that may wake a parent run. */
   pendingReportIds: Set<string>;
   /** Reports settle rows but do not open a turn until the next user action. */
@@ -228,6 +246,8 @@ export function createSessionBackgroundState(): Pick<
   | "backgroundTasks"
   | "pendingBackgroundCompletions"
   | "shellOutputFiles"
+  | "pendingImageReports"
+  | "emittedImageReports"
   | "pendingReportIds"
   | "suppressReportWake"
 > {
@@ -235,9 +255,31 @@ export function createSessionBackgroundState(): Pick<
     backgroundTasks: new Map(),
     pendingBackgroundCompletions: new Map(),
     shellOutputFiles: new Map(),
+    pendingImageReports: new Map(),
+    emittedImageReports: new Set(),
     pendingReportIds: new Set(),
     suppressReportWake: false,
   };
+}
+
+/** Carry background state when a thread is registered for the same provider session. */
+export function copyBackgroundState(
+  target: SessionState,
+  source: SessionState,
+) {
+  target.backgroundTasks = source.backgroundTasks;
+  target.pendingBackgroundCompletions = source.pendingBackgroundCompletions;
+  target.shellOutputFiles = source.shellOutputFiles;
+  target.pendingImageReports = source.pendingImageReports;
+  target.emittedImageReports = source.emittedImageReports;
+}
+
+export function clearBackgroundState(session: SessionState) {
+  session.backgroundTasks.clear();
+  session.pendingBackgroundCompletions.clear();
+  session.shellOutputFiles.clear();
+  session.pendingImageReports.clear();
+  session.emittedImageReports.clear();
 }
 
 /** Forget pending reports; `suppress` keeps later ones from opening a turn. */

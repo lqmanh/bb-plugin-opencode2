@@ -12,3 +12,13 @@ export function rememberBounded<K, V>(
     map.delete(oldest);
   }
 }
+
+export function rememberBoundedSet<T>(set: Set<T>, value: T, limit: number) {
+  set.delete(value);
+  set.add(value);
+  while (set.size > limit) {
+    const oldest = set.values().next().value;
+    if (oldest === undefined) break;
+    set.delete(oldest);
+  }
+}

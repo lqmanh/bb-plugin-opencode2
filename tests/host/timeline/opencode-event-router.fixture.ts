@@ -303,6 +303,150 @@ export async function subagentReport(
   });
 }
 
+export type ImageStartOptions = {
+  callId?: string;
+  jobId?: string;
+  prompt?: string;
+  path?: string;
+  success?: boolean;
+  fail?: boolean;
+};
+
+export async function startImageTask(
+  event: Event,
+  options: ImageStartOptions = {},
+) {
+  const callId = options.callId ?? "call_image";
+  const jobId = options.jobId ?? "image_1";
+  await event("session.tool.input.started", {
+    id: callId,
+    name: "generate_image",
+  });
+  await event("session.tool.called", {
+    id: callId,
+    input: { prompt: options.prompt ?? "A cat" },
+  });
+  const succeed = async () =>
+    event("session.tool.success", {
+      id: callId,
+      content: [{ type: "text", text: "Image job started." }],
+      metadata: {
+        jobID: jobId,
+        path: options.path ?? "/tmp/image",
+        model: "mock/image",
+      },
+    });
+  if (options.fail) {
+    await event("session.tool.failed", {
+      id: callId,
+      error: { message: "Image generation denied" },
+    });
+  } else if (options.success ?? true) {
+    await succeed();
+  }
+  return { callId, jobId, succeed };
+}
+
+export type ImageReportOptions = {
+  jobId?: string;
+  state?: "completed" | "error" | "cancelled";
+  path?: string;
+  text?: string;
+  inboxId?: string;
+};
+
+export async function imageReport(
+  event: Event,
+  options: ImageReportOptions = {},
+) {
+  const jobId = options.jobId ?? "image_1";
+  const state = options.state ?? "completed";
+  const path = options.path ?? "/tmp/image.png";
+  const inboxId = options.inboxId ?? `msg_${jobId}_${state}`;
+  const text =
+    options.text ??
+    `Image request finished. Saved image: ${path} (mock/image).`;
+  await enqueueSynthetic(event, inboxId, {
+    text: backgroundResult(`kind="image" id="${jobId}" state="${state}"`, text),
+    metadata: {
+      source: "generate_image",
+      jobID: jobId,
+      state,
+      path: path.replace(/\.[^.]+$/, ""),
+      model: "mock/image",
+    },
+  });
+  return { inboxId };
+}
+
+export async function deliverImageReport(event: Event, inboxId: string) {
+  await event("session.inbox.delivered", { inboxID: inboxId });
+}
+
+export function imageHistoryMessage(
+  options: { jobId?: string; path?: string; inboxId?: string } = {},
+) {
+  const jobId = options.jobId ?? "image_1";
+  const path = options.path ?? "/tmp/image.png";
+  return {
+    type: "synthetic",
+    id: options.inboxId ?? `msg_${jobId}_completed`,
+    text: backgroundResult(
+      `kind="image" id="${jobId}" state="completed"`,
+      `Image request finished. Saved image: ${path} (mock/image).`,
+    ),
+    metadata: {
+      source: "generate_image",
+      jobID: jobId,
+      state: "completed",
+      path: path.replace(/\.[^.]+$/, ""),
+    },
+  };
+}
+
+function itemDelta(
+  emitted: OpenCodeRecord[],
+  kind: "item.open" | "item.close",
+  type: string,
+  from = 0,
+  match: (item: OpenCodeRecord | undefined) => boolean = () => true,
+) {
+  return emitted
+    .slice(from)
+    .find(
+      (delta) =>
+        delta.kind === kind && delta.item?.type === type && match(delta.item),
+    );
+}
+
+export function imageTaskOpen(emitted: OpenCodeRecord[]) {
+  return itemDelta(
+    emitted,
+    "item.open",
+    "backgroundTask",
+    0,
+    (item) => item?.taskType === "local_image",
+  );
+}
+
+export function imageTaskClose(emitted: OpenCodeRecord[], from = 0) {
+  return itemDelta(
+    emitted,
+    "item.close",
+    "backgroundTask",
+    from,
+    (item) => item?.taskType === "local_image",
+  );
+}
+
+export function imageRowOpen(emitted: OpenCodeRecord[]) {
+  return itemDelta(emitted, "item.open", "imageGeneration");
+}
+
+export function imageRowClose(emitted: OpenCodeRecord[], from = 0) {
+  return itemDelta(emitted, "item.close", "imageGeneration", from);
+}
+
 export type ShellCompletionOptions = {
   via: "synthetic" | "session.shell.ended" | "shell.exited";
   shellId?: string;
@@ -349,26 +493,13 @@ export async function completeShell(
 }
 
 export function backgroundTaskOpen(emitted: OpenCodeRecord[]) {
-  return emitted.find(
-    (delta) =>
-      delta.kind === "item.open" && delta.item?.type === "backgroundTask",
-  );
+  return itemDelta(emitted, "item.open", "backgroundTask");
 }
 
 export function backgroundTaskClose(emitted: OpenCodeRecord[], from = 0) {
-  return emitted
-    .slice(from)
-    .find(
-      (delta) =>
-        delta.kind === "item.close" && delta.item?.type === "backgroundTask",
-    );
+  return itemDelta(emitted, "item.close", "backgroundTask", from);
 }
 
 export function delegationClose(emitted: OpenCodeRecord[], from = 0) {
-  return emitted
-    .slice(from)
-    .find(
-      (delta) =>
-        delta.kind === "item.close" && delta.item?.type === "delegation",
-    );
+  return itemDelta(emitted, "item.close", "delegation", from);
 }

@@ -36,7 +36,10 @@ import {
   omitNullTurnId,
   providerFailureDeltas,
 } from "./timeline.ts";
-import { rememberBounded } from "../../shared/collections.ts";
+import {
+  rememberBounded,
+  rememberBoundedSet,
+} from "../../shared/collections.ts";
 import { errorMessage } from "../../shared/errors.ts";
 import {
   backgroundRunMetadata,
@@ -49,9 +52,14 @@ import {
   contentText,
   diffFileChanges,
   dynamicToolRow,
+  imageGenerationPresentation,
+  imageGenerationRow,
+  imageToolResult,
   isBackgroundShellInput,
+  isImageTool,
   metadataFileChanges,
   parseBackgroundCompletion,
+  savedImagePath,
   toolRow,
   touchedPaths,
   workspacePath,
@@ -61,6 +69,7 @@ import {
   ARCHIVED_SESSION_MESSAGE,
   DELETED_SESSION_MESSAGE,
   MOVED_SESSION_MESSAGE,
+  clearBackgroundState,
   createInteractionContext,
   createProviderTurn,
   inputRecord,
@@ -74,6 +83,7 @@ import {
   type InteractionContext,
   type OpenCodeApi,
   type OpenCodeRecord,
+  type PendingImageReport,
   type SessionState,
   type UsageTotals,
   usageTotal,
@@ -219,10 +229,22 @@ function childCompletionKey(childId: string) {
   return `child:${childId}`;
 }
 
+function imageCompletionKey(jobId: string) {
+  return `image:${jobId}`;
+}
+
 function completionKey(completion: BackgroundCompletion) {
   return completion.kind === "shell"
     ? shellCompletionKey(completion.shellId ?? completion.id)
-    : childCompletionKey(completion.childId ?? completion.id);
+    : completion.kind === "image"
+      ? imageCompletionKey(completion.jobId ?? completion.id)
+      : childCompletionKey(completion.childId ?? completion.id);
+}
+
+function forgetToolCall(active: ActiveTurn, eventId: string) {
+  active.touchedFiles.delete(eventId);
+  active.pendingInput.delete(eventId);
+  active.pendingTools.delete(eventId);
 }
 
 function taskCompletion(
@@ -550,13 +572,20 @@ export class OpenCodeEventRouter {
   ) {
     const existing = this.backgroundTaskForCall(session, callId);
     if (existing) return existing;
-    const kind = isSubagentTool(name) ? "subagent" : "shell";
+    const kind = isSubagentTool(name)
+      ? "subagent"
+      : isImageTool(name)
+        ? "image"
+        : "shell";
     const description = backgroundTaskDescription(name, input);
     const item = backgroundTaskItem({
       familyId: backgroundTaskKey(callId),
       taskType: backgroundTaskTaskType(name),
       description,
     });
+    const presentation = isImageTool(name)
+      ? imageGenerationPresentation(description)
+      : undefined;
     const task: BackgroundTaskRecord = {
       id: backgroundTaskKey(callId),
       callId,
@@ -576,6 +605,7 @@ export class OpenCodeEventRouter {
         kind: "item.open",
         key: itemKey(task.id, "tool"),
         item,
+        ...(presentation ? { presentation } : {}),
         providerTurnId,
       },
     ]);
@@ -601,6 +631,7 @@ export class OpenCodeEventRouter {
     task: BackgroundTaskRecord,
     metadata: unknown,
   ) {
+    if (task.kind === "image") return;
     const raw = inputRecord(metadata);
     if (task.kind === "shell") {
       const shellId = stringValue(raw.shellID);
@@ -645,12 +676,15 @@ export class OpenCodeEventRouter {
     const keys = [
       task.shellId ? shellCompletionKey(task.shellId) : undefined,
       task.childSessionId ? childCompletionKey(task.childSessionId) : undefined,
+      task.jobId ? imageCompletionKey(task.jobId) : undefined,
     ].filter((key): key is string => key !== undefined);
     for (const key of keys) {
       const completion = map.get(key) as BackgroundCompletion | undefined;
       if (!completion) continue;
       map.delete(key);
-      this.settleBackgroundTask(session, task, completion);
+      if (completion.kind === "image")
+        this.settleImageTask(session, task, completion.state, completion.text);
+      else this.settleBackgroundTask(session, task, completion);
       return;
     }
   }
@@ -774,9 +808,7 @@ export class OpenCodeEventRouter {
       for (const id of task.interaction.opened.keys())
         this.parentRefs.delete(id);
     }
-    session.backgroundTasks.clear();
-    session.pendingBackgroundCompletions.clear();
-    session.shellOutputFiles.clear();
+    clearBackgroundState(session);
   }
 
   clearSession(session: SessionState) {
@@ -815,6 +847,176 @@ export class OpenCodeEventRouter {
     }
     if (task) this.settleBackgroundTask(session, task, completion);
     else this.bufferBackgroundCompletion(session, completion);
+  }
+
+  private imageTaskForJobId(session: SessionState, jobId: string) {
+    for (const task of session.backgroundTasks.values())
+      if (task.kind === "image" && task.jobId === jobId) return task;
+    return undefined;
+  }
+
+  private handleImageReport(
+    session: SessionState,
+    completion: BackgroundCompletion,
+    inboxId: string,
+  ) {
+    this.absorbImageReport(session, completion, inboxId, {
+      delivered: false,
+      queueWithoutTask: true,
+    });
+  }
+
+  private absorbImageReport(
+    session: SessionState,
+    completion: BackgroundCompletion,
+    key: string,
+    options: {
+      delivered: boolean;
+      skipSettled?: boolean;
+      queueWithoutTask?: boolean;
+    },
+  ) {
+    if (completion.kind !== "image" || completion.state === "running") return;
+    const jobId = completion.jobId ?? completion.id;
+    const task = this.imageTaskForJobId(session, jobId);
+    if (!task) {
+      this.bufferBackgroundCompletion(session, completion);
+      if (
+        options.queueWithoutTask &&
+        completion.state === "completed" &&
+        completion.path
+      )
+        this.queueImageReport(session, key, completion, options.delivered);
+      return;
+    }
+    if (task.settled && options.skipSettled) return;
+    if (!task.settled)
+      this.settleImageTask(session, task, completion.state, completion.text);
+    if (completion.state === "completed" && completion.path)
+      this.queueImageReport(session, key, completion, options.delivered);
+  }
+
+  private settleImageTask(
+    session: SessionState,
+    task: BackgroundTaskRecord,
+    state: BackgroundCompletion["state"],
+    text?: string,
+  ) {
+    if (state === "running" || task.settled) return;
+    const message =
+      state === "completed"
+        ? "Image generated"
+        : text ||
+          (state === "cancelled"
+            ? "Image generation interrupted"
+            : "Image generation failed");
+    this.settleBackgroundTask(
+      session,
+      task,
+      taskCompletion(task, state, message),
+    );
+  }
+
+  private queueImageReport(
+    session: SessionState,
+    key: string,
+    completion: BackgroundCompletion,
+    delivered: boolean,
+  ) {
+    const jobId = completion.jobId ?? completion.id;
+    if (session.emittedImageReports.has(jobId) || !completion.path) return;
+    const existing = session.pendingImageReports.get(key);
+    const resolvedDelivered =
+      existing !== undefined ? existing.delivered === true : delivered;
+    rememberBounded(
+      session.pendingImageReports,
+      key,
+      {
+        jobId,
+        path: completion.path,
+        ...(resolvedDelivered ? { delivered: true } : {}),
+      },
+      100,
+    );
+  }
+
+  private deliverImageReport(session: SessionState, inboxId: string) {
+    const report = session.pendingImageReports.get(inboxId);
+    if (report) report.delivered = true;
+  }
+
+  private flushImageReports(session: SessionState) {
+    const active = session.active;
+    if (!active || active.finishing || session.pendingImageReports.size === 0)
+      return;
+    for (const [key, report] of [...session.pendingImageReports]) {
+      if (!report.delivered) continue;
+      if (session.emittedImageReports.has(report.jobId)) {
+        session.pendingImageReports.delete(key);
+        continue;
+      }
+      this.emitImageReport(session, active, report);
+      session.pendingImageReports.delete(key);
+    }
+  }
+
+  private emitImageReport(
+    session: SessionState,
+    active: ActiveTurn,
+    report: PendingImageReport,
+  ) {
+    const task = this.imageTaskForJobId(session, report.jobId);
+    const prompt = stringValue(task?.item.description);
+    const row = imageGenerationRow({ prompt });
+    const item: RecordValue = { ...row.item, path: report.path };
+    const key = itemKey(report.jobId, "image");
+    const providerTurnId = active.interaction.providerTurnId;
+    this.emit(session.bbThreadId, [
+      {
+        kind: "item.open",
+        key,
+        item: row.item,
+        presentation: row.presentation,
+        providerTurnId,
+      },
+      {
+        kind: "item.close",
+        key,
+        status: "completed",
+        item,
+        presentation: row.presentation,
+        providerTurnId,
+      },
+    ]);
+    rememberBoundedSet(session.emittedImageReports, report.jobId, 100);
+  }
+
+  private finishImageTask(
+    session: SessionState,
+    active: ActiveTurn,
+    eventId: string,
+    task: BackgroundTaskRecord,
+    failure: string | undefined,
+    data: OpenCodeRecord,
+  ) {
+    forgetToolCall(active, eventId);
+    if (failure !== undefined) {
+      this.settleImageTask(session, task, "error", failure);
+      return;
+    }
+    const { jobId, stem } = imageToolResult(data.metadata, data.output);
+    if (stem) task.imageStem = stem;
+    if (!jobId) {
+      this.settleImageTask(
+        session,
+        task,
+        "error",
+        "Image generation started without a job ID.",
+      );
+      return;
+    }
+    task.jobId = jobId;
+    this.applyPendingBackgroundCompletion(session, task);
   }
 
   private openProviderTurn(session: SessionState) {
@@ -1150,7 +1352,10 @@ export class OpenCodeEventRouter {
     const unsettled = [...session.backgroundTasks.values()].filter(
       (task) => !task.settled,
     );
-    if (unsettled.length === 0) return;
+    if (unsettled.length === 0) {
+      this.flushImageReports(session);
+      return;
+    }
     const api = await this.api();
 
     // One session.active read per reconcile, shared (including a failure).
@@ -1158,13 +1363,128 @@ export class OpenCodeEventRouter {
     const active = () =>
       (activeSessions ??= api.session.active().then(inputRecord));
 
+    const imageTasks: BackgroundTaskRecord[] = [];
+    for (const task of unsettled)
+      if (task.kind === "image") imageTasks.push(task);
+    const images = imageTasks.length
+      ? this.reconcileImageTasks(session, imageTasks, api).catch(() => {})
+      : undefined;
     for (const task of unsettled) {
+      if (task.kind === "image") continue;
       try {
         if (task.kind === "shell")
           await this.reconcileShellTask(session, task, api);
         else await this.reconcileSubagentTask(session, task, api, active);
       } catch {
         // A failed session.active read leaves only this task open.
+      }
+    }
+    if (images) await images;
+    this.flushImageReports(session);
+  }
+
+  private async reconcileImageTasks(
+    session: SessionState,
+    tasks: BackgroundTaskRecord[],
+    api: OpenCodeClient,
+  ) {
+    const needsAssistant = tasks.some((task) => !task.jobId);
+    const [assistants, synthetics, jobs] = await Promise.allSettled([
+      needsAssistant
+        ? api.message.list({
+            sessionID: session.providerThreadId,
+            type: "assistant",
+            limit: 100,
+            order: "desc",
+          })
+        : Promise.resolve({ data: [] as OpenCodeRecord[] }),
+      api.message.list({
+        sessionID: session.providerThreadId,
+        type: "synthetic",
+        limit: 100,
+        order: "desc",
+      }),
+      api.experimental.job.list({
+        sessionID: session.providerThreadId,
+        kind: "image",
+      }),
+    ]);
+
+    if (needsAssistant && assistants.status === "fulfilled") {
+      const byCall = new Map(tasks.map((task) => [task.callId, task]));
+      for (const message of assistants.value.data) {
+        const content = inputRecord(message).content;
+        if (!Array.isArray(content)) continue;
+        for (const part of content) {
+          const record = inputRecord(part);
+          if (
+            record.type !== "tool" ||
+            !isImageTool(stringValue(record.name) ?? "")
+          )
+            continue;
+          const task = byCall.get(stringValue(record.id) ?? "");
+          if (!task) continue;
+          const state = inputRecord(record.state);
+          if (state.status === "completed") {
+            const result = imageToolResult(state.metadata);
+            if (result.jobId) task.jobId = result.jobId;
+            if (result.stem) task.imageStem = result.stem;
+          } else if (state.status === "error" && !task.settled) {
+            const error = inputRecord(state.error);
+            this.settleImageTask(
+              session,
+              task,
+              "error",
+              stringValue(error.message) ?? "Image generation failed",
+            );
+          }
+        }
+      }
+    }
+
+    for (const task of tasks) {
+      if (!task.jobId || task.settled) continue;
+      this.applyPendingBackgroundCompletion(session, task);
+    }
+
+    if (synthetics.status === "fulfilled") {
+      for (const message of synthetics.value.data) {
+        const report = parseBackgroundCompletion(message);
+        if (report?.kind !== "image" || report.state === "running") continue;
+        const inboxId =
+          stringValue(inputRecord(message).id) ??
+          `job:${report.jobId ?? report.id}`;
+        this.absorbImageReport(session, report, inboxId, {
+          delivered: true,
+          skipSettled: true,
+        });
+      }
+    }
+
+    if (jobs.status === "fulfilled") {
+      for (const job of jobs.value) {
+        if (job.kind !== "image" || job.status === "running") continue;
+        if (session.emittedImageReports.has(job.id)) continue;
+        const task = this.imageTaskForJobId(session, job.id);
+        if (!task || task.settled) continue;
+        const state = completionState(job.status);
+        const path =
+          state === "completed"
+            ? savedImagePath(task.imageStem ?? job.path, session.cwd)
+            : undefined;
+        this.absorbImageReport(
+          session,
+          {
+            kind: "image",
+            id: job.id,
+            jobId: job.id,
+            state,
+            text: "",
+            ...(path ? { path } : {}),
+          },
+          `job:${job.id}`,
+          { delivered: true, skipSettled: true },
+        );
       }
     }
   }
@@ -1309,7 +1629,9 @@ export class OpenCodeEventRouter {
         if (inboxId && !session.suppressReportWake)
           session.pendingReportIds.add(inboxId);
         const report = parseBackgroundCompletion(item.payload);
-        if (report) this.handleBackgroundReport(session, report);
+        if (report?.kind === "image")
+          this.handleImageReport(session, report, inboxId ?? report.id);
+        else if (report) this.handleBackgroundReport(session, report);
       } else if (active) this.adoptCommandCheckpoint(active, inboxId);
     }
     if (
@@ -1317,7 +1639,12 @@ export class OpenCodeEventRouter {
       eventType === "session.inbox.cancelled"
     ) {
       const inboxId = stringValue(data.inboxID);
-      if (inboxId) session.pendingReportIds.delete(inboxId);
+      if (inboxId) {
+        session.pendingReportIds.delete(inboxId);
+        if (eventType === "session.inbox.delivered")
+          this.deliverImageReport(session, inboxId);
+        else session.pendingImageReports.delete(inboxId);
+      }
     }
     if (
       eventType === "session.execution.started" &&
@@ -1327,6 +1654,11 @@ export class OpenCodeEventRouter {
       !session.terminalError
     )
       active = this.openProviderTurn(session);
+    if (
+      eventType === "session.execution.started" ||
+      eventType === "session.inbox.delivered"
+    )
+      this.flushImageReports(session);
     if (
       childId &&
       (eventType === "session.tool.progress" ||
@@ -1513,9 +1845,10 @@ export class OpenCodeEventRouter {
         const input = inputRecord(
           data.input ?? parseInputText(active.pendingInput.get(eventId)),
         );
-        // Subagents always run in the background.
+        // Subagents and image jobs always run in the background.
         const background =
           (isSubagentTool(name) && !session.disableSubagents) ||
+          isImageTool(name) ||
           isBackgroundShellInput(name, input);
         if (background) {
           this.openBackgroundTask(
@@ -1579,9 +1912,7 @@ export class OpenCodeEventRouter {
       // handleQuestion may already have closed + answered this call.
       if (active.interaction.settledTools.has(eventId)) {
         active.interaction.settledTools.delete(eventId);
-        active.touchedFiles.delete(eventId);
-        active.pendingInput.delete(eventId);
-        active.pendingTools.delete(eventId);
+        forgetToolCall(active, eventId);
         return;
       }
       const name =
@@ -1593,10 +1924,25 @@ export class OpenCodeEventRouter {
       );
       const output = contentText(data.content);
       const error = inputRecord(data.error);
+      if (task?.kind === "image") {
+        this.finishImageTask(
+          session,
+          active,
+          eventId,
+          task,
+          event.type === "session.tool.failed"
+            ? toolFailureError(
+                name,
+                session.disableSubagents,
+                stringValue(error.message),
+              )
+            : undefined,
+          data,
+        );
+        return;
+      }
       if (task) {
-        active.touchedFiles.delete(eventId);
-        active.pendingInput.delete(eventId);
-        active.pendingTools.delete(eventId);
+        forgetToolCall(active, eventId);
         if (event.type === "session.tool.failed") {
           this.settleBackgroundTask(
             session,

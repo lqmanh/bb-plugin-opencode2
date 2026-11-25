@@ -473,6 +473,47 @@ test("parses background completion reports", () => {
   assert.equal(parseBackgroundCompletion({ text: "plain" }), undefined);
 });
 
+test("parses image generation completion reports", () => {
+  assert.deepEqual(
+    parseBackgroundCompletion({
+      text: '<background-result kind="image" id="image_1" state="completed">\nImage request finished. Saved image: /tmp/cat.png (mock/image).\n</background-result>',
+      metadata: {
+        source: "generate_image",
+        jobID: "image_1",
+        state: "completed",
+        path: "/tmp/cat",
+      },
+    }),
+    {
+      kind: "image",
+      id: "image_1",
+      jobId: "image_1",
+      state: "completed",
+      text: "Image request finished. Saved image: /tmp/cat.png (mock/image).",
+      path: "/tmp/cat.png",
+    },
+  );
+
+  assert.deepEqual(
+    parseBackgroundCompletion({
+      text: '<background-result kind="image" id="image_2" state="error">\nImage request failed for /tmp/dog: rate limited\n</background-result>',
+      metadata: {
+        source: "generate_image",
+        jobID: "image_2",
+        state: "error",
+        path: "/tmp/dog",
+      },
+    }),
+    {
+      kind: "image",
+      id: "image_2",
+      jobId: "image_2",
+      state: "error",
+      text: "Image request failed for /tmp/dog: rate limited",
+    },
+  );
+});
+
 test("emits backgroundTask usage only when all three fields are available", () => {
   assert.equal(backgroundTaskUsage(undefined, 100, 200), undefined);
   assert.deepEqual(

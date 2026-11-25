@@ -36,6 +36,7 @@ import {
 } from "./session-teardown.ts";
 import {
   ARCHIVED_SESSION_MESSAGE,
+  copyBackgroundState,
   createSessionBackgroundState,
   inputRecord,
   parsePermissionMode,
@@ -266,10 +267,7 @@ export async function registerSession(session: SessionState) {
     session.usage = previous.usage;
     session.usageCost = previous.usageCost;
     session.lastUsage = previous.lastUsage;
-    session.backgroundTasks = previous.backgroundTasks;
-    session.pendingBackgroundCompletions =
-      previous.pendingBackgroundCompletions;
-    session.shellOutputFiles = previous.shellOutputFiles;
+    copyBackgroundState(session, previous);
   } else if (previous) {
     openCodeServer.clearSession(previous);
   }

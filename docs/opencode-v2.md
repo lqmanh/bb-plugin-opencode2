@@ -57,6 +57,13 @@ that OpenCode backgrounds is closed and replaced by one task row. Fast
 completions are buffered until the shell or child ID is known; duplicate and
 late completions are ignored.
 
+`generate_image` uses the same task row: one thread-scoped `backgroundTask`
+(`taskType: local_image`) survives the spawning turn; when its synthetic report
+is delivered, a turn-scoped `imageGeneration` row shows the prompt and exact
+saved path. Stop cancels the job and closes the task row interrupted; duplicate
+reports add no row. Reconnect settles from synthetic history and
+`experimental.job.list`, with assistant history recovering a missed job ID.
+
 After a reconnect, and when a thread starts, resumes, or forks, unsettled tasks
 reconcile per task. Shell tasks use `shell.get` for terminal status and exit;
 `shell.output` supplies the summary when available. A running shell stays open.
@@ -250,7 +257,8 @@ minor releases. Used APIs have no fallback; check them on every OpenCode bump.
 | ---------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
 | `experimental.mcp.add`, `remove`                                                                                                   | Used     | Register and remove the per-thread dynamic-tools MCP server.                                                       |
 | `experimental.session.instructions.entry.put`, `remove`                                                                            | Used     | Install BB instructions.                                                                                           |
-| `experimental.job.list`                                                                                                            | Excluded | Finished jobs leave the list once their completion is delivered; `shell.get` / `session.get` cover reconciliation. |
+| `experimental.job.list`                                                                                                            | Used     | Confirms terminal image jobs after a reconnect; finished jobs leave the list once delivered, so history is primary |
+| `experimental.job.cancel`                                                                                                          | Used     | Cancels a running image job when the thread stops.                                                                 |
 | `experimental.mcp.*` (other)                                                                                                       | Excluded | Management UI not needed.                                                                                          |
 | `experimental.config.update`                                                                                                       | Excluded | Only accepts `shell`; the global config is edited directly.                                                        |
 | `experimental.usage.limits`                                                                                                        | Excluded | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead.                                            |
@@ -267,6 +275,10 @@ minor releases. Used APIs have no fallback; check them on every OpenCode bump.
   its edits.
 - Background task rows do not survive a worker restart; BB settles them as
   interrupted and the plugin does not recreate them.
+- An image task stays open after a reconnect when both its history report and
+  `experimental.job.list` entry are gone.
+- Image display from OpenCode's default tmp `images/<session>/` save location is
+  unverified end to end; no image model was available.
 - Background shells survive turn handoffs but not `opencode service restart` or
   `stop` (#62978); a vanished shell settles as stopped without its exit code or
   output.
