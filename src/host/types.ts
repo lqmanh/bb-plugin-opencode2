@@ -87,10 +87,15 @@ export type BackgroundTaskRecord = {
   settleTimer?: ReturnType<typeof setTimeout>;
 };
 
-/** A completed image waiting for delivery to the agent. */
+/** A terminal image waiting for delivery to the agent. */
 export type PendingImageReport = {
   jobId: string;
-  path: string;
+  state: "completed" | "error";
+  /** The exact saved file for a completed report. */
+  path?: string;
+  /** The save stem an error report carries in its metadata. */
+  stem?: string;
+  error?: string;
   delivered?: boolean;
 };
 

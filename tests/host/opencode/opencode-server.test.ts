@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
+import type { ExperimentalJobListInput } from "@opencode/client";
 import {
   OpenCodeServer,
   sessions,
@@ -381,10 +382,12 @@ test("backgrounds the OpenCode session for a live or persisted thread", async ()
   assert.deepEqual(calls, ["ses_live"]);
 });
 
-test("stops running background shells, child sessions, and image jobs once", async () => {
+test("stops running background tasks and image jobs once", async () => {
   const removed: string[] = [];
   const interrupted: string[] = [];
   const canceled: string[] = [];
+  const listed: ExperimentalJobListInput[] = [];
+  let imageLists = 0;
   const closed: string[] = [];
   const server = new OpenCodeServer();
   const tasks = new Map([
@@ -403,15 +406,6 @@ test("stops running background shells, child sessions, and image jobs once", asy
         id: "bg:child",
         kind: "subagent",
         childSessionId: "ses_child",
-        settled: false,
-      },
-    ],
-    [
-      "bg:image",
-      {
-        id: "bg:image",
-        kind: "image",
-        jobId: "image_1",
         settled: false,
       },
     ],
@@ -434,6 +428,12 @@ test("stops running background shells, child sessions, and image jobs once", asy
       },
       experimental: {
         job: {
+          list: async (input: ExperimentalJobListInput) => {
+            listed.push(input);
+            return imageLists++ === 0
+              ? [{ id: "image_1" }, { id: "image_code" }]
+              : [];
+          },
           cancel: async ({ id }: { id: string }) => {
             canceled.push(id);
           },
@@ -442,6 +442,7 @@ test("stops running background shells, child sessions, and image jobs once", asy
     }),
     eventRouter: {
       interruptBackgroundTasks: (_session: SessionState, reason: string) => {
+        if ([...tasks.values()].every((task) => task.settled)) return;
         closed.push(reason);
         for (const task of tasks.values()) task.settled = true;
       },
@@ -449,11 +450,20 @@ test("stops running background shells, child sessions, and image jobs once", asy
   });
 
   await server.stopBackgroundTasks(session);
+  await server.cancelImageJobs(session);
   await server.stopBackgroundTasks(session);
+  await server.cancelImageJobs(session);
 
   assert.deepEqual(removed, ["shell_1"]);
   assert.deepEqual(interrupted, ["ses_child"]);
-  assert.deepEqual(canceled, ["image_1"]);
+  const listInput = {
+    sessionID: "ses_parent",
+    kind: "image",
+    status: "running",
+    descendants: true,
+  };
+  assert.deepEqual(listed, [listInput, listInput]);
+  assert.deepEqual(canceled, ["image_1", "image_code"]);
   assert.deepEqual(closed, ["Thread stopped"]);
 });
 

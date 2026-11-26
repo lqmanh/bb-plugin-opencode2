@@ -963,11 +963,27 @@ export class OpenCodeServer {
     return { ok: true };
   }
 
+  async cancelImageJobs(session: SessionState): Promise<void> {
+    try {
+      const api = await this.api();
+      const jobs = await api.experimental.job.list({
+        sessionID: session.providerThreadId,
+        kind: "image",
+        status: "running",
+        descendants: true,
+      });
+      await Promise.allSettled(
+        jobs.map((job) => api.experimental.job.cancel({ id: job.id })),
+      );
+    } catch {
+      // Best effort; a failed list must not block Stop.
+    }
+  }
+
   async stopBackgroundTasks(session: SessionState): Promise<void> {
     const tasks = [...session.backgroundTasks.values()].filter(
       (task) => !task.settled,
     );
-    if (tasks.length === 0) return;
     const api = await this.api().catch(() => undefined);
     await Promise.allSettled(
       tasks.map(async (task) => {
@@ -979,8 +995,6 @@ export class OpenCodeServer {
           });
         else if (task.childSessionId)
           await api.session.interrupt({ sessionID: task.childSessionId });
-        else if (task.kind === "image" && task.jobId)
-          await api.experimental.job.cancel({ id: task.jobId });
       }),
     );
     this.eventRouter.interruptBackgroundTasks(session, "Thread stopped");

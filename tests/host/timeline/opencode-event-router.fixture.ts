@@ -272,6 +272,34 @@ function backgroundResult(attributes: string, text: string) {
   return `<background-result ${attributes}>\n${text}\n</background-result>`;
 }
 
+function imageSyntheticMessage(input: {
+  state: "completed" | "error";
+  path: string;
+  inboxId: string;
+}) {
+  const jobId = "image_1";
+  const stem = input.path.replace(/\.[^.]+$/, "");
+  const text =
+    input.state === "completed"
+      ? `Image request finished. Saved image: ${input.path} (mock/image).`
+      : `Image request failed for ${stem}: mock failure.`;
+  return {
+    type: "synthetic",
+    id: input.inboxId,
+    text: backgroundResult(
+      `kind="image" id="${jobId}" state="${input.state}"`,
+      text,
+    ),
+    metadata: {
+      source: "generate_image",
+      jobID: jobId,
+      state: input.state,
+      path: stem,
+      model: "mock/image",
+    },
+  };
+}
+
 export type SubagentReportOptions = {
   text?: string;
   state?: "running" | "completed" | "error" | "cancelled";
@@ -348,34 +376,22 @@ export async function startImageTask(
 }
 
 export type ImageReportOptions = {
-  jobId?: string;
-  state?: "completed" | "error" | "cancelled";
+  state?: "completed" | "error";
   path?: string;
-  text?: string;
-  inboxId?: string;
 };
 
 export async function imageReport(
   event: Event,
   options: ImageReportOptions = {},
 ) {
-  const jobId = options.jobId ?? "image_1";
   const state = options.state ?? "completed";
   const path = options.path ?? "/tmp/image.png";
-  const inboxId = options.inboxId ?? `msg_${jobId}_${state}`;
-  const text =
-    options.text ??
-    `Image request finished. Saved image: ${path} (mock/image).`;
-  await enqueueSynthetic(event, inboxId, {
-    text: backgroundResult(`kind="image" id="${jobId}" state="${state}"`, text),
-    metadata: {
-      source: "generate_image",
-      jobID: jobId,
-      state,
-      path: path.replace(/\.[^.]+$/, ""),
-      model: "mock/image",
-    },
-  });
+  const inboxId = `msg_image_1_${state}`;
+  await enqueueSynthetic(
+    event,
+    inboxId,
+    imageSyntheticMessage({ state, path, inboxId }),
+  );
   return { inboxId };
 }
 
@@ -384,24 +400,13 @@ export async function deliverImageReport(event: Event, inboxId: string) {
 }
 
 export function imageHistoryMessage(
-  options: { jobId?: string; path?: string; inboxId?: string } = {},
+  options: { path?: string; inboxId?: string } = {},
 ) {
-  const jobId = options.jobId ?? "image_1";
-  const path = options.path ?? "/tmp/image.png";
-  return {
-    type: "synthetic",
-    id: options.inboxId ?? `msg_${jobId}_completed`,
-    text: backgroundResult(
-      `kind="image" id="${jobId}" state="completed"`,
-      `Image request finished. Saved image: ${path} (mock/image).`,
-    ),
-    metadata: {
-      source: "generate_image",
-      jobID: jobId,
-      state: "completed",
-      path: path.replace(/\.[^.]+$/, ""),
-    },
-  };
+  return imageSyntheticMessage({
+    state: "completed",
+    path: options.path ?? "/tmp/image.png",
+    inboxId: options.inboxId ?? "msg_image_1_completed",
+  });
 }
 
 function itemDelta(
@@ -419,32 +424,33 @@ function itemDelta(
     );
 }
 
-export function imageTaskOpen(emitted: OpenCodeRecord[]) {
+function imageTaskDelta(
+  emitted: OpenCodeRecord[],
+  kind: "item.open" | "item.close",
+) {
   return itemDelta(
     emitted,
-    "item.open",
+    kind,
     "backgroundTask",
     0,
     (item) => item?.taskType === "local_image",
   );
 }
 
-export function imageTaskClose(emitted: OpenCodeRecord[], from = 0) {
-  return itemDelta(
-    emitted,
-    "item.close",
-    "backgroundTask",
-    from,
-    (item) => item?.taskType === "local_image",
-  );
+export function imageTaskOpen(emitted: OpenCodeRecord[]) {
+  return imageTaskDelta(emitted, "item.open");
 }
 
-export function imageRowOpen(emitted: OpenCodeRecord[]) {
-  return itemDelta(emitted, "item.open", "imageGeneration");
+export function imageTaskClose(emitted: OpenCodeRecord[]) {
+  return imageTaskDelta(emitted, "item.close");
 }
 
-export function imageRowClose(emitted: OpenCodeRecord[], from = 0) {
-  return itemDelta(emitted, "item.close", "imageGeneration", from);
+export function imageRowOpen(emitted: OpenCodeRecord[], from = 0) {
+  return itemDelta(emitted, "item.open", "imageGeneration", from);
+}
+
+export function imageRowClose(emitted: OpenCodeRecord[]) {
+  return itemDelta(emitted, "item.close", "imageGeneration");
 }
 
 export type ShellCompletionOptions = {

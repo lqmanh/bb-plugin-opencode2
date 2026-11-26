@@ -491,6 +491,7 @@ test("parses image generation completion reports", () => {
       state: "completed",
       text: "Image request finished. Saved image: /tmp/cat.png (mock/image).",
       path: "/tmp/cat.png",
+      stem: "/tmp/cat",
     },
   );
 
@@ -510,6 +511,7 @@ test("parses image generation completion reports", () => {
       jobId: "image_2",
       state: "error",
       text: "Image request failed for /tmp/dog: rate limited",
+      stem: "/tmp/dog",
     },
   );
 });

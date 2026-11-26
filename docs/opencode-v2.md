@@ -57,12 +57,15 @@ that OpenCode backgrounds is closed and replaced by one task row. Fast
 completions are buffered until the shell or child ID is known; duplicate and
 late completions are ignored.
 
-`generate_image` uses the same task row: one thread-scoped `backgroundTask`
-(`taskType: local_image`) survives the spawning turn; when its synthetic report
-is delivered, a turn-scoped `imageGeneration` row shows the prompt and exact
-saved path. Stop cancels the job and closes the task row interrupted; duplicate
-reports add no row. Reconnect settles from synthetic history and
-`experimental.job.list`, with assistant history recovering a missed job ID.
+OpenCode 2.4.2 runs `generate_image` inside Code Mode by default, so only its
+synthetic report reaches BB. A direct top-level call still gets a thread-scoped
+`backgroundTask` (`taskType: local_image`) that survives the spawning turn. A
+completed report adds one turn-scoped `imageGeneration` row with the saved path.
+Without a task row, a completed image row has no prompt and uses the saved file
+name as its title, and an error report adds a failed row with the report's text.
+Stop cancels running image jobs for the session and its descendants. Duplicate
+reports add no row. On reconnect, synthetic history and `experimental.job.list`
+settle a task row, and assistant history recovers a missed job ID.
 
 After a reconnect, and when a thread starts, resumes, or forks, unsettled tasks
 reconcile per task. Shell tasks use `shell.get` for terminal status and exit;
@@ -253,20 +256,20 @@ catalog is invalid, this plugin attaches the skill's `SKILL.md` instead.
 OpenCode's `experimental` namespace holds working APIs that may change between
 minor releases. Used APIs have no fallback; check them on every OpenCode bump.
 
-| API                                                                                                                                | Status   | Notes                                                                                                              |
-| ---------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
-| `experimental.mcp.add`, `remove`                                                                                                   | Used     | Register and remove the per-thread dynamic-tools MCP server.                                                       |
-| `experimental.session.instructions.entry.put`, `remove`                                                                            | Used     | Install BB instructions.                                                                                           |
-| `experimental.job.list`                                                                                                            | Used     | Confirms terminal image jobs after a reconnect; finished jobs leave the list once delivered, so history is primary |
-| `experimental.job.cancel`                                                                                                          | Used     | Cancels a running image job when the thread stops.                                                                 |
-| `experimental.mcp.*` (other)                                                                                                       | Excluded | Management UI not needed.                                                                                          |
-| `experimental.config.update`                                                                                                       | Excluded | Only accepts `shell`; the global config is edited directly.                                                        |
-| `experimental.usage.limits`                                                                                                        | Excluded | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead.                                            |
-| `experimental.session.stats`, `import`, `export`                                                                                   | Excluded | No BB surface.                                                                                                     |
-| `experimental.automation.*`                                                                                                        | Excluded | BB has its own automations.                                                                                        |
-| `experimental.artifacts.*`, `persistentPty.*`                                                                                      | Excluded | No matching BB surface, or overlaps BB terminals.                                                                  |
-| `experimental.generate.text`, `generate.image`, `decisions`, `voice.*`                                                             | Excluded | BB has its own services; not needed.                                                                               |
-| `experimental.integration.wellknown.add`, `file.write/watch/unwatch`, `media.get`, `migration.v1.status`, `session.log/wait/skill` | Excluded | Not needed, or overlaps BB APIs.                                                                                   |
+| API                                                                                                                                | Status   | Notes                                                                                                                |
+| ---------------------------------------------------------------------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| `experimental.mcp.add`, `remove`                                                                                                   | Used     | Register and remove the per-thread dynamic-tools MCP server.                                                         |
+| `experimental.session.instructions.entry.put`, `remove`                                                                            | Used     | Install BB instructions.                                                                                             |
+| `experimental.job.list`                                                                                                            | Used     | Lists image jobs for reconnect and Stop, including descendants; delivered jobs leave the list, so history is primary |
+| `experimental.job.cancel`                                                                                                          | Used     | Cancels a running image job when the thread stops.                                                                   |
+| `experimental.mcp.*` (other)                                                                                                       | Excluded | Management UI not needed.                                                                                            |
+| `experimental.config.update`                                                                                                       | Excluded | Only accepts `shell`; the global config is edited directly.                                                          |
+| `experimental.usage.limits`                                                                                                        | Excluded | Use [opencode-usage](https://github.com/lqmanh/opencode-usage) instead.                                              |
+| `experimental.session.stats`, `import`, `export`                                                                                   | Excluded | No BB surface.                                                                                                       |
+| `experimental.automation.*`                                                                                                        | Excluded | BB has its own automations.                                                                                          |
+| `experimental.artifacts.*`, `persistentPty.*`                                                                                      | Excluded | No matching BB surface, or overlaps BB terminals.                                                                    |
+| `experimental.generate.text`, `generate.image`, `decisions`, `voice.*`                                                             | Excluded | BB has its own services; not needed.                                                                                 |
+| `experimental.integration.wellknown.add`, `file.write/watch/unwatch`, `media.get`, `migration.v1.status`, `session.log/wait/skill` | Excluded | Not needed, or overlaps BB APIs.                                                                                     |
 
 ### Known gaps
 
@@ -275,10 +278,12 @@ minor releases. Used APIs have no fallback; check them on every OpenCode bump.
   its edits.
 - Background task rows do not survive a worker restart; BB settles them as
   interrupted and the plugin does not recreate them.
+- Code Mode images have no running row or prompt, and a missed report is not
+  recovered.
 - An image task stays open after a reconnect when both its history report and
   `experimental.job.list` entry are gone.
 - Image display from OpenCode's default tmp `images/<session>/` save location is
-  unverified end to end; no image model was available.
+  unverified end to end.
 - Background shells survive turn handoffs but not `opencode service restart` or
   `stop` (#62978); a vanished shell settles as stopped without its exit code or
   output.

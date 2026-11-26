@@ -101,6 +101,7 @@ const CHILD_RECONCILE_MAX_CHILDREN = 500;
 const CHILD_RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 /** A child report follows its idle execution event almost immediately. */
 const CHILD_REPORT_GRACE_MS = 1_000;
+const IMAGE_FAILURE_TEXT = "Image generation failed";
 /** A child's terminal execution events and the task state each one implies. */
 const CHILD_SETTLE_STATES: Record<string, BackgroundCompletion["state"]> = {
   "session.execution.succeeded": "completed",
@@ -881,18 +882,14 @@ export class OpenCodeEventRouter {
     const task = this.imageTaskForJobId(session, jobId);
     if (!task) {
       this.bufferBackgroundCompletion(session, completion);
-      if (
-        options.queueWithoutTask &&
-        completion.state === "completed" &&
-        completion.path
-      )
+      if (options.queueWithoutTask)
         this.queueImageReport(session, key, completion, options.delivered);
       return;
     }
     if (task.settled && options.skipSettled) return;
     if (!task.settled)
       this.settleImageTask(session, task, completion.state, completion.text);
-    if (completion.state === "completed" && completion.path)
+    if (completion.state === "completed")
       this.queueImageReport(session, key, completion, options.delivered);
   }
 
@@ -909,7 +906,7 @@ export class OpenCodeEventRouter {
         : text ||
           (state === "cancelled"
             ? "Image generation interrupted"
-            : "Image generation failed");
+            : IMAGE_FAILURE_TEXT);
     this.settleBackgroundTask(
       session,
       task,
@@ -923,8 +920,14 @@ export class OpenCodeEventRouter {
     completion: BackgroundCompletion,
     delivered: boolean,
   ) {
+    // A cancelled job normally sends no notice; ignore a stray report.
+    if (completion.state !== "completed" && completion.state !== "error")
+      return;
     const jobId = completion.jobId ?? completion.id;
-    if (session.emittedImageReports.has(jobId) || !completion.path) return;
+    if (session.emittedImageReports.has(jobId)) return;
+    const path = completion.state === "completed" ? completion.path : undefined;
+    if (completion.state === "completed" && !path) return;
+    const stem = completion.state === "error" ? completion.stem : undefined;
     const existing = session.pendingImageReports.get(key);
     const resolvedDelivered =
       existing !== undefined ? existing.delivered === true : delivered;
@@ -933,7 +936,12 @@ export class OpenCodeEventRouter {
       key,
       {
         jobId,
-        path: completion.path,
+        state: completion.state,
+        ...(path ? { path } : {}),
+        ...(stem ? { stem } : {}),
+        ...(completion.state === "error"
+          ? { error: completion.text || IMAGE_FAILURE_TEXT }
+          : {}),
         ...(resolvedDelivered ? { delivered: true } : {}),
       },
       100,
@@ -967,8 +975,12 @@ export class OpenCodeEventRouter {
   ) {
     const task = this.imageTaskForJobId(session, report.jobId);
     const prompt = stringValue(task?.item.description);
-    const row = imageGenerationRow({ prompt });
-    const item: RecordValue = { ...row.item, path: report.path };
+    const file = report.state === "completed" ? report.path : report.stem;
+    const row = imageGenerationRow({ prompt, file });
+    const completed = report.state === "completed";
+    const item: RecordValue = completed
+      ? { ...row.item, path: report.path ?? null }
+      : { ...row.item, error: report.error || IMAGE_FAILURE_TEXT };
     const key = itemKey(report.jobId, "image");
     const providerTurnId = active.interaction.providerTurnId;
     this.emit(session.bbThreadId, [
@@ -982,7 +994,7 @@ export class OpenCodeEventRouter {
       {
         kind: "item.close",
         key,
-        status: "completed",
+        status: completed ? "completed" : "failed",
         item,
         presentation: row.presentation,
         providerTurnId,
@@ -1435,7 +1447,7 @@ export class OpenCodeEventRouter {
               session,
               task,
               "error",
-              stringValue(error.message) ?? "Image generation failed",
+              stringValue(error.message) ?? IMAGE_FAILURE_TEXT,
             );
           }
         }

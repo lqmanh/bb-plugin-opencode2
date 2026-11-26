@@ -11,9 +11,10 @@ All notable changes to this plugin are documented here. The format follows
 - OpenCode references in the composer's `@` menu.
 - Subagent reports open a BB turn, including one that arrives as its parent turn
   ends. Reports from children stopped by Stop wait for the next user action.
-- OpenCode image generation shows a task row while running, renders the saved
-  image in the turn that receives its report, and settles a missed report on
-  reconnect; Stop cancels the job.
+- OpenCode image generation renders the saved image in the turn that receives
+  its report, shows failed Code Mode images as failed rows, and settles a missed
+  report on reconnect; a direct call also gets a running task row, and Stop
+  cancels running image jobs, including ones started by subagents.
 
 ### Changed
 

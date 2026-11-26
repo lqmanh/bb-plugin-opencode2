@@ -95,7 +95,7 @@ type RecordValue = OpenCodeRecord;
 
 type StopSessionClient = Pick<
   OpenCodeServer,
-  "stopBackgroundTasks" | "finish" | "clearBackgroundTasks"
+  "stopBackgroundTasks" | "cancelImageJobs" | "finish" | "clearBackgroundTasks"
 > & {
   api(): Promise<{
     session: {
@@ -119,11 +119,15 @@ export async function stopSessionForIntent(
   // start a new turn until the user acts again.
   resetReportWake(session, true);
   await client.stopBackgroundTasks(session);
+  await client.cancelImageJobs(session);
   const api = await client.api().catch(() => undefined);
   if (api)
     await api.session
       .interrupt({ sessionID: session.providerThreadId })
       .catch(() => {});
+  // Cancel again for any job the last step started in between, as OpenCode's
+  // own stop does.
+  await client.cancelImageJobs(session);
   await client.finish(session, "interrupted");
 }
 

@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import {
   experimental_fileReadPresentation as nativeFileReadPresentation,
   experimental_planStepsPresentation as planStepsPresentation,
+  experimental_presentationFileName as presentationFileName,
   experimental_presentationTitle as presentationTitle,
   experimental_searchPresentation as searchPresentation,
   experimental_toolPresentation as toolPresentation,
@@ -109,6 +110,8 @@ export type BackgroundCompletion = {
   state: BackgroundCompletionState;
   text: string;
   path?: string;
+  /** The save stem an image report carries in its metadata. */
+  stem?: string;
   exit?: number;
   timeout?: boolean;
 };
@@ -175,9 +178,11 @@ export function parseBackgroundCompletion(
   const text = stringValue(data.text) ?? "";
   const wrapper = splitBackgroundResult(text);
   const shellId = stringValue(metadata.shellID);
-  const jobId = stringValue(metadata.jobID);
   const childId = stringValue(metadata.childID);
   const completionKind = kind === "generate_image" ? "image" : kind;
+  const image =
+    completionKind === "image" ? imageToolResult(metadata) : undefined;
+  const jobId = image?.jobId ?? stringValue(metadata.jobID);
   const id =
     completionKind === "image"
       ? jobId
@@ -189,8 +194,8 @@ export function parseBackgroundCompletion(
     tagAttribute(wrapper?.attributes ?? "", "state") ?? metadata.state,
   );
   const body = wrapper?.body ?? text.trim();
-  const path =
-    completionKind === "image" ? savedImagePathFromReport(body) : undefined;
+  const path = image ? savedImagePathFromReport(body) : undefined;
+  const stem = image?.stem;
   const exit =
     typeof metadata.exit === "number" && Number.isFinite(metadata.exit)
       ? metadata.exit
@@ -204,6 +209,7 @@ export function parseBackgroundCompletion(
     state,
     text: body,
     ...(path ? { path } : {}),
+    ...(stem ? { stem } : {}),
     ...(exit !== undefined ? { exit } : {}),
     ...(metadata.timeout === true ? { timeout: true } : {}),
   };
@@ -259,17 +265,18 @@ export function imageGenerationPresentation(title?: string) {
   );
 }
 
-export function imageGenerationRow(rawInput: unknown) {
-  const prompt = stringValue(inputRecord(rawInput).prompt);
+export function imageGenerationRow(input: { prompt?: string; file?: string }) {
+  const title =
+    input.prompt ?? (input.file ? presentationFileName(input.file) : undefined);
   return {
     item: {
       type: "imageGeneration",
-      prompt: prompt ?? null,
+      prompt: input.prompt ?? null,
       path: null,
       error: null,
       transparentBackground: false,
     },
-    presentation: imageGenerationPresentation(prompt),
+    presentation: imageGenerationPresentation(title),
   };
 }
 
